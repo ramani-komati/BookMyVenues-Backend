@@ -1,0 +1,21 @@
+# Core framework
+Django==6.0.6
+djangorestframework==3.17.1
+
+# Authentication (JWT tokens)
+djangorestframework_simplejwt==5.5.1
+
+# Allow the frontend (different domain) to call this API
+django-cors-headers==4.9.0
+
+# Read database config from one DATABASE_URL string (works locally & on Render)
+dj-database-url==3.1.2
+
+# Load secrets from the .env file
+python-dotenv==1.2.2
+
+# PostgreSQL driver (for Supabase)
+psycopg2-binary==2.9.12
+
+# Production web server (used by Render, not needed locally)
+gunicorn==26.0.0

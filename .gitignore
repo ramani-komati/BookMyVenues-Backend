@@ -1,0 +1,19 @@
+# Secrets — never commit!
+.env
+
+# Virtual environment
+env/
+
+# Local database
+db.sqlite3
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Editor/OS clutter
+.vscode/
+.DS_Store
+
+# Code review graph (local tooling data)
+.code-review-graph/
