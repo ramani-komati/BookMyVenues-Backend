@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     'corsheaders',
     # Our apps
     'accounts',
+    'venues',
 ]
 
 MIDDLEWARE = [
@@ -136,6 +137,25 @@ REST_FRAMEWORK = {
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+}
+
+
+# ---------------------------------------------------------------
+# Logging — print our app's log messages (e.g. admin notifications)
+# to the console, alongside Django's own logs.
+# ---------------------------------------------------------------
+
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler'},
+    },
+    'loggers': {
+        # Everything from our own apps at INFO level and above.
+        'venues': {'handlers': ['console'], 'level': 'INFO'},
+        'accounts': {'handlers': ['console'], 'level': 'INFO'},
+    },
 }
 
 

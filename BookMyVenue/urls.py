@@ -21,4 +21,5 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     # All API routes live under /api/v1/
     path('api/v1/', include('accounts.urls')),
+    path('api/v1/', include('venues.urls')),
 ]
