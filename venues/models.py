@@ -303,3 +303,50 @@ class VenueDraft(models.Model):
 
     def __str__(self):
         return f'Draft {self.id} ({self.vendor})'
+
+
+class Listing(models.Model):
+    """
+    A published venue listing (what the public browses).
+
+    Shares its UUID with the draft it was published from — that is how
+    "resubmit updates, never duplicates" works (contract 3.5).
+
+    The full record the frontend sent (incl. gallery + detail block) is
+    stored as JSON and served back verbatim; a few fields are ALSO
+    extracted into real indexed columns so search/filter stays fast.
+    """
+
+    class Status(models.TextChoices):
+        LIVE = 'live', 'Live'          # visible to the public (auto-approve for now)
+        PENDING = 'pending', 'Pending' # future: waiting for admin review
+
+    id = models.UUIDField(primary_key=True, editable=False)
+    vendor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='listings',
+    )
+    slug = models.SlugField(max_length=220, unique=True)
+    record = models.JSONField(default=dict)
+
+    # Extracted from record purely for fast filtering/search:
+    name = models.CharField(max_length=200, blank=True, default='')
+    category = models.CharField(max_length=50, blank=True, default='')
+    locality = models.CharField(max_length=120, blank=True, default='')
+    pincode = models.CharField(max_length=10, blank=True, default='')
+
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['status']),
+            models.Index(fields=['category']),
+            models.Index(fields=['locality']),
+            models.Index(fields=['pincode']),
+        ]
+
+    def __str__(self):
+        return f'{self.name or self.slug} [{self.status}]'

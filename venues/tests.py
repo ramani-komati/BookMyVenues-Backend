@@ -375,6 +375,176 @@ class DraftPhotoTests(DraftTestBase):
         self.assertEqual(response.status_code, 400)
 
 
+LISTING_RECORD = {
+    'name': 'Grand Palace Hall',
+    'category': 'hall',
+    'locality': 'Indiranagar',
+    'location': 'Indiranagar, Bengaluru',
+    'pincode': '560038',
+    'price': 1200,
+    'unit': 'hour',
+    'meta': '200 guests',
+    'image': 'https://cdn.example/cover.jpg',
+    'gallery': ['https://cdn.example/1.jpg', 'https://cdn.example/2.jpg'],
+    'detail': {
+        'description': 'A lovely hall.',
+        'amenities': ['WiFi', 'AC'],
+        'parking': True,
+        'dining': False,
+        'capacity': '200',
+        'packages': [{'label': 'Gold', 'price': 4999, 'duration': '3 hrs', 'details': 'Decor + DJ'}],
+        'sports': [],
+        'addons': [{'name': 'Photographer', 'price': 2000}],
+        'occasions': ['Wedding'],
+        'contactPhone': '9876543210',
+        'address': '12 MG Road',
+        'mapsLink': 'https://maps.google.com/?q=x',
+    },
+}
+
+
+class ListingTestBase(DraftTestBase):
+    def setUp(self):
+        super().setUp()
+        from django.core.cache import cache
+        cache.clear()  # public views cache for 60s — isolate tests
+        self.draft = self.make_full_draft()
+
+    def publish(self, record=None, **overrides):
+        body = {**(record or LISTING_RECORD), 'id': str(self.draft.id), **overrides}
+        return self.client.post('/api/vendors/me/listings', body, format='json')
+
+
+class PublishListingTests(ListingTestBase):
+    def test_publish_own_draft_creates_live_listing(self):
+        response = self.publish()
+        self.assertEqual(response.status_code, 201)
+        listing = response.data['listing']
+        self.assertEqual(listing['status'], 'live')
+        self.assertEqual(listing['id'], str(self.draft.id))
+
+        from venues.models import Listing
+        row = Listing.objects.get(pk=self.draft.id)
+        self.assertEqual(row.name, 'Grand Palace Hall')
+        self.assertEqual(row.slug, 'grand-palace-hall')
+        self.assertEqual(row.vendor, self.vendor)
+
+    def test_republish_updates_never_duplicates(self):
+        self.publish()
+        response = self.publish(name='Renamed Palace')
+        self.assertEqual(response.status_code, 201)
+
+        from venues.models import Listing
+        self.assertEqual(Listing.objects.count(), 1)
+        self.assertEqual(Listing.objects.get(pk=self.draft.id).name, 'Renamed Palace')
+
+    def test_update_without_gallery_keeps_old_photos(self):
+        self.publish()
+        record = {**LISTING_RECORD}
+        record.pop('gallery')
+        response = self.publish(record=record)
+        self.assertEqual(
+            response.data['listing']['gallery'], LISTING_RECORD['gallery']
+        )
+
+    def test_cannot_publish_foreign_draft_id(self):
+        foreign_draft = VenueDraft.objects.create(vendor=self.other_vendor)
+        response = self.publish(id=str(foreign_draft.id))
+        self.assertEqual(response.status_code, 403)
+
+    def test_cannot_update_foreign_listing(self):
+        self.publish()
+        self.client.force_authenticate(user=self.other_vendor)
+        response = self.publish()
+        self.assertEqual(response.status_code, 403)
+
+    def test_missing_id_rejected(self):
+        response = self.client.post(
+            '/api/vendors/me/listings', {'name': 'No id'}, format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_customer_forbidden(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.publish()
+        self.assertEqual(response.status_code, 403)
+
+
+class PublicBrowsingTests(ListingTestBase):
+    def setUp(self):
+        super().setUp()
+        self.publish()
+        self.client.force_authenticate(user=None)  # public = no auth
+
+    def clear_cache(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def test_list_returns_live_venues(self):
+        response = self.client.get('/api/venues')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['total'], 1)
+        venue = response.data['venues'][0]
+        self.assertEqual(venue['name'], 'Grand Palace Hall')
+        self.assertEqual(venue['status'], 'live')
+        self.assertNotIn('gallery', venue)  # summaries stay light
+        self.assertNotIn('detail', venue)
+
+    def test_non_live_listing_hidden(self):
+        from venues.models import Listing
+        Listing.objects.update(status=Listing.Status.PENDING)
+        self.clear_cache()
+        response = self.client.get('/api/venues')
+        self.assertEqual(response.data['total'], 0)
+
+    def test_search_by_name(self):
+        response = self.client.get('/api/venues?q=palace')
+        self.assertEqual(response.data['total'], 1)
+        self.clear_cache()
+        response = self.client.get('/api/venues?q=nomatch')
+        self.assertEqual(response.data['total'], 0)
+
+    def test_filter_by_category_and_pincode(self):
+        response = self.client.get('/api/venues?category=hall&pincode=560038')
+        self.assertEqual(response.data['total'], 1)
+        self.clear_cache()
+        response = self.client.get('/api/venues?pincode=999999')
+        self.assertEqual(response.data['total'], 0)
+
+    def test_limit_over_50_rejected(self):
+        response = self.client.get('/api/venues?limit=51')
+        self.assertEqual(response.status_code, 400)
+
+    def test_bad_limit_rejected(self):
+        response = self.client.get('/api/venues?limit=abc')
+        self.assertEqual(response.status_code, 400)
+
+    def test_bad_sort_rejected(self):
+        response = self.client.get('/api/venues?sort=weird')
+        self.assertEqual(response.status_code, 400)
+
+    def test_detail_by_id_and_slug(self):
+        by_id = self.client.get(f'/api/venues/{self.draft.id}')
+        self.assertEqual(by_id.status_code, 200)
+        self.assertIn('gallery', by_id.data)
+        self.assertIn('detail', by_id.data)
+
+        by_slug = self.client.get('/api/venues/grand-palace-hall')
+        self.assertEqual(by_slug.status_code, 200)
+        self.assertEqual(by_slug.data['name'], 'Grand Palace Hall')
+
+    def test_detail_unknown_404(self):
+        response = self.client.get('/api/venues/no-such-venue')
+        self.assertEqual(response.status_code, 404)
+
+    def test_detail_hidden_when_not_live(self):
+        from venues.models import Listing
+        Listing.objects.update(status=Listing.Status.PENDING)
+        self.clear_cache()
+        response = self.client.get('/api/venues/grand-palace-hall')
+        self.assertEqual(response.status_code, 404)
+
+
 class OldWizardRemovedTests(DraftTestBase):
     def test_old_vendor_venues_endpoint_gone(self):
         response = self.client.get('/api/v1/vendor/venues')

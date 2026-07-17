@@ -18,9 +18,11 @@ from rest_framework.views import APIView
 
 from accounts.models import User
 
+from django.utils.text import slugify
+
 from .completion import compute_completion
 from .draft_validation import SECTIONS, validate_section
-from .models import VenueDraft, empty_draft_data
+from .models import Listing, VenueDraft, empty_draft_data
 from .storage import (
     ALLOWED_TYPES,
     MAX_FILE_SIZE,
@@ -224,6 +226,94 @@ class DraftSeedView(APIView):
         draft.status = VenueDraft.Status.DRAFT
         draft.save()
         return Response({'draftId': str(draft.id), 'status': draft.status})
+
+
+def _extract_listing_columns(record):
+    """Pull the searchable fields out of the JSON record."""
+    detail = record.get('detail') or {}
+    return {
+        'name': str(record.get('name') or '')[:200],
+        'category': str(record.get('category') or '')[:50],
+        'locality': str(record.get('locality') or '')[:120],
+        'pincode': str(record.get('pincode') or detail.get('pincode') or '')[:10],
+    }
+
+
+def _unique_slug(name, listing_id):
+    """URL-friendly name, e.g. 'grand-palace-hall'; falls back to the id."""
+    base = slugify(str(name or ''))[:200] or str(listing_id)[:8]
+    slug = base
+    counter = 2
+    while Listing.objects.filter(slug=slug).exclude(pk=listing_id).exists():
+        slug = f'{base}-{counter}'
+        counter += 1
+    return slug
+
+
+class VendorListingPublishView(APIView):
+    """
+    POST /api/vendors/me/listings — publish/update a listing from a
+    submitted draft (contract 3.5).
+
+    - Idempotent by id: publishing the same id again UPDATES the listing.
+    - Owner is stamped from the token, never from the body.
+    - If an update arrives without photos, the existing gallery is kept.
+    - Status is "live" (auto-approve) until an admin review page exists.
+    """
+
+    permission_classes = [IsVendor]
+
+    def post(self, request):
+        record = request.data
+        if not isinstance(record, dict):
+            return _message('Request body must be a listing object.', status.HTTP_400_BAD_REQUEST)
+
+        try:
+            listing_id = uuid.UUID(str(record.get('id')))
+        except (ValueError, TypeError):
+            return _message('A valid listing id (the draftId) is required.', status.HTTP_400_BAD_REQUEST)
+
+        existing = Listing.objects.filter(pk=listing_id).first()
+
+        if existing is not None and existing.vendor_id != request.user.id:
+            return _message('You do not own this listing.', status.HTTP_403_FORBIDDEN)
+
+        if existing is None:
+            # First publish: the id must come from the vendor's OWN draft —
+            # nobody can squat an arbitrary id.
+            if not request.user.drafts.filter(pk=listing_id).exists():
+                return _message(
+                    'You can only publish your own submitted draft.',
+                    status.HTTP_403_FORBIDDEN,
+                )
+
+        record = dict(record)  # never mutate request.data itself
+        # Contract: "keep existing photos if update has none".
+        if existing is not None and not record.get('gallery'):
+            record['gallery'] = existing.record.get('gallery', [])
+
+        record['id'] = str(listing_id)
+        record['status'] = Listing.Status.LIVE
+        columns = _extract_listing_columns(record)
+
+        if existing is not None:
+            for field, value in columns.items():
+                setattr(existing, field, value)
+            existing.record = record
+            existing.status = Listing.Status.LIVE
+            existing.save()
+            listing = existing
+        else:
+            listing = Listing.objects.create(
+                id=listing_id,
+                vendor=request.user,
+                slug=_unique_slug(columns['name'], listing_id),
+                record=record,
+                status=Listing.Status.LIVE,
+                **columns,
+            )
+
+        return Response({'listing': listing.record}, status=status.HTTP_201_CREATED)
 
 
 class DraftPhotoUploadView(APIView):
