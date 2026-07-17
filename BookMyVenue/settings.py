@@ -125,6 +125,9 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
+    # Frontend contract: every error body is {"message": "..."} —
+    # this converts DRF's default {"detail": "..."} shape.
+    'EXCEPTION_HANDLER': 'accounts.exceptions.api_exception_handler',
     # Rate limits (per IP for anonymous requests). Views opt in with
     # throttle_scope — we use scope "auth" on login/register to block
     # password brute-forcing and mass account creation.
@@ -138,6 +141,10 @@ SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
 }
+
+# 2Factor.in API key for OTP SMS delivery. Empty = OTP endpoints will
+# return an error (we never print codes to the console).
+TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 
 
 # ---------------------------------------------------------------

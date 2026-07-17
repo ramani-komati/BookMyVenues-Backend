@@ -19,7 +19,9 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # All API routes live under /api/v1/
+    # Frontend-contract routes (OTP auth, and later drafts/bookings) — /api/
+    path('api/', include('accounts.urls_auth')),
+    # Original routes (health, me, vendor venue wizard) — /api/v1/
     path('api/v1/', include('accounts.urls')),
     path('api/v1/', include('venues.urls')),
 ]

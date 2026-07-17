@@ -58,13 +58,15 @@ class User(AbstractBaseUser, PermissionsMixin):
         VENDOR = 'VENDOR', 'Vendor'
         ADMIN = 'ADMIN', 'Admin'
 
-    name = models.CharField(max_length=150)
+    # blank/null allowed: customers are auto-created at first OTP login,
+    # before we know their name or email.
+    name = models.CharField(max_length=150, blank=True, default='')
     phone = models.CharField(
         max_length=10,
         unique=True,
         validators=[phone_validator],
     )
-    email = models.EmailField(unique=True)
+    email = models.EmailField(unique=True, null=True, blank=True)
     role = models.CharField(
         max_length=10,
         choices=Role.choices,
@@ -85,3 +87,41 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f'{self.name} ({self.phone})'
+
+
+class PhoneOTP(models.Model):
+    """
+    One OTP sent to one phone number.
+
+    Lifecycle:
+      created -> (user enters code) -> verified -> used
+    - "verified" = the code was entered correctly (needed by vendor signup,
+      where registration happens in a separate request after verification).
+    - "used" = consumed forever; a used OTP can never log anyone in again.
+
+    SECURITY: the code itself is stored HASHED (like a password), so even
+    someone reading the database cannot see the OTP.
+    """
+
+    class Purpose(models.TextChoices):
+        USER = 'USER', 'User'        # customer login
+        VENDOR = 'VENDOR', 'Vendor'  # vendor login / signup
+
+    LIFETIME_MINUTES = 5   # code expires 5 minutes after sending
+    MAX_ATTEMPTS = 5       # wrong guesses allowed before the OTP is locked
+    REGISTER_WINDOW_MINUTES = 30  # how long a verified OTP stays valid for vendor signup
+
+    phone = models.CharField(max_length=10, validators=[phone_validator], db_index=True)
+    code_hash = models.CharField(max_length=128)
+    purpose = models.CharField(max_length=10, choices=Purpose.choices)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    verified = models.BooleanField(default=False)
+    used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f'OTP for {self.phone} ({self.purpose})'

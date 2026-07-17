@@ -17,5 +17,8 @@ python-dotenv==1.2.2
 # PostgreSQL driver (for Supabase)
 psycopg2-binary==2.9.12
 
+# Call external HTTP APIs (2Factor.in OTP SMS delivery)
+requests==2.32.5
+
 # Production web server (used by Render, not needed locally)
 gunicorn==26.0.0

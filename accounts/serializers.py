@@ -4,41 +4,48 @@ and Python objects (what Django speaks). They also validate input.
 """
 from rest_framework import serializers
 
-from .models import User
+from .models import User, phone_validator
 
 
 class UserSerializer(serializers.ModelSerializer):
-    """Safe, public view of a user — matches the API contract.
-    Note: password is NOT here, so it can never leak into a response."""
+    """Full safe view of a user (used by /auth/me). No password/OTP here."""
 
     class Meta:
         model = User
-        fields = ['id', 'name', 'phone', 'role']
+        fields = ['id', 'name', 'phone', 'email', 'role']
 
 
-class VendorRegisterSerializer(serializers.ModelSerializer):
-    """
-    Validates registration input {name, phone, email, password}.
+class ProfileSerializer(serializers.ModelSerializer):
+    """Exact {phone, name, email} shape the frontend contract uses for
+    the "user" and "vendor" objects in auth responses."""
 
-    Free validation we inherit from the model automatically:
-    - phone: must be 10 digits (phone_validator) + must be unique
-    - email: must be a valid address + must be unique
-    Each failure becomes a field-level error, e.g.
-    {"phone": ["Phone number must be exactly 10 digits."]}
-    """
+    class Meta:
+        model = User
+        fields = ['phone', 'name', 'email']
 
-    # write_only: accepted as input but never included in responses.
-    password = serializers.CharField(
-        write_only=True,
-        min_length=8,
-        error_messages={'min_length': 'Password must be at least 8 characters.'},
+
+class OTPRequestSerializer(serializers.Serializer):
+    """Input for POST .../auth/otp — just a 10-digit phone."""
+
+    phone = serializers.CharField(validators=[phone_validator])
+
+
+class OTPVerifySerializer(serializers.Serializer):
+    """Input for POST .../auth/verify — phone + the 6-digit code."""
+
+    phone = serializers.CharField(validators=[phone_validator])
+    otp = serializers.RegexField(
+        regex=r'^\d{6}$',
+        error_messages={'invalid': 'OTP must be exactly 6 digits.'},
     )
 
-    class Meta:
-        model = User
-        fields = ['name', 'phone', 'email', 'password']
 
-    def create(self, validated_data):
-        # create_user() hashes the password; role is forced to VENDOR here —
-        # a client can never sneak in role=ADMIN via this endpoint.
-        return User.objects.create_user(role=User.Role.VENDOR, **validated_data)
+class VendorRegisterSerializer(serializers.Serializer):
+    """
+    Input for POST /vendors — creates the vendor account AFTER the
+    phone was OTP-verified (checked in the view, not here).
+    """
+
+    phone = serializers.CharField(validators=[phone_validator])
+    name = serializers.CharField(max_length=150)  # required, non-empty
+    email = serializers.EmailField(required=False, allow_blank=True, allow_null=True)
