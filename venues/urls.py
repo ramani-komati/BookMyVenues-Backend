@@ -14,6 +14,12 @@ urlpatterns = [
         views.DraftSectionView.as_view(),
         name='draft-section',
     ),
+    path('venues/drafts/<uuid:draft_id>/photos', views.DraftPhotoUploadView.as_view(), name='draft-photo-upload'),
+    path(
+        'venues/drafts/<uuid:draft_id>/photos/<str:photo_id>',
+        views.DraftPhotoDeleteView.as_view(),
+        name='draft-photo-delete',
+    ),
     path('venues/drafts/<uuid:draft_id>/submit', views.DraftSubmitView.as_view(), name='draft-submit'),
     path('venues/drafts/<uuid:draft_id>/reopen', views.DraftReopenView.as_view(), name='draft-reopen'),
     path('venues/drafts/<uuid:draft_id>/seed', views.DraftSeedView.as_view(), name='draft-seed'),

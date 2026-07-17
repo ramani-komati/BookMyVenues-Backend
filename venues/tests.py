@@ -2,7 +2,9 @@
 Tests for the venue-registration draft endpoints (contract Group 4).
 """
 import uuid
+from unittest.mock import patch
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -254,6 +256,123 @@ class CompletionTests(DraftTestBase):
         percent, missing = compute_completion(draft)
         self.assertEqual(percent, 100)
         self.assertEqual(missing, [])
+
+
+class DraftPhotoTests(DraftTestBase):
+    """Storage calls are mocked — tests never touch Supabase."""
+
+    def setUp(self):
+        super().setUp()
+        self.draft = VenueDraft.objects.create(vendor=self.vendor)
+        upload_patcher = patch(
+            'venues.views.upload_photo',
+            side_effect=lambda path, content, ct: f'https://cdn.example/{path}',
+        )
+        delete_patcher = patch('venues.views.delete_photo')
+        self.mock_upload = upload_patcher.start()
+        self.mock_delete = delete_patcher.start()
+        self.addCleanup(upload_patcher.stop)
+        self.addCleanup(delete_patcher.stop)
+
+    def upload(self, gallery='venuePhotos', name='hall.jpg',
+               content=b'fake-image-bytes', content_type='image/jpeg'):
+        file = SimpleUploadedFile(name, content, content_type=content_type)
+        return self.client.post(
+            f'/api/venues/drafts/{self.draft.id}/photos',
+            {'file': file, 'gallery': gallery},
+            format='multipart',
+        )
+
+    def test_upload_happy_path(self):
+        response = self.upload()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['gallery'], 'venuePhotos')
+        photo = response.data['photo']
+        self.assertEqual(photo['name'], 'hall.jpg')
+        self.assertTrue(photo['url'].startswith('https://cdn.example/'))
+
+        self.draft.refresh_from_db()
+        self.assertEqual(len(self.draft.data['photos']['venuePhotos']), 1)
+        # First venue photo completes the photos bucket -> 20%.
+        self.assertEqual(response.data['completion'], 20)
+
+    def test_missing_file_rejected(self):
+        response = self.client.post(
+            f'/api/venues/drafts/{self.draft.id}/photos',
+            {'gallery': 'venuePhotos'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_bad_gallery_rejected(self):
+        response = self.upload(gallery='wrongGallery')
+        self.assertEqual(response.status_code, 400)
+
+    def test_non_image_rejected(self):
+        response = self.upload(name='virus.txt', content_type='text/plain')
+        self.assertEqual(response.status_code, 400)
+        self.mock_upload.assert_not_called()
+
+    def test_oversized_image_rejected(self):
+        big = b'x' * (5 * 1024 * 1024 + 1)
+        response = self.upload(content=big)
+        self.assertEqual(response.status_code, 413)
+        self.mock_upload.assert_not_called()
+
+    def test_venue_gallery_cap_is_5(self):
+        for _ in range(5):
+            self.assertEqual(self.upload().status_code, 201)
+        response = self.upload()
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Maximum 5', response.data['message'])
+
+    def test_service_gallery_cap_is_10(self):
+        for _ in range(10):
+            self.assertEqual(self.upload(gallery='serviceImages').status_code, 201)
+        response = self.upload(gallery='serviceImages')
+        self.assertEqual(response.status_code, 400)
+
+    def test_storage_failure_returns_502(self):
+        from venues.storage import StorageError
+        with patch('venues.views.upload_photo', side_effect=StorageError('down')):
+            response = self.upload()
+        self.assertEqual(response.status_code, 502)
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.data['photos']['venuePhotos'], [])
+
+    def test_foreign_draft_404(self):
+        foreign = VenueDraft.objects.create(vendor=self.other_vendor)
+        file = SimpleUploadedFile('a.jpg', b'x', content_type='image/jpeg')
+        response = self.client.post(
+            f'/api/venues/drafts/{foreign.id}/photos',
+            {'file': file, 'gallery': 'venuePhotos'},
+            format='multipart',
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_photo(self):
+        photo_id = self.upload().data['photo']['id']
+        response = self.client.delete(
+            f'/api/venues/drafts/{self.draft.id}/photos/{photo_id}?gallery=venuePhotos'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['photoId'], photo_id)
+        self.mock_delete.assert_called_once()
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.data['photos']['venuePhotos'], [])
+
+    def test_delete_unknown_photo_404(self):
+        response = self.client.delete(
+            f'/api/venues/drafts/{self.draft.id}/photos/nope123?gallery=venuePhotos'
+        )
+        self.assertEqual(response.status_code, 404)
+
+    def test_delete_requires_gallery_param(self):
+        photo_id = self.upload().data['photo']['id']
+        response = self.client.delete(
+            f'/api/venues/drafts/{self.draft.id}/photos/{photo_id}'
+        )
+        self.assertEqual(response.status_code, 400)
 
 
 class OldWizardRemovedTests(DraftTestBase):

@@ -5,9 +5,13 @@ All routes require a VENDOR JWT and are scoped to the token owner:
 asking for someone else's draft id returns 404 (never reveals it exists).
 Error shape everywhere: {"message": "..."}.
 """
+import logging
+import uuid
+
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.generics import get_object_or_404
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -17,6 +21,18 @@ from accounts.models import User
 from .completion import compute_completion
 from .draft_validation import SECTIONS, validate_section
 from .models import VenueDraft, empty_draft_data
+from .storage import (
+    ALLOWED_TYPES,
+    MAX_FILE_SIZE,
+    StorageError,
+    delete_photo,
+    upload_photo,
+)
+
+logger = logging.getLogger(__name__)
+
+# Gallery name -> maximum number of photos (contract 4.4).
+GALLERY_CAPS = {'venuePhotos': 5, 'serviceImages': 10}
 
 
 class IsVendor(BasePermission):
@@ -208,3 +224,119 @@ class DraftSeedView(APIView):
         draft.status = VenueDraft.Status.DRAFT
         draft.save()
         return Response({'draftId': str(draft.id), 'status': draft.status})
+
+
+class DraftPhotoUploadView(APIView):
+    """
+    POST /api/venues/drafts/<id>/photos  (multipart/form-data)
+    Fields: file (image), gallery (venuePhotos|serviceImages).
+    Uploads to Supabase Storage -> permanent public URL.
+    """
+
+    permission_classes = [IsVendor]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request, draft_id):
+        draft = get_vendor_draft(request, draft_id)
+
+        gallery = request.data.get('gallery')
+        if gallery not in GALLERY_CAPS:
+            return _message(
+                'gallery must be "venuePhotos" or "serviceImages".',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        file = request.FILES.get('file')
+        if file is None:
+            return _message('No file uploaded.', status.HTTP_400_BAD_REQUEST)
+
+        if file.content_type not in ALLOWED_TYPES:
+            return _message(
+                'Only JPEG, PNG or WebP images are allowed.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        if file.size > MAX_FILE_SIZE:
+            return _message(
+                'Image is too large (max 5 MB).',
+                status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        photos = draft.data.setdefault(
+            'photos', {'venuePhotos': [], 'serviceImages': []}
+        )
+        existing = photos.setdefault(gallery, [])
+        cap = GALLERY_CAPS[gallery]
+        if len(existing) >= cap:
+            return _message(
+                f'Maximum {cap} photos allowed in {gallery}.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        photo_id = uuid.uuid4().hex[:12]
+        extension = ALLOWED_TYPES[file.content_type]
+        path = f'{draft.id}/{gallery}/{photo_id}.{extension}'
+
+        try:
+            url = upload_photo(path, file.read(), file.content_type)
+        except StorageError:
+            logger.exception('Photo upload failed for draft %s', draft.id)
+            return _message(
+                'Could not store the photo right now. Please try again.',
+                status.HTTP_502_BAD_GATEWAY,
+            )
+
+        # "path" is kept so delete can find the file in storage;
+        # the frontend only cares about id/name/url and ignores extras.
+        photo = {'id': photo_id, 'name': file.name, 'url': url, 'path': path}
+        existing.append(photo)
+        draft.save(update_fields=['data', 'updated_at'])
+
+        return Response({
+            'draftId': str(draft.id),
+            'gallery': gallery,
+            'photo': {'id': photo_id, 'name': file.name, 'url': url},
+            'completion': compute_completion(draft)[0],
+            'savedAt': draft.updated_at,
+        }, status=status.HTTP_201_CREATED)
+
+
+class DraftPhotoDeleteView(APIView):
+    """DELETE /api/venues/drafts/<id>/photos/<photoId>?gallery=..."""
+
+    permission_classes = [IsVendor]
+
+    def delete(self, request, draft_id, photo_id):
+        draft = get_vendor_draft(request, draft_id)
+
+        gallery = request.query_params.get('gallery')
+        if gallery not in GALLERY_CAPS:
+            return _message(
+                'gallery query parameter must be "venuePhotos" or "serviceImages".',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        photos = draft.data.get('photos', {}).get(gallery, [])
+        photo = next((p for p in photos if p.get('id') == photo_id), None)
+        if photo is None:
+            return _message('Photo not found.', status.HTTP_404_NOT_FOUND)
+
+        # Remove the stored file. Best-effort: if storage is briefly
+        # unreachable we still remove it from the draft (an orphan file
+        # is harmless; a ghost photo in the wizard is not).
+        if photo.get('path'):
+            try:
+                delete_photo(photo['path'])
+            except StorageError:
+                logger.warning('Storage delete failed for %s', photo['path'])
+
+        draft.data['photos'][gallery] = [p for p in photos if p.get('id') != photo_id]
+        draft.save(update_fields=['data', 'updated_at'])
+
+        return Response({
+            'draftId': str(draft.id),
+            'gallery': gallery,
+            'photoId': photo_id,
+            'completion': compute_completion(draft)[0],
+            'savedAt': draft.updated_at,
+        })

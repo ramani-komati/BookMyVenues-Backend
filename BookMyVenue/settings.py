@@ -146,6 +146,11 @@ SIMPLE_JWT = {
 # return an error (we never print codes to the console).
 TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 
+# Supabase Storage (venue photo uploads).
+SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
+SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
+SUPABASE_STORAGE_BUCKET = os.environ.get('SUPABASE_STORAGE_BUCKET', 'venue-photos')
+
 
 # ---------------------------------------------------------------
 # Logging — print our app's log messages (e.g. admin notifications)
