@@ -17,3 +17,4 @@ __pycache__/
 
 # Code review graph (local tooling data)
 .code-review-graph/
+staticfiles/

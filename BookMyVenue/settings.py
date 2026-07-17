@@ -68,6 +68,8 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    # Serves static files (admin CSS/JS) efficiently in production.
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     # CORS must come before CommonMiddleware to add its headers correctly.
     'corsheaders.middleware.CorsMiddleware',
@@ -146,6 +148,9 @@ SIMPLE_JWT = {
 # 2Factor.in API key for OTP SMS delivery. Empty = OTP endpoints will
 # return an error (we never print codes to the console).
 TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
+# SMS template name — forces SMS delivery (omitting it can trigger
+# a voice call on some accounts).
+TWOFACTOR_SMS_TEMPLATE = os.environ.get('TWOFACTOR_SMS_TEMPLATE', 'OTP1')
 
 # Supabase Storage (venue photo uploads).
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
@@ -223,3 +228,28 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+# Where collectstatic gathers files in production (admin CSS/JS);
+# WhiteNoise serves them from here.
+STATIC_ROOT = BASE_DIR / 'staticfiles'
+STORAGES = {
+    'staticfiles': {
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
+
+
+# ---------------------------------------------------------------
+# Production security (active only when DEBUG=False, i.e. on Render)
+# ---------------------------------------------------------------
+
+if not DEBUG:
+    # Render terminates HTTPS at its proxy; this header tells Django
+    # the original request was secure.
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = True
+    # Browsers remember to ALWAYS use HTTPS for this domain (1 year).
+    SECURE_HSTS_SECONDS = 31536000
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+    SECURE_HSTS_PRELOAD = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True

@@ -37,7 +37,10 @@ def send_otp_sms(phone: str, code: str) -> None:
     if not api_key:
         raise OTPSendError('SMS service is not configured (TWOFACTOR_API_KEY missing).')
 
-    url = f'https://2factor.in/API/V1/{api_key}/SMS/{phone}/{code}'
+    # The template name at the end forces SMS delivery — without it,
+    # some 2Factor accounts fall back to a voice call.
+    template = settings.TWOFACTOR_SMS_TEMPLATE
+    url = f'https://2factor.in/API/V1/{api_key}/SMS/{phone}/{code}/{template}'
     try:
         response = requests.get(url, timeout=SMS_TIMEOUT)
     except requests.RequestException as exc:
