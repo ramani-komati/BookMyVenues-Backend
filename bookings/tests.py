@@ -230,6 +230,189 @@ class CancelBookingTests(BookingTestBase):
         self.assertEqual(response.status_code, 400)
 
 
+class WalkInBookingTests(BookingTestBase):
+    def walk_in(self, **overrides):
+        self.client.force_authenticate(user=self.vendor)
+        body = {
+            'venueName': 'Grand Palace Hall',
+            'date': TOMORROW,
+            'slots': ['21:30 – 23:30'],  # 2h
+            'customer': 'Walk-in Ramesh',
+            'perSlot': 600,
+            'amount': 1200,              # 2h x 600, NO ₹20 fee
+            **overrides,
+        }
+        return self.client.post('/api/vendors/me/walkin-bookings', body, format='json')
+
+    def test_happy_path(self):
+        response = self.walk_in()
+        self.assertEqual(response.status_code, 201)
+        booking = response.data['booking']
+        self.assertTrue(booking['walkIn'])
+        self.assertEqual(booking['method'], 'walk-in')
+        self.assertIsNone(booking['phone'])
+        self.assertEqual(booking['amount'], 1200)
+        self.assertEqual(booking['customer'], 'Walk-in Ramesh')
+
+    def test_amount_mismatch_rejected(self):
+        response = self.walk_in(amount=500)
+        self.assertEqual(response.status_code, 400)
+
+    def test_conflicts_with_customer_booking(self):
+        self.book(slots=['21:30 – 23:30'], amount=1220)  # customer books first
+        response = self.walk_in()
+        self.assertEqual(response.status_code, 409)
+
+    def test_blocks_customer_bookings_too(self):
+        self.walk_in()
+        response = self.book(slots=['21:30 – 23:30'], amount=1220)
+        self.assertEqual(response.status_code, 409)
+
+    def test_cannot_book_foreign_venue(self):
+        other_vendor = User.objects.create_user(
+            phone='9000000005', name='V2', email='v2@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.client.force_authenticate(user=other_vendor)
+        body = {
+            'venueName': 'Grand Palace Hall', 'date': TOMORROW,
+            'slots': ['10:00 – 11:00'], 'perSlot': 600, 'amount': 600,
+        }
+        response = self.client.post('/api/vendors/me/walkin-bookings', body, format='json')
+        self.assertEqual(response.status_code, 404)
+
+    def test_customer_role_forbidden(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.post('/api/vendors/me/walkin-bookings', {}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+
+class VendorDashboardTests(BookingTestBase):
+    def get_dashboard(self):
+        self.client.force_authenticate(user=self.vendor)
+        return self.client.get('/api/vendors/me/dashboard')
+
+    def seed_bookings(self):
+        today = today_ist()
+        # Today: one online (₹920), one walk-in (₹1200).
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=today,
+            slots=['19:30 – 21:00'], amount=920, customer_name='Asha',
+            venue_name='Grand Palace Hall',
+        )
+        Booking.objects.create(
+            listing=self.listing, user=None, date=today,
+            slots=['10:00 – 12:00'], amount=1200, customer_name='Ramesh',
+            venue_name='Grand Palace Hall',
+            method=Booking.Method.WALK_IN, walk_in=True,
+        )
+        # 3 days ago (in this week): online ₹500.
+        Booking.objects.create(
+            listing=self.listing, user=self.customer,
+            date=today - datetime.timedelta(days=3),
+            slots=['10:00 – 11:00'], amount=500,
+        )
+        # 20 days ago (this month, not this week): ₹1000.
+        Booking.objects.create(
+            listing=self.listing, user=self.customer,
+            date=today - datetime.timedelta(days=20),
+            slots=['10:00 – 11:00'], amount=1000,
+        )
+
+    def test_stats_and_earnings_split(self):
+        self.seed_bookings()
+        response = self.get_dashboard()
+        self.assertEqual(response.status_code, 200)
+
+        stats = response.data['stats']
+        self.assertEqual(stats['today']['value'], 2120)       # 920 + 1200
+        self.assertEqual(stats['slotsToday']['value'], 2)
+        self.assertEqual(stats['week']['value'], 2620)        # + 500
+        self.assertEqual(stats['month']['value'], 3620)       # + 1000
+
+        earnings = response.data['earnings']
+        self.assertEqual(earnings['walkIn']['today'], 1200)
+        self.assertEqual(earnings['online']['today'], 920)
+        self.assertEqual(earnings['total']['month'], 3620)
+
+    def test_week_chart_has_7_days(self):
+        self.seed_bookings()
+        week = self.get_dashboard().data['week']
+        self.assertEqual(len(week), 7)
+        self.assertEqual(week[-1]['value'], 2120)  # last entry = today
+        self.assertEqual(week[-1]['online'], 920)
+        self.assertEqual(week[-1]['walkIn'], 1200)
+
+    def test_today_bookings_and_all_bookings(self):
+        self.seed_bookings()
+        data = self.get_dashboard().data
+        self.assertEqual(len(data['bookings']), 2)  # today only
+        self.assertEqual(data['bookings'][0]['venue'], 'Grand Palace Hall')
+        self.assertEqual(len(data['allBookings']), 4)
+
+    def test_scoped_to_own_venues_only(self):
+        self.seed_bookings()
+        other_vendor = User.objects.create_user(
+            phone='9000000006', name='V3', email='v3@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.client.force_authenticate(user=other_vendor)
+        response = self.client.get('/api/vendors/me/dashboard')
+        self.assertEqual(response.data['stats']['today']['value'], 0)
+        self.assertEqual(response.data['allBookings'], [])
+        self.assertEqual(response.data['venues'], [])
+
+    def test_venues_listed(self):
+        venues = self.get_dashboard().data['venues']
+        self.assertEqual(len(venues), 1)
+        self.assertEqual(venues[0]['name'], 'Grand Palace Hall')
+
+    def test_customer_forbidden(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.get('/api/vendors/me/dashboard')
+        self.assertEqual(response.status_code, 403)
+
+
+class DeleteListingTests(BookingTestBase):
+    def delete_listing(self, listing_id=None):
+        self.client.force_authenticate(user=self.vendor)
+        return self.client.delete(
+            f'/api/vendors/me/listings/{listing_id or self.listing.id}'
+        )
+
+    def test_delete_without_bookings(self):
+        response = self.delete_listing()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['deleted'], True)
+        self.assertFalse(Listing.objects.filter(pk=self.listing.id).exists())
+
+    def test_blocked_by_upcoming_bookings(self):
+        self.book()
+        response = self.delete_listing()
+        self.assertEqual(response.status_code, 409)
+        self.assertTrue(Listing.objects.filter(pk=self.listing.id).exists())
+
+    def test_past_bookings_survive_deletion(self):
+        past = today_ist() - datetime.timedelta(days=5)
+        booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=past,
+            slots=['10:00 – 11:00'], amount=620, venue_name='Grand Palace Hall',
+        )
+        self.delete_listing()
+        booking.refresh_from_db()
+        self.assertIsNone(booking.listing)  # link cleared...
+        self.assertEqual(booking.venue_name, 'Grand Palace Hall')  # ...history kept
+
+    def test_foreign_listing_404(self):
+        other_vendor = User.objects.create_user(
+            phone='9000000007', name='V4', email='v4@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.client.force_authenticate(user=other_vendor)
+        response = self.client.delete(f'/api/vendors/me/listings/{self.listing.id}')
+        self.assertEqual(response.status_code, 404)
+
+
 class AvailabilityTests(BookingTestBase):
     def test_empty_day(self):
         response = self.client.get(

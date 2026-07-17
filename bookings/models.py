@@ -20,8 +20,15 @@ class Booking(models.Model):
     id = models.CharField(
         max_length=20, primary_key=True, default=make_booking_id, editable=False
     )
+    # SET_NULL: deleting a venue must NOT erase customers' booking
+    # history — the denormalized venue_name/image fields keep the
+    # booking cards rendering.
     listing = models.ForeignKey(
-        'venues.Listing', on_delete=models.CASCADE, related_name='bookings'
+        'venues.Listing',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='bookings',
     )
     # Null for walk-ins (vendor books on behalf of an offline customer).
     user = models.ForeignKey(

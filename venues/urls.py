@@ -7,8 +7,13 @@ from django.urls import path
 from . import public_views, views
 
 urlpatterns = [
-    # Vendor: publish a listing from a submitted draft (contract 3.5)
+    # Vendor: publish / delete listings (contract 3.5, 3.6)
     path('vendors/me/listings', views.VendorListingPublishView.as_view(), name='listing-publish'),
+    path(
+        'vendors/me/listings/<uuid:listing_id>',
+        views.VendorListingDeleteView.as_view(),
+        name='listing-delete',
+    ),
     path('venues/drafts', views.DraftCreateView.as_view(), name='draft-create'),
     path('venues/drafts/<uuid:draft_id>', views.DraftDetailView.as_view(), name='draft-detail'),
     path(

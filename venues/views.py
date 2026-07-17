@@ -316,6 +316,35 @@ class VendorListingPublishView(APIView):
         return Response({'listing': listing.record}, status=status.HTTP_201_CREATED)
 
 
+class VendorListingDeleteView(APIView):
+    """
+    DELETE /api/vendors/me/listings/<id> — vendor removes a venue
+    (contract 3.6). Blocked while upcoming bookings exist (409) so
+    customers are never left with a reservation at a vanished venue.
+    """
+
+    permission_classes = [IsVendor]
+
+    def delete(self, request, listing_id):
+        listing = request.user.listings.filter(pk=listing_id).first()
+        if listing is None:
+            return _message('Listing not found.', status.HTTP_404_NOT_FOUND)
+
+        # Import here to avoid a circular import at module load time.
+        from bookings.models import Booking
+        from bookings.slots import today_ist
+
+        if Booking.objects.filter(listing=listing, date__gte=today_ist()).exists():
+            return _message(
+                'This venue has upcoming bookings. They must be cancelled '
+                'before the venue can be deleted.',
+                status.HTTP_409_CONFLICT,
+            )
+
+        listing.delete()  # past bookings survive (listing FK is SET_NULL)
+        return Response({'deleted': True, 'id': str(listing_id)})
+
+
 class DraftPhotoUploadView(APIView):
     """
     POST /api/venues/drafts/<id>/photos  (multipart/form-data)
