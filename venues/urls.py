@@ -1,12 +1,20 @@
+"""
+Draft (wizard) routes — mounted at /api/ per the frontend contract.
+Photo upload/delete routes join in Phase 3.
+"""
 from django.urls import path
 
 from . import views
 
 urlpatterns = [
-    path('vendor/venues', views.VenueListCreateView.as_view(), name='venue-list-create'),
-    path('vendor/venues/<int:pk>', views.VenueDetailView.as_view(), name='venue-detail'),
-    path('vendor/venues/<int:pk>/submit', views.VenueSubmitView.as_view(), name='venue-submit'),
-    path('vendor/venues/<int:pk>/photos', views.VenuePhotoCreateView.as_view(), name='venue-photo-create'),
-    path('vendor/venues/<int:pk>/photos/<int:photo_id>', views.VenuePhotoDeleteView.as_view(), name='venue-photo-delete'),
-    path('vendor/payout', views.PayoutView.as_view(), name='payout'),
+    path('venues/drafts', views.DraftCreateView.as_view(), name='draft-create'),
+    path('venues/drafts/<uuid:draft_id>', views.DraftDetailView.as_view(), name='draft-detail'),
+    path(
+        'venues/drafts/<uuid:draft_id>/sections/<str:section>',
+        views.DraftSectionView.as_view(),
+        name='draft-section',
+    ),
+    path('venues/drafts/<uuid:draft_id>/submit', views.DraftSubmitView.as_view(), name='draft-submit'),
+    path('venues/drafts/<uuid:draft_id>/reopen', views.DraftReopenView.as_view(), name='draft-reopen'),
+    path('venues/drafts/<uuid:draft_id>/seed', views.DraftSeedView.as_view(), name='draft-seed'),
 ]

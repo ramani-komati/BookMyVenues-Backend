@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Addon, Package, PayoutDetails, SportPricing, Unit, Venue, VenuePhoto
+from .models import Addon, Package, PayoutDetails, SportPricing, Unit, Venue, VenueDraft, VenuePhoto
 
 # "Inlines" let you edit a venue's units/packages/etc. directly
 # on the Venue page in the admin, instead of on separate pages.
@@ -51,3 +51,10 @@ admin.site.register(Package)
 admin.site.register(SportPricing)
 admin.site.register(Addon)
 admin.site.register(VenuePhoto)
+
+
+@admin.register(VenueDraft)
+class VenueDraftAdmin(admin.ModelAdmin):
+    list_display = ['id', 'vendor', 'status', 'updated_at']
+    list_filter = ['status']
+    readonly_fields = ['id', 'created_at', 'updated_at']

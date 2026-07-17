@@ -1,3 +1,5 @@
+import uuid
+
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
@@ -254,3 +256,50 @@ class PayoutDetails(models.Model):
 
     def __str__(self):
         return f'Payout details of {self.user}'
+
+
+def empty_draft_data():
+    """The 5 buckets every draft starts with (frontend contract shape)."""
+    return {
+        'basics': {},
+        'location': {},
+        'details': {},
+        'payout': {},
+        'photos': {'venuePhotos': [], 'serviceImages': []},
+    }
+
+
+class VenueDraft(models.Model):
+    """
+    A venue-registration draft (frontend wizard, Group 4 of the contract).
+
+    The wizard autosaves free-form JSON "buckets" (basics/location/details/
+    payout/photos). We store them EXACTLY as the frontend sends them, so
+    what a vendor saved is byte-for-byte what they get back on reload.
+    On submit, the known fields are mapped into the structured Venue model.
+
+    The UUID primary key doubles as the public listing id later —
+    the contract requires "resubmit updates, never duplicates".
+    """
+
+    class Status(models.TextChoices):
+        DRAFT = 'draft', 'Draft'
+        PENDING = 'pending', 'Pending'
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    vendor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='drafts',
+    )
+    data = models.JSONField(default=empty_draft_data)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
+    submitted_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-updated_at']
+
+    def __str__(self):
+        return f'Draft {self.id} ({self.vendor})'
