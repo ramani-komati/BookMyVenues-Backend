@@ -19,8 +19,11 @@ from django.urls import include, path
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    # Frontend-contract routes (OTP auth, drafts, later bookings) — /api/
+    # Frontend-contract routes (OTP auth, drafts, bookings, public) — /api/
     path('api/', include('accounts.urls_auth')),
+    # bookings BEFORE venues: availability must win over the public
+    # venue-detail catch-all route.
+    path('api/', include('bookings.urls')),
     path('api/', include('venues.urls')),
     # Utility routes (health, me, refresh) — /api/v1/
     path('api/v1/', include('accounts.urls')),
