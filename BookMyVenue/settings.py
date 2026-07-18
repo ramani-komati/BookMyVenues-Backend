@@ -117,6 +117,11 @@ DATABASES = {
     )
 }
 
+# Supabase's transaction pooler (port 6543) doesn't support server-side
+# cursors — Django must be told not to use them.
+if DATABASE_URL.startswith('postgres'):
+    DATABASES['default']['DISABLE_SERVER_SIDE_CURSORS'] = True
+
 
 # ---------------------------------------------------------------
 # Django REST Framework
