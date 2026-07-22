@@ -144,9 +144,11 @@ REST_FRAMEWORK = {
     },
 }
 
-# JWT token lifetimes (from the spec: access 1 day, refresh 30 days)
+# JWT token lifetimes. Access token lives 30 days so users stay logged
+# in for weeks (OTP-only consumer app — no passwords to steal; a lost
+# phone's token still expires within 30 days).
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=30),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
 }
 

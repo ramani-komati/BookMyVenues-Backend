@@ -4,7 +4,7 @@ Production base URL: **`https://bookmyvenues-backend.onrender.com/api`**
 
 Set in the frontend: `VITE_API_BASE_URL=https://bookmyvenues-backend.onrender.com/api` and flip the `USE_MOCK` flags.
 
-- **Auth:** phone + OTP → JWT. Send it as `Authorization: Bearer <token>` (valid 1 day; on 401 clear the session and re-login).
+- **Auth:** phone + OTP → JWT. Send it as `Authorization: Bearer <token>` (valid 30 days; on 401 clear the session and re-login).
 - **Content type:** `application/json` — except photo upload (`multipart/form-data`).
 - **Error shape (every non-2xx):** `{ "message": "human readable reason" }`
 - **Slots:** `"HH:MM – HH:MM"` (24h; en dash or plain hyphen both accepted), end `"00:00"` = midnight. Business hours 06:00–24:00, 30-min steps, min 30 min.

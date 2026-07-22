@@ -50,7 +50,7 @@ def _first_error(errors):
 
 
 def _access_token(user):
-    """Contract responses carry a single "token" (JWT access, 1 day)."""
+    """Contract responses carry a single "token" (JWT access, 30 days)."""
     return str(RefreshToken.for_user(user).access_token)
 
 
