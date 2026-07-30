@@ -295,6 +295,14 @@ class VenueDraft(models.Model):
     data = models.JSONField(default=empty_draft_data)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
     submitted_at = models.DateTimeField(null=True, blank=True)
+
+    # Admin review workflow (P-admin Phase 2). Separate from `status` (which is
+    # the vendor's submit-state): a submitted draft can be approved/rejected etc.
+    review_status = models.CharField(max_length=10, default='pending')
+    review_checks = models.JSONField(default=dict, blank=True)
+    review_notes = models.TextField(blank=True, default='')
+    review_timeline = models.JSONField(default=list, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -320,6 +328,7 @@ class Listing(models.Model):
     class Status(models.TextChoices):
         LIVE = 'live', 'Live'          # visible to the public (auto-approve for now)
         PENDING = 'pending', 'Pending' # future: waiting for admin review
+        PAUSED = 'paused', 'Paused'    # hidden by an admin (not public)
 
     id = models.UUIDField(primary_key=True, editable=False)
     vendor = models.ForeignKey(
@@ -337,6 +346,8 @@ class Listing(models.Model):
     pincode = models.CharField(max_length=10, blank=True, default='')
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
+    # Admin can spotlight a venue on the home page (P-admin Phase 2).
+    featured = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

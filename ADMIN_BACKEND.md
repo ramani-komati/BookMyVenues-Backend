@@ -3,7 +3,7 @@
 Response to the frontend's *Super-Admin PENDING Backend APIs* spec.
 Base `/api/admin` · **cookie session** auth · error shape `{ "detail": "..." }`.
 
-**Last updated:** after Phase 1 · Production: `https://bookmyvenues-backend.onrender.com`
+**Last updated:** after Phase 2 · Production: `https://bookmyvenues-backend.onrender.com`
 
 ---
 
@@ -13,7 +13,8 @@ Base `/api/admin` · **cookie session** auth · error shape `{ "detail": "..." }
 |------|--------|
 | Auth — `login` → `verify-otp` → `logout` (session cookie) | ✅ **DONE** |
 | `GET /bootstrap` — one aggregate read | ✅ **DONE** (real data where it exists) |
-| Writes — approvals / venues / vendors / users / bookings / payouts / reviews | ⏳ Phase 2 |
+| Writes — approvals / venues / vendors / users / bookings | ✅ **DONE** |
+| Writes — payouts / reviews (need models) · settings · audit | ⏳ Phase 3 |
 | New models — Settings (real fee), Payouts, Reviews, Audit | ⏳ Phase 3 |
 
 ---
@@ -42,6 +43,28 @@ Data comes from the real models where we have it:
 | `approvals` | pending `VenueDraft` | checklist/notes/timeline are Phase-2 defaults |
 | `payouts` / `reviews` / `audit` | — | `[]` (no models yet, Phase 3) |
 | `settings` | default | real `fee: "20"`; rest are defaults until Phase 3 |
+
+---
+
+## ✅ Phase 2 — write endpoints (partial PATCH, admin session required)
+
+Each accepts a partial patch and echoes the updated entity (`200`).
+
+- **`PATCH /api/admin/approvals/<id>`** — `{ status }` (pending/approved/changes/rejected),
+  `{ checks: {...} }` (merged), `{ notes }`, `{ timeline: [...] }`. Persisted on the draft.
+- **`PATCH /api/admin/venues/<id>`** — `{ status: "live"|"paused" }` (a paused venue is
+  **hidden from public browsing**), `{ featured: true|false }`.
+- **`PATCH /api/admin/vendors/<id>`** — `{ kyc: "verified"|"pending"|"rejected" }`,
+  `{ acc: "active"|"suspended" }` (suspend flips the account off).
+- **`PATCH /api/admin/users/<id>`** — `{ status: "active"|"blocked" }`.
+- **`PATCH /api/admin/bookings/<id>`** — `{ status: "refunded" }` (any of
+  confirmed/completed/refund_pending/refunded/cancelled).
+
+Bad values → `400 { "detail": ... }`; unknown id → `404 { "detail": "..." }`.
+
+New columns (all additive migrations, existing rows unaffected): `Listing.featured`
++ `paused` status; `VenueDraft.review_status/checks/notes/timeline`; `User.kyc`
+(vendor suspend/user block reuse `is_active`); `Booking.status`.
 
 ---
 

@@ -64,6 +64,9 @@ class Booking(models.Model):
 
     method = models.CharField(max_length=10, choices=Method.choices, default=Method.ONLINE)
     walk_in = models.BooleanField(default=False)
+    # Lifecycle state for the admin panel (P-admin Phase 2). 'completed' is
+    # derived from the date; an admin can set 'refunded' etc.
+    status = models.CharField(max_length=20, default='confirmed')
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

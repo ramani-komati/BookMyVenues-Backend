@@ -11,9 +11,14 @@ effect when DEBUG=False (production and the test runner).
 from django.http import JsonResponse
 
 
+def _key(request):
+    # The admin panel uses {"detail"}; the customer/vendor app uses {"message"}.
+    return 'detail' if request.path.startswith('/api/admin') else 'message'
+
+
 def not_found(request, exception=None):
-    return JsonResponse({'message': 'Not found'}, status=404)
+    return JsonResponse({_key(request): 'Not found'}, status=404)
 
 
 def server_error(request):
-    return JsonResponse({'message': 'Something went wrong.'}, status=500)
+    return JsonResponse({_key(request): 'Something went wrong.'}, status=500)

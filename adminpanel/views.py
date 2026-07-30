@@ -19,9 +19,21 @@ from rest_framework.views import APIView
 
 from accounts.models import PhoneOTP, User
 from accounts.otp import OTPSendError, generate_code, send_otp_sms
+from bookings.models import Booking
+from venues.models import Listing, VenueDraft
 
 from .auth import CsrfExemptSessionAuthentication, IsAdmin, detail
-from .formatters import build_bootstrap
+from .formatters import (
+    approval_row,
+    booking_row,
+    build_bootstrap,
+    user_row,
+    vendor_row,
+    venue_row,
+)
+
+REVIEW_STATUSES = {'pending', 'approved', 'changes', 'rejected'}
+BOOKING_STATUSES = {'confirmed', 'completed', 'refund_pending', 'refunded', 'cancelled'}
 
 # The one backend the admin session is logged in with.
 _BACKEND = 'django.contrib.auth.backends.ModelBackend'
@@ -124,3 +136,133 @@ class AdminBootstrapView(APIView):
 
     def get(self, request):
         return Response(build_bootstrap())
+
+
+# ---------------------------------------------------------------
+# Writes (Phase 2) — partial PATCH updates on existing entities.
+# All are admin-only; each echoes the updated entity.
+# ---------------------------------------------------------------
+
+class _AdminWriteView(APIView):
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [IsAdmin]
+
+    def _body(self, request):
+        return request.data if isinstance(request.data, dict) else {}
+
+
+class AdminApprovalUpdateView(_AdminWriteView):
+    """PATCH /api/admin/approvals/<id> — status / checks / notes / timeline."""
+
+    def patch(self, request, draft_id):
+        draft = VenueDraft.objects.filter(pk=draft_id).first()
+        if draft is None:
+            return detail('Approval not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        if 'status' in data:
+            value = str(data['status'])
+            if value not in REVIEW_STATUSES:
+                return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+            draft.review_status = value
+        if isinstance(data.get('checks'), dict):
+            draft.review_checks = {**(draft.review_checks or {}), **data['checks']}
+        if 'notes' in data:
+            draft.review_notes = str(data['notes'] or '')
+        if isinstance(data.get('timeline'), list):
+            draft.review_timeline = data['timeline']
+
+        draft.save()
+        return Response(approval_row(draft))
+
+
+class AdminVenueUpdateView(_AdminWriteView):
+    """PATCH /api/admin/venues/<id> — status (live/paused) / featured."""
+
+    def patch(self, request, listing_id):
+        listing = Listing.objects.filter(pk=listing_id).first()
+        if listing is None:
+            return detail('Venue not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        if 'status' in data:
+            value = str(data['status'])
+            if value == 'live':
+                listing.status = Listing.Status.LIVE
+            elif value == 'paused':
+                listing.status = Listing.Status.PAUSED
+            else:
+                return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+        if 'featured' in data:
+            listing.featured = bool(data['featured'])
+
+        listing.save()
+        return Response(venue_row(listing))
+
+
+class AdminVendorUpdateView(_AdminWriteView):
+    """PATCH /api/admin/vendors/<id> — kyc / acc (suspend/reactivate)."""
+
+    def patch(self, request, vendor_id):
+        vendor = User.objects.filter(pk=vendor_id, role=User.Role.VENDOR).first()
+        if vendor is None:
+            return detail('Vendor not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        if 'kyc' in data:
+            value = str(data['kyc'])
+            if value not in {'verified', 'pending', 'rejected'}:
+                return detail('Invalid kyc value.', status.HTTP_400_BAD_REQUEST)
+            vendor.kyc = value
+        if 'acc' in data:
+            value = str(data['acc'])
+            if value == 'suspended':
+                vendor.is_active = False
+            elif value == 'active':
+                vendor.is_active = True
+            else:
+                return detail('Invalid acc value.', status.HTTP_400_BAD_REQUEST)
+
+        vendor.save()
+        return Response(vendor_row(vendor))
+
+
+class AdminUserUpdateView(_AdminWriteView):
+    """PATCH /api/admin/users/<id> — status (block/unblock)."""
+
+    def patch(self, request, user_id):
+        user = User.objects.filter(pk=user_id, role=User.Role.PUBLIC).first()
+        if user is None:
+            return detail('User not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        if 'status' in data:
+            value = str(data['status'])
+            if value == 'blocked':
+                user.is_active = False
+            elif value == 'active':
+                user.is_active = True
+            else:
+                return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+
+        user.save()
+        return Response(user_row(user))
+
+
+class AdminBookingUpdateView(_AdminWriteView):
+    """PATCH /api/admin/bookings/<id> — status (e.g. refunded)."""
+
+    def patch(self, request, booking_id):
+        booking = Booking.objects.filter(pk=booking_id).first()
+        if booking is None:
+            return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        if 'status' in data:
+            value = str(data['status'])
+            if value not in BOOKING_STATUSES:
+                return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+            booking.status = value
+
+        booking.save()
+        return Response(booking_row(booking))

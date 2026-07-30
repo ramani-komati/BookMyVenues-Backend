@@ -7,12 +7,13 @@ in-memory (never printed).
 import uuid
 from unittest.mock import patch
 
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
 from bookings.models import Booking
 from bookings.slots import today_ist
-from venues.models import Listing
+from venues.models import Listing, VenueDraft
 
 ADMIN_EMAIL = 'anita@bookmyvenues.in'
 ADMIN_PASSWORD = 'StrongPass123'
@@ -146,3 +147,124 @@ class AdminBootstrapTests(APITestCase):
         self.client.force_authenticate(user=self.customer)
         response = self.client.get('/api/admin/bootstrap')
         self.assertIn('detail', response.data)  # {"detail"}, not {"message"}
+
+
+class AdminWriteTests(APITestCase):
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9990000003', name='Ravi', email='ravi@x.in', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(
+            phone='9990000004', name='Asha', email='asha@x.in',
+        )
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='grand-hall',
+            record={'name': 'Grand Hall', 'price': 1200, 'detail': {}},
+            name='Grand Hall', category='hall', locality='HSR', pincode='560102',
+        )
+        self.draft = VenueDraft.objects.create(
+            vendor=self.vendor, status=VenueDraft.Status.PENDING,
+            submitted_at=timezone.now(),
+        )
+        self.booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['19:00 – 20:00'], amount=1220, customer_name='Asha',
+            venue_name='Grand Hall',
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    # --- approvals ---
+    def test_approve(self):
+        r = self.client.patch(
+            f'/api/admin/approvals/{self.draft.id}', {'status': 'approved'}, format='json'
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['status'], 'approved')
+        self.draft.refresh_from_db()
+        self.assertEqual(self.draft.review_status, 'approved')
+
+    def test_toggle_checklist_and_notes(self):
+        r = self.client.patch(
+            f'/api/admin/approvals/{self.draft.id}',
+            {'checks': {'photos': True}, 'notes': 'Verified on call.'},
+            format='json',
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data['checks']['photos'])
+        self.assertEqual(r.data['notes'], 'Verified on call.')
+
+    def test_invalid_approval_status_rejected(self):
+        r = self.client.patch(
+            f'/api/admin/approvals/{self.draft.id}', {'status': 'weird'}, format='json'
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('detail', r.data)
+
+    # --- venues ---
+    def test_pause_and_feature_venue(self):
+        paused = self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'status': 'paused'}, format='json'
+        )
+        self.assertEqual(paused.data['status'], 'paused')
+        featured = self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'featured': True}, format='json'
+        )
+        self.assertTrue(featured.data['featured'])
+
+    def test_paused_venue_hidden_from_public(self):
+        self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'status': 'paused'}, format='json'
+        )
+        self.client.force_authenticate(user=None)
+        listed = self.client.get('/api/venues').data
+        self.assertEqual(listed['total'], 0)  # paused -> not public
+
+    # --- vendors ---
+    def test_verify_kyc_and_suspend(self):
+        kyc = self.client.patch(
+            f'/api/admin/vendors/{self.vendor.id}', {'kyc': 'verified'}, format='json'
+        )
+        self.assertEqual(kyc.data['kyc'], 'verified')
+        susp = self.client.patch(
+            f'/api/admin/vendors/{self.vendor.id}', {'acc': 'suspended'}, format='json'
+        )
+        self.assertEqual(susp.data['acc'], 'suspended')
+        self.vendor.refresh_from_db()
+        self.assertFalse(self.vendor.is_active)
+
+    # --- users ---
+    def test_block_user(self):
+        r = self.client.patch(
+            f'/api/admin/users/{self.customer.id}', {'status': 'blocked'}, format='json'
+        )
+        self.assertEqual(r.data['status'], 'blocked')
+        self.customer.refresh_from_db()
+        self.assertFalse(self.customer.is_active)
+
+    # --- bookings ---
+    def test_refund_booking(self):
+        r = self.client.patch(
+            f'/api/admin/bookings/{self.booking.id}', {'status': 'refunded'}, format='json'
+        )
+        self.assertEqual(r.data['status'], 'refunded')
+        self.booking.refresh_from_db()
+        self.assertEqual(self.booking.status, 'refunded')
+
+    # --- guards ---
+    def test_non_admin_forbidden(self):
+        self.client.force_authenticate(user=self.customer)
+        r = self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'status': 'paused'}, format='json'
+        )
+        self.assertEqual(r.status_code, 403)
+
+    def test_unknown_entity_404_detail_shape(self):
+        r = self.client.patch(
+            f'/api/admin/venues/{uuid.uuid4()}', {'status': 'paused'}, format='json'
+        )
+        self.assertEqual(r.status_code, 404)
+        self.assertIn('detail', r.data)

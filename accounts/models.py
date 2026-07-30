@@ -73,6 +73,14 @@ class User(AbstractBaseUser, PermissionsMixin):
         default=Role.PUBLIC,
     )
 
+    class Kyc(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        VERIFIED = 'verified', 'Verified'
+        REJECTED = 'rejected', 'Rejected'
+
+    # Vendor KYC state, set by an admin (P-admin Phase 2). Unused for customers.
+    kyc = models.CharField(max_length=10, choices=Kyc.choices, default=Kyc.PENDING)
+
     # Standard Django flags:
     is_active = models.BooleanField(default=True)   # False = account disabled
     is_staff = models.BooleanField(default=False)   # True = may open /admin/
