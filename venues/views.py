@@ -250,6 +250,30 @@ def _unique_slug(name, listing_id):
     return slug
 
 
+def _resolve_publish_status(record, existing):
+    """
+    The listing status is SERVER-OWNED — the client's status field is ignored.
+
+    - Existing listing (republish/edit/self-heal): keep its current status.
+      An approved venue never falls back to pending because of a republish.
+    - New unit sibling (detail.unitOf) of a LIVE base: live immediately —
+      the base venue's approval covers its pitches/screens/halls.
+    - Any other new listing: pending, waiting for admin approval.
+    """
+    if existing is not None:
+        return existing.status
+
+    base_ref = str((record.get('detail') or {}).get('unitOf') or '').strip()
+    if base_ref:
+        try:
+            base = Listing.objects.filter(pk=uuid.UUID(base_ref)).first()
+        except ValueError:
+            base = None
+        if base is not None and base.status == Listing.Status.LIVE:
+            return Listing.Status.LIVE
+    return Listing.Status.PENDING
+
+
 class VendorListingPublishView(APIView):
     """
     POST /api/vendors/me/listings — publish/update a listing from a
@@ -258,7 +282,8 @@ class VendorListingPublishView(APIView):
     - Idempotent by id: publishing the same id again UPDATES the listing.
     - Owner is stamped from the token, never from the body.
     - If an update arrives without photos, the existing gallery is kept.
-    - Status is "live" (auto-approve) until an admin review page exists.
+    - Status is server-owned: new listings start "pending" (admin approval);
+      republishes keep the current status (see _resolve_publish_status).
     """
 
     permission_classes = [IsVendor]
@@ -292,15 +317,16 @@ class VendorListingPublishView(APIView):
         if existing is not None and not record.get('gallery'):
             record['gallery'] = existing.record.get('gallery', [])
 
+        listing_status = _resolve_publish_status(record, existing)
         record['id'] = str(listing_id)
-        record['status'] = Listing.Status.LIVE
+        record['status'] = listing_status
         columns = _extract_listing_columns(record)
 
         if existing is not None:
             for field, value in columns.items():
                 setattr(existing, field, value)
             existing.record = record
-            existing.status = Listing.Status.LIVE
+            existing.status = listing_status
             existing.save()
             listing = existing
         else:
@@ -309,7 +335,7 @@ class VendorListingPublishView(APIView):
                 vendor=request.user,
                 slug=_unique_slug(columns['name'], listing_id),
                 record=record,
-                status=Listing.Status.LIVE,
+                status=listing_status,
                 **columns,
             )
 

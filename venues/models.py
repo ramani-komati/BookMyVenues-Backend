@@ -326,9 +326,11 @@ class Listing(models.Model):
     """
 
     class Status(models.TextChoices):
-        LIVE = 'live', 'Live'          # visible to the public (auto-approve for now)
-        PENDING = 'pending', 'Pending' # future: waiting for admin review
-        PAUSED = 'paused', 'Paused'    # hidden by an admin (not public)
+        LIVE = 'live', 'Live'            # approved — visible to the public
+        PENDING = 'pending', 'Pending'   # published, waiting for admin approval
+        PAUSED = 'paused', 'Paused'      # hidden by an admin (not public)
+        CHANGES = 'changes', 'Changes'   # admin requested changes (not public)
+        REJECTED = 'rejected', 'Rejected'  # admin rejected (not public)
 
     id = models.UUIDField(primary_key=True, editable=False)
     vendor = models.ForeignKey(
@@ -348,6 +350,13 @@ class Listing(models.Model):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
     # Admin can spotlight a venue on the home page (P-admin Phase 2).
     featured = models.BooleanField(default=False)
+
+    # Admin approval review state (checklist / notes / timeline live on the
+    # LISTING now — approvals are keyed by listing id since the frontend
+    # publishes immediately after wizard submit).
+    review_checks = models.JSONField(default=dict, blank=True)
+    review_notes = models.TextField(blank=True, default='')
+    review_timeline = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

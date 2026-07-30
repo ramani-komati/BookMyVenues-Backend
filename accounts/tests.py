@@ -267,6 +267,34 @@ class ProfileUpdateTests(APITestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class BlockedUserTests(OTPAuthTestBase):
+    """Admin-blocked accounts must be locked out of OTP sign-in entirely."""
+
+    def setUp(self):
+        super().setUp()
+        User.objects.create_user(phone=PHONE, name='Bad Actor', is_customer=True)
+        User.objects.filter(phone=PHONE).update(is_active=False)
+
+    def test_blocked_phone_cannot_request_otp(self):
+        response = self.request_otp('/api/users/auth/otp')
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn(PHONE, self.sent)  # no SMS was sent
+
+    def test_blocked_phone_cannot_verify(self):
+        # Even if an OTP existed from before the block, verify refuses.
+        User.objects.filter(phone=PHONE).update(is_active=True)
+        self.request_otp('/api/users/auth/otp')
+        User.objects.filter(phone=PHONE).update(is_active=False)
+        response = self.verify('/api/users/auth/verify')
+        self.assertEqual(response.status_code, 403)
+
+    def test_blocked_vendor_cannot_verify(self):
+        response = self.client.post(
+            '/api/vendors/auth/otp', {'phone': PHONE}, format='json'
+        )
+        self.assertEqual(response.status_code, 403)
+
+
 class RemovedPasswordEndpointsTests(APITestCase):
     def test_password_login_gone(self):
         response = self.client.post(

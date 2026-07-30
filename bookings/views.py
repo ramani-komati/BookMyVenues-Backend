@@ -425,6 +425,11 @@ class MyBookingsView(APIView):
                 amount=amount,
             )
 
+        # Booking makes you a customer, whatever your role (admin Users list).
+        if not request.user.is_customer:
+            request.user.is_customer = True
+            request.user.save(update_fields=['is_customer'])
+
         return Response({'booking': booking.as_record()}, status=status.HTTP_201_CREATED)
 
 

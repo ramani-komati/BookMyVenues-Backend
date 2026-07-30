@@ -50,6 +50,11 @@ def _first_photo(data):
 
 # --- Venues ------------------------------------------------------
 
+def _unit_of(listing):
+    """The base-listing id when this row is a pitch/screen/hall sibling."""
+    return str(((listing.record or {}).get('detail') or {}).get('unitOf') or '').strip()
+
+
 def _venue_status(listing):
     if listing.status == Listing.Status.LIVE:
         return 'live'
@@ -85,7 +90,13 @@ def venue_row(listing):
 
 
 def format_venues():
-    return [venue_row(l) for l in Listing.objects.select_related('vendor').all()]
+    """All REAL venues — unit siblings (— Pitch 2 etc.) are excluded so the
+    admin list and its counts match the actual number of venues."""
+    return [
+        venue_row(l)
+        for l in Listing.objects.select_related('vendor').all()
+        if not _unit_of(l)
+    ]
 
 
 # --- Vendors -----------------------------------------------------
@@ -127,7 +138,13 @@ def user_row(user):
 
 
 def format_users():
-    return [user_row(u) for u in User.objects.filter(role=User.Role.PUBLIC)]
+    """ALL customer identities — including vendors/admins who also book or
+    signed in through the customer app (customer identity ≠ role)."""
+    from django.db.models import Q
+    return [
+        user_row(u)
+        for u in User.objects.filter(Q(is_customer=True) | Q(role=User.Role.PUBLIC))
+    ]
 
 
 # --- Bookings ----------------------------------------------------
@@ -145,6 +162,8 @@ def booking_row(booking, today=None):
         'id': booking.id,
         'customer': booking.customer_name,
         'venue': booking.venue_name,
+        'date': booking.date.isoformat(),               # machine-readable
+        'createdAt': booking.created_at.isoformat(),
         'slot': f"{booking.date.strftime('%d %b')}, {booking.slots[0] if booking.slots else ''}",
         'amountNum': booking.amount,
         'method': 'Cash' if booking.walk_in else 'UPI',
@@ -160,48 +179,73 @@ def format_bookings():
     return [booking_row(b, today) for b in Booking.objects.all()]
 
 
-# --- Approvals ---------------------------------------------------
+# --- Approvals (keyed by LISTING id) -----------------------------
 
-def approval_row(draft, now=None):
+# listing.status -> the approval status the panel shows.
+_APPROVAL_STATUS = {
+    Listing.Status.LIVE: 'approved',
+    Listing.Status.PAUSED: 'approved',   # paused happens after approval
+    Listing.Status.PENDING: 'pending',
+    Listing.Status.CHANGES: 'changes',
+    Listing.Status.REJECTED: 'rejected',
+}
+
+
+def approval_row(listing, now=None):
     now = now or timezone.now()
-    data = draft.data or {}
-    basics = data.get('basics') or {}
-    location = data.get('location') or {}
-    details = data.get('details') or {}
-    payout = data.get('payout') or {}
-    submitted = draft.submitted_at
+    record = listing.record or {}
+    detail = record.get('detail') or {}
+    # The draft (same id) still holds the payout bucket + wizard completion.
+    draft = VenueDraft.objects.filter(pk=listing.pk).first()
+    payout_mask = ''
+    completion = 100
+    if draft is not None:
+        payout_mask = _mask_account((draft.data or {}).get('payout') or {})
+        completion = compute_completion(draft)[0]
+
     checks = {'photos': False, 'pricing': False, 'payout': False}
-    checks.update(draft.review_checks or {})
+    checks.update(listing.review_checks or {})
+    submitted = listing.created_at
     return {
-        'id': str(draft.id),
-        'name': basics.get('venueName') or '',
-        'vendor': draft.vendor.name or draft.vendor.phone,
-        'phone': basics.get('phone') or draft.vendor.phone,
-        'category': details.get('primaryCategory') or '',
-        'city': location.get('city') or location.get('district') or '',
-        'area': location.get('locality') or '',
-        'submitted': submitted.strftime('%d %b') if submitted else '',
-        'waitingH': int((now - submitted).total_seconds() // 3600) if submitted else 0,
-        'completion': compute_completion(draft)[0],
-        'status': draft.review_status,
-        'price': _rupees(details.get('price') or 0),
-        'capacity': str(details.get('capacity') or ''),
-        'packages': str(len(details.get('packages') or [])),
-        'amenities': details.get('amenities') or [],
-        'payout': _mask_account(payout),
-        'notes': draft.review_notes,
+        'id': str(listing.id),
+        'name': listing.name or record.get('name') or '',
+        'vendor': listing.vendor.name or listing.vendor.phone,
+        'phone': str(detail.get('contactPhone') or listing.vendor.phone),
+        'category': listing.category or '',
+        'city': str(record.get('city') or detail.get('city') or ''),
+        'area': listing.locality or '',
+        'submitted': submitted.date().isoformat(),
+        'waitingH': int((now - submitted).total_seconds() // 3600),
+        'completion': completion,
+        'status': _APPROVAL_STATUS.get(listing.status, 'pending'),
+        'price': _rupees(record.get('price') or 0),
+        'capacity': str(detail.get('capacity') or ''),
+        'packages': str(len(detail.get('packages') or [])),
+        'amenities': detail.get('amenities') or [],
+        'payout': payout_mask,
+        'notes': listing.review_notes,
         'checks': checks,
-        'photo': _first_photo(data),
-        'timeline': draft.review_timeline or [],
+        'photo': record.get('image') or '',
+        'photos': record.get('gallery') or [],
+        'timeline': listing.review_timeline or [],
     }
 
 
 def format_approvals():
+    """Base listings needing (or having gone through) admin review. Unit
+    siblings never appear — approving the base cascades to its family."""
     now = timezone.now()
-    pending = VenueDraft.objects.filter(
-        status=VenueDraft.Status.PENDING
-    ).select_related('vendor')
-    return [approval_row(draft, now) for draft in pending]
+    rows = []
+    needs_review = {Listing.Status.PENDING, Listing.Status.CHANGES, Listing.Status.REJECTED}
+    for listing in Listing.objects.select_related('vendor').all():
+        if _unit_of(listing):
+            continue
+        has_history = bool(
+            listing.review_timeline or listing.review_notes or listing.review_checks
+        )
+        if listing.status in needs_review or has_history:
+            rows.append(approval_row(listing, now))
+    return rows
 
 
 # --- Payouts / Reviews / Audit / Settings ------------------------
@@ -211,6 +255,8 @@ def payout_row(payout):
         'id': payout.id,
         'vendor': payout.vendor,
         'period': payout.period,
+        'periodStart': payout.period_start.isoformat() if payout.period_start else '',
+        'periodEnd': payout.period_end.isoformat() if payout.period_end else '',
         'grossNum': payout.gross,
         'status': payout.status,
     }
@@ -238,16 +284,17 @@ def audit_row(entry):
         'time': entry.time or entry.created_at.strftime('%d %b, %H:%M'),
         'admin': entry.admin,
         'action': entry.action,
-        'target': entry.target,
+        'target': entry.target,       # entity NAME (readable even after deletion)
+        'targetId': entry.target_id,  # raw id, separate
         'change': entry.change,
     }
 
 
 def settings_row(settings):
+    # No 'commission' — the platform's only revenue is the flat booking fee.
     return {
         'fee': str(settings.booking_fee),
         'feeDate': settings.fee_date,
-        'commission': settings.commission,
         'categories': settings.categories or [],
         'cities': settings.cities or [],
         'amenities': settings.amenities or [],

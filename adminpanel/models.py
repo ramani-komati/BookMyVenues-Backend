@@ -34,21 +34,35 @@ class Settings(models.Model):
 
 
 class Payout(models.Model):
-    """A vendor payout run. Created by the payments system (future)."""
+    """One vendor's payout for one completed week (Mon–Sun) of ONLINE
+    bookings. Generated automatically — see adminpanel/payouts.py."""
 
     class Status(models.TextChoices):
         PENDING = 'pending', 'Pending'
         FAILED = 'failed', 'Failed'
         COMPLETED = 'completed', 'Completed'
 
-    vendor = models.CharField(max_length=150, default='')
-    period = models.CharField(max_length=50, blank=True, default='')
+    vendor = models.CharField(max_length=150, default='')  # display name
+    vendor_user = models.ForeignKey(
+        'accounts.User', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='payouts',
+    )
+    period = models.CharField(max_length=50, blank=True, default='')  # "14–20 Jul"
+    period_start = models.DateField(null=True, blank=True)
+    period_end = models.DateField(null=True, blank=True)
     gross = models.PositiveIntegerField(default=0)
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         ordering = ['-created_at']
+        constraints = [
+            # One payout per vendor per week — generation is idempotent.
+            models.UniqueConstraint(
+                fields=['vendor_user', 'period_start'],
+                name='unique_vendor_week_payout',
+            ),
+        ]
 
 
 class Review(models.Model):
@@ -77,7 +91,8 @@ class AuditEntry(models.Model):
     time = models.CharField(max_length=50, blank=True, default='')
     admin = models.CharField(max_length=150, blank=True, default='')
     action = models.CharField(max_length=150, blank=True, default='')
-    target = models.CharField(max_length=200, blank=True, default='')
+    target = models.CharField(max_length=200, blank=True, default='')   # entity NAME
+    target_id = models.CharField(max_length=64, blank=True, default='')  # entity id
     change = models.CharField(max_length=300, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
 

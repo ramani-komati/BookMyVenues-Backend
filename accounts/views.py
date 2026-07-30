@@ -156,6 +156,11 @@ class BaseOTPRequestView(APIView):
 
         phone = serializer.validated_data['phone']
 
+        # Blocked accounts cannot even request an OTP.
+        blocked = User.objects.filter(phone=phone, is_active=False).exists()
+        if blocked:
+            return _message('This account has been blocked.', status.HTTP_403_FORBIDDEN)
+
         # Per-phone limit, on top of the per-IP throttle.
         window_start = timezone.now() - OTP_REQUEST_WINDOW
         recent = PhoneOTP.objects.filter(phone=phone, created_at__gte=window_start).count()
@@ -243,6 +248,12 @@ class UserOTPVerifyView(APIView):
             return _message(_first_error(serializer.errors), status.HTTP_400_BAD_REQUEST)
 
         phone = serializer.validated_data['phone']
+
+        # Blocked accounts cannot sign in (enforced at verify too, in case an
+        # OTP was issued before the block landed).
+        if User.objects.filter(phone=phone, is_active=False).exists():
+            return _message('This account has been blocked.', status.HTTP_403_FORBIDDEN)
+
         otp, error = _check_otp(phone, serializer.validated_data['otp'], PhoneOTP.Purpose.USER)
         if error:
             return error
@@ -253,7 +264,13 @@ class UserOTPVerifyView(APIView):
         otp.save(update_fields=['used', 'verified'])
 
         # First-time customers get an account automatically (no signup form).
-        user, _ = User.objects.get_or_create(phone=phone)
+        user, _ = User.objects.get_or_create(
+            phone=phone, defaults={'is_customer': True}
+        )
+        # A vendor logging in through the customer app is ALSO a customer.
+        if not user.is_customer:
+            user.is_customer = True
+            user.save(update_fields=['is_customer'])
 
         return Response({
             'user': ProfileSerializer(user).data,
@@ -279,6 +296,10 @@ class VendorOTPVerifyView(APIView):
             return _message(_first_error(serializer.errors), status.HTTP_400_BAD_REQUEST)
 
         phone = serializer.validated_data['phone']
+
+        if User.objects.filter(phone=phone, is_active=False).exists():
+            return _message('This account has been blocked.', status.HTTP_403_FORBIDDEN)
+
         otp, error = _check_otp(phone, serializer.validated_data['otp'], PhoneOTP.Purpose.VENDOR)
         if error:
             return error

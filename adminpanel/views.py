@@ -23,6 +23,7 @@ from bookings.models import Booking
 from venues.models import Listing, VenueDraft
 
 from .auth import CsrfExemptSessionAuthentication, IsAdmin, detail
+from .payouts import generate_payouts
 from .formatters import (
     approval_row,
     audit_row,
@@ -49,11 +50,13 @@ def _to_int(value, default=0):
         return default
 
 
-def record_audit(request, action, target, change=''):
-    """Write a server-side audit row for an admin action."""
+def record_audit(request, action, target, change='', target_id=''):
+    """Write a server-side audit row. `target` is the entity's NAME (stays
+    readable even if the entity is later deleted); `target_id` its raw id."""
     admin = getattr(request.user, 'name', '') or getattr(request.user, 'phone', '')
     AuditEntry.objects.create(
-        admin=admin, action=action, target=str(target), change=str(change)
+        admin=admin, action=action, target=str(target),
+        target_id=str(target_id), change=str(change),
     )
 
 # The one backend the admin session is logged in with.
@@ -156,6 +159,7 @@ class AdminBootstrapView(APIView):
     permission_classes = [IsAdmin]
 
     def get(self, request):
+        generate_payouts()  # fill the Payouts page for completed weeks
         return Response(build_bootstrap())
 
 
@@ -172,12 +176,25 @@ class _AdminWriteView(APIView):
         return request.data if isinstance(request.data, dict) else {}
 
 
-class AdminApprovalUpdateView(_AdminWriteView):
-    """PATCH /api/admin/approvals/<id> — status / checks / notes / timeline."""
+# approval status -> the listing status it maps to.
+_APPROVAL_TO_LISTING = {
+    'approved': Listing.Status.LIVE,
+    'pending': Listing.Status.PENDING,
+    'changes': Listing.Status.CHANGES,
+    'rejected': Listing.Status.REJECTED,
+}
 
-    def patch(self, request, draft_id):
-        draft = VenueDraft.objects.filter(pk=draft_id).first()
-        if draft is None:
+
+class AdminApprovalUpdateView(_AdminWriteView):
+    """PATCH /api/admin/approvals/<id> — id is the LISTING id.
+
+    Status changes cascade to the venue's unit siblings (the listings whose
+    detail.unitOf points at this id) so approving the base venue makes its
+    pitches/screens bookable too."""
+
+    def patch(self, request, listing_id):
+        listing = Listing.objects.filter(pk=listing_id).first()
+        if listing is None:
             return detail('Approval not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
 
@@ -185,17 +202,21 @@ class AdminApprovalUpdateView(_AdminWriteView):
             value = str(data['status'])
             if value not in REVIEW_STATUSES:
                 return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
-            draft.review_status = value
+            listing.status = _APPROVAL_TO_LISTING[value]
+            # Cascade to the unit family (— Pitch 2 / Screen 3 siblings).
+            Listing.objects.filter(
+                record__detail__unitOf=str(listing.pk)
+            ).update(status=listing.status)
         if isinstance(data.get('checks'), dict):
-            draft.review_checks = {**(draft.review_checks or {}), **data['checks']}
+            listing.review_checks = {**(listing.review_checks or {}), **data['checks']}
         if 'notes' in data:
-            draft.review_notes = str(data['notes'] or '')
+            listing.review_notes = str(data['notes'] or '')
         if isinstance(data.get('timeline'), list):
-            draft.review_timeline = data['timeline']
+            listing.review_timeline = data['timeline']
 
-        draft.save()
-        record_audit(request, 'Approval update', draft.id, draft.review_status)
-        return Response(approval_row(draft))
+        listing.save()
+        record_audit(request, 'Approval update', listing.name, listing.status, target_id=str(listing.pk))
+        return Response(approval_row(listing))
 
 
 class AdminVenueUpdateView(_AdminWriteView):
@@ -220,7 +241,7 @@ class AdminVenueUpdateView(_AdminWriteView):
 
         listing.save()
         change = f"{listing.status}{' · featured' if listing.featured else ''}"
-        record_audit(request, 'Venue update', listing.name, change)
+        record_audit(request, 'Venue update', listing.name, change, target_id=str(listing.pk))
         return Response(venue_row(listing))
 
 
@@ -249,7 +270,7 @@ class AdminVendorUpdateView(_AdminWriteView):
 
         vendor.save()
         record_audit(request, 'Vendor update', vendor.name or vendor.phone,
-                     f"kyc={vendor.kyc}, active={vendor.is_active}")
+                     f"kyc={vendor.kyc}, active={vendor.is_active}", target_id=str(vendor.pk))
         return Response(vendor_row(vendor))
 
 
@@ -273,7 +294,7 @@ class AdminUserUpdateView(_AdminWriteView):
 
         user.save()
         record_audit(request, 'User update', user.name or user.phone,
-                     'active' if user.is_active else 'blocked')
+                     'active' if user.is_active else 'blocked', target_id=str(user.pk))
         return Response(user_row(user))
 
 
@@ -293,7 +314,8 @@ class AdminBookingUpdateView(_AdminWriteView):
             booking.status = value
 
         booking.save()
-        record_audit(request, 'Booking update', booking.id, booking.status)
+        record_audit(request, 'Booking update', booking.venue_name or booking.id,
+                     booking.status, target_id=booking.id)
         return Response(booking_row(booking))
 
 
@@ -312,8 +334,6 @@ class AdminSettingsView(_AdminWriteView):
             settings_obj.booking_fee = _to_int(data['fee'], settings_obj.booking_fee)
         if 'feeDate' in data:
             settings_obj.fee_date = str(data['feeDate'] or '')
-        if 'commission' in data:
-            settings_obj.commission = str(data['commission'] or '')
         for key in ('categories', 'cities', 'amenities', 'banners'):
             if isinstance(data.get(key), list):
                 setattr(settings_obj, key, data[key])
@@ -339,7 +359,7 @@ class AdminPayoutUpdateView(_AdminWriteView):
             payout.status = value
 
         payout.save()
-        record_audit(request, 'Payout update', payout.vendor, payout.status)
+        record_audit(request, 'Payout update', payout.vendor, payout.status, target_id=str(payout.pk))
         return Response(payout_row(payout))
 
 
@@ -363,7 +383,7 @@ class AdminReviewResolveView(_AdminWriteView):
             return detail('action must be "keep" or "remove".', status.HTTP_400_BAD_REQUEST)
 
         review.save()
-        record_audit(request, f'Review {action}', review.venue, review.reason)
+        record_audit(request, f'Review {action}', review.venue, review.reason, target_id=str(review.pk))
         return Response(review_row(review))
 
 

@@ -115,6 +115,45 @@ Payout / Review / AuditEntry).
 
 ---
 
+## ✅ Integration round 2 (items 1–10 from the panel team)
+
+1. **Approval workflow** — publishing is now gated: a NEW listing is created
+   `pending` (status is server-owned; the client's status field is ignored) and
+   appears in `bootstrap → approvals[]` with real data incl. `photos[]`.
+   Republishing an existing listing keeps its current status — approved venues
+   never fall back to pending (this also grandfathers every venue that was live
+   before this change). `PATCH /api/admin/approvals/:id` (id = listing id):
+   `approved` → the venue AND its unit siblings (`detail.unitOf` family) go
+   live; `rejected`/`changes` keep the family off the public catalogue while
+   the vendor still sees it (with status) in their dashboard. A new sibling of
+   an already-live base goes live directly. Public endpoints serve `live` only.
+2. **Customer + vendor per phone** — customer identity is a flag, independent
+   of role. Customer OTP login and booking creation set it; vendor registration
+   never clears it. `users[]` = all customer identities (vendors who book
+   included); `vendors[]` unchanged. Backfilled for existing data.
+3. **Bootstrap completeness** — `venues[]` now excludes unit siblings server-
+   side (counts match real venues); no LIMIT on any bootstrap array.
+4. **Payouts** — generated automatically on every bootstrap, one row per vendor
+   per completed week (Mon–Sun): `Σ(booking.amount − ₹20)` over ONLINE bookings;
+   walk-ins and refunded/cancelled excluded. Idempotent — processed rows are
+   never regenerated or reset. Rows carry `periodStart`/`periodEnd` (ISO).
+5. **Settings fee** — was already live (the booking recompute reads it).
+   `commission` removed from Settings responses (fee is the only revenue).
+6. **CSRF** — admin writes are CSRF-exempt (no header needed); session cookie
+   is `SameSite=None; Secure` in production. Confirmed.
+7. **Blocked users enforced** — a blocked phone gets `403` on OTP request AND
+   verify (no SMS sent); existing JWTs also stop working (auth layer rejects
+   inactive accounts).
+8. **Machine-readable dates** — bookings now carry `date` + `createdAt` (ISO);
+   payouts carry `periodStart`/`periodEnd` (ISO).
+9. **Audit rows** — `target` = entity NAME, new `targetId` field carries the id;
+   the acting admin's display name was already stored.
+10. **SMS notifications** — the backend does NOT send SMS on approval decisions;
+    please change the panel wording. (2Factor's SMS route is still DLT-pending,
+    so approval texts would arrive as voice calls — will revisit once approved.)
+
+---
+
 ## 🎉 Admin backend complete
 
 Every endpoint in the super-admin spec is built, tested, and live. Test-first,

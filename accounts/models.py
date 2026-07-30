@@ -81,6 +81,12 @@ class User(AbstractBaseUser, PermissionsMixin):
     # Vendor KYC state, set by an admin (P-admin Phase 2). Unused for customers.
     kyc = models.CharField(max_length=10, choices=Kyc.choices, default=Kyc.PENDING)
 
+    # Customer identity is independent of role: a vendor who logs in through
+    # the customer app (or books a venue) is ALSO a customer. Set by the
+    # customer OTP login and by booking creation; never cleared by vendor
+    # registration. The admin panel's Users list = is_customer=True.
+    is_customer = models.BooleanField(default=False)
+
     # Standard Django flags:
     is_active = models.BooleanField(default=True)   # False = account disabled
     is_staff = models.BooleanField(default=False)   # True = may open /admin/

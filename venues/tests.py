@@ -416,18 +416,34 @@ class ListingTestBase(DraftTestBase):
 
 
 class PublishListingTests(ListingTestBase):
-    def test_publish_own_draft_creates_live_listing(self):
+    def test_publish_creates_pending_listing(self):
+        # New listings await admin approval — status is SERVER-owned.
         response = self.publish()
         self.assertEqual(response.status_code, 201)
         listing = response.data['listing']
-        self.assertEqual(listing['status'], 'live')
+        self.assertEqual(listing['status'], 'pending')
         self.assertEqual(listing['id'], str(self.draft.id))
 
         from venues.models import Listing
         row = Listing.objects.get(pk=self.draft.id)
+        self.assertEqual(row.status, 'pending')
         self.assertEqual(row.name, 'Grand Palace Hall')
         self.assertEqual(row.slug, 'grand-palace-hall')
         self.assertEqual(row.vendor, self.vendor)
+
+    def test_client_cannot_set_status_live(self):
+        response = self.publish(status='live')  # client lies — ignored
+        self.assertEqual(response.data['listing']['status'], 'pending')
+
+    def test_republish_keeps_live_status(self):
+        # Grandfathering / self-heal: an approved venue republished by the
+        # vendor must NEVER fall back to pending.
+        from venues.models import Listing
+        self.publish()
+        Listing.objects.filter(pk=self.draft.id).update(status='live')
+        response = self.publish(name='Edited Name')
+        self.assertEqual(response.data['listing']['status'], 'live')
+        self.assertEqual(Listing.objects.get(pk=self.draft.id).status, 'live')
 
     def test_republish_updates_never_duplicates(self):
         self.publish()
@@ -486,6 +502,11 @@ class PublicBrowsingTests(ListingTestBase):
     def setUp(self):
         super().setUp()
         self.publish()
+        # Approve the listing (admin action) so it shows publicly.
+        from venues.models import Listing
+        Listing.objects.filter(pk=self.draft.id).update(status='live')
+        from django.core.cache import cache
+        cache.clear()
         self.client.force_authenticate(user=None)  # public = no auth
 
     def clear_cache(self):

@@ -179,19 +179,20 @@ class AdminWriteTests(APITestCase):
         )
         self.client.force_authenticate(user=self.admin)
 
-    # --- approvals ---
-    def test_approve(self):
+    # --- approvals (keyed by LISTING id) ---
+    def test_approve_makes_listing_live(self):
+        Listing.objects.filter(pk=self.listing.pk).update(status='pending')
         r = self.client.patch(
-            f'/api/admin/approvals/{self.draft.id}', {'status': 'approved'}, format='json'
+            f'/api/admin/approvals/{self.listing.id}', {'status': 'approved'}, format='json'
         )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data['status'], 'approved')
-        self.draft.refresh_from_db()
-        self.assertEqual(self.draft.review_status, 'approved')
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'live')
 
     def test_toggle_checklist_and_notes(self):
         r = self.client.patch(
-            f'/api/admin/approvals/{self.draft.id}',
+            f'/api/admin/approvals/{self.listing.id}',
             {'checks': {'photos': True}, 'notes': 'Verified on call.'},
             format='json',
         )
@@ -201,7 +202,7 @@ class AdminWriteTests(APITestCase):
 
     def test_invalid_approval_status_rejected(self):
         r = self.client.patch(
-            f'/api/admin/approvals/{self.draft.id}', {'status': 'weird'}, format='json'
+            f'/api/admin/approvals/{self.listing.id}', {'status': 'weird'}, format='json'
         )
         self.assertEqual(r.status_code, 400)
         self.assertIn('detail', r.data)
@@ -286,13 +287,13 @@ class AdminPhase3Tests(APITestCase):
     def test_settings_put_and_bootstrap(self):
         r = self.client.put(
             '/api/admin/settings',
-            {'fee': '30', 'commission': '12', 'cities': ['HSR']},
+            {'fee': '30', 'cities': ['HSR']},
             format='json',
         )
         self.assertEqual(r.status_code, 200)
         self.assertEqual(r.data['fee'], '30')
-        self.assertEqual(r.data['commission'], '12')
         self.assertEqual(r.data['cities'], ['HSR'])
+        self.assertNotIn('commission', r.data)  # commission is gone
         boot = self.client.get('/api/admin/bootstrap')
         self.assertEqual(boot.data['settings']['fee'], '30')
 
@@ -369,4 +370,230 @@ class AdminPhase3Tests(APITestCase):
         self.client.patch(
             f'/api/admin/vendors/{vendor.id}', {'kyc': 'verified'}, format='json'
         )
-        self.assertTrue(AuditEntry.objects.filter(action='Vendor update').exists())
+        entry = AuditEntry.objects.filter(action='Vendor update').first()
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.target, 'Ravi')             # name, not id
+        self.assertEqual(entry.target_id, str(vendor.id))  # id kept separately
+
+
+class ApprovalWorkflowTests(APITestCase):
+    """Integration round 2, item 1 — the full approve/reject lifecycle."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9990000003', name='Ravi', email='ravi@x.in', role=User.Role.VENDOR,
+        )
+        self.base = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='turf',
+            record={'name': 'Turf', 'price': 500, 'detail': {}},
+            name='Turf', category='Box cricket', locality='HSR', pincode='560102',
+            status='pending',
+        )
+        self.sibling = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='turf-pitch-2',
+            record={'name': 'Turf — Pitch 2', 'price': 700,
+                    'detail': {'unitOf': str(self.base.id), 'unitLabel': 'Pitch 2'}},
+            name='Turf — Pitch 2', category='Box cricket', locality='HSR',
+            pincode='560102', status='pending',
+        )
+
+    def _clear_cache(self):
+        from django.core.cache import cache
+        cache.clear()
+
+    def test_pending_venue_hidden_from_public(self):
+        self._clear_cache()
+        response = self.client.get('/api/venues')
+        self.assertEqual(response.data['total'], 0)
+
+    def test_pending_venue_visible_in_vendor_dashboard(self):
+        self.client.force_authenticate(user=self.vendor)
+        venues = self.client.get('/api/vendors/me/dashboard').data['venues']
+        self.assertEqual(len(venues), 2)
+        self.assertIn('pending', {v['status'] for v in venues})
+
+    def test_pending_listing_appears_in_approvals(self):
+        self.client.force_authenticate(user=self.admin)
+        approvals = self.client.get('/api/admin/bootstrap').data['approvals']
+        names = [a['name'] for a in approvals]
+        self.assertIn('Turf', names)
+        self.assertNotIn('Turf — Pitch 2', names)  # siblings never queue
+        row = approvals[names.index('Turf')]
+        self.assertIn('photos', row)  # gallery grid for the review page
+
+    def test_approve_cascades_to_unit_family(self):
+        self.client.force_authenticate(user=self.admin)
+        r = self.client.patch(
+            f'/api/admin/approvals/{self.base.id}', {'status': 'approved'}, format='json'
+        )
+        self.assertEqual(r.status_code, 200)
+        self.base.refresh_from_db()
+        self.sibling.refresh_from_db()
+        self.assertEqual(self.base.status, 'live')
+        self.assertEqual(self.sibling.status, 'live')   # pitches bookable too
+        self._clear_cache()
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/venues').data['total'], 2)
+
+    def test_reject_keeps_family_off_catalogue(self):
+        self.client.force_authenticate(user=self.admin)
+        self.client.patch(
+            f'/api/admin/approvals/{self.base.id}', {'status': 'rejected'}, format='json'
+        )
+        self.sibling.refresh_from_db()
+        self.assertEqual(self.sibling.status, 'rejected')
+        self._clear_cache()
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/venues').data['total'], 0)
+
+    def test_new_sibling_of_live_base_goes_live_directly(self):
+        self.base.status = 'live'
+        self.base.save(update_fields=['status'])
+        draft = VenueDraft.objects.create(vendor=self.vendor)
+        self.client.force_authenticate(user=self.vendor)
+        r = self.client.post('/api/vendors/me/listings', {
+            'id': str(draft.id), 'name': 'Turf — Pitch 3', 'price': 800,
+            'detail': {'unitOf': str(self.base.id), 'unitLabel': 'Pitch 3'},
+        }, format='json')
+        self.assertEqual(r.data['listing']['status'], 'live')
+
+    def test_bootstrap_venues_excludes_siblings(self):
+        self.client.force_authenticate(user=self.admin)
+        venues = self.client.get('/api/admin/bootstrap').data['venues']
+        self.assertEqual([v['name'] for v in venues], ['Turf'])
+
+
+class CustomerVendorIdentityTests(APITestCase):
+    """Integration round 2, item 2 — one phone can be customer AND vendor."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+
+    def test_vendor_who_books_appears_in_both_lists(self):
+        vendor = User.objects.create_user(
+            phone='9990000003', name='Ravi', email='ravi@x.in', role=User.Role.VENDOR,
+        )
+        listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=vendor, slug='hall',
+            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            name='Hall', category='hall', locality='x', pincode='560001',
+        )
+        # The vendor books a venue as a customer:
+        self.client.force_authenticate(user=vendor)
+        import datetime as dt
+        tomorrow = (today_ist() + dt.timedelta(days=1)).isoformat()
+        r = self.client.post('/api/users/me/bookings', {
+            'venueId': str(listing.id), 'date': tomorrow,
+            'slots': ['10:00 – 11:00'], 'addons': [], 'perSlot': 600, 'amount': 620,
+        }, format='json')
+        self.assertEqual(r.status_code, 201)
+
+        self.client.force_authenticate(user=self.admin)
+        boot = self.client.get('/api/admin/bootstrap').data
+        vendor_phones = {v['phone'] for v in boot['vendors']}
+        user_phones = {u['phone'] for u in boot['users']}
+        self.assertIn('9990000003', vendor_phones)
+        self.assertIn('9990000003', user_phones)  # BOTH lists
+
+    def test_customer_otp_login_sets_customer_flag(self):
+        vendor = User.objects.create_user(
+            phone='9990000004', name='V', email='v2@x.in', role=User.Role.VENDOR,
+        )
+        with patch('accounts.views.send_otp_sms', side_effect=lambda p, c: None):
+            self.client.post('/api/users/auth/otp', {'phone': '9990000004'}, format='json')
+        from accounts.models import PhoneOTP
+        from django.contrib.auth.hashers import make_password
+        PhoneOTP.objects.filter(phone='9990000004').update(code_hash=make_password('123456'))
+        self.client.post(
+            '/api/users/auth/verify',
+            {'phone': '9990000004', 'otp': '123456'}, format='json',
+        )
+        vendor.refresh_from_db()
+        self.assertTrue(vendor.is_customer)
+        self.assertEqual(vendor.role, User.Role.VENDOR)  # vendor role untouched
+
+
+class PayoutGenerationTests(APITestCase):
+    """Integration round 2, item 4 — weekly payout rows from online bookings."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9990000003', name='Ravi', email='ravi@x.in', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='hall',
+            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            name='Hall', category='hall', locality='x', pincode='560001',
+        )
+        # Last week (fully completed): Monday of this week minus 7/6 days.
+        import datetime as dt
+        monday = today_ist() - dt.timedelta(days=today_ist().weekday())
+        self.last_mon = monday - dt.timedelta(days=7)
+        self.last_tue = self.last_mon + dt.timedelta(days=1)
+
+    def _boot(self):
+        self.client.force_authenticate(user=self.admin)
+        return self.client.get('/api/admin/bootstrap').data
+
+    def test_online_bookings_minus_fee(self):
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=620, customer_name='A',
+        )
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_tue,
+            slots=['12:00 – 13:00'], amount=1220, customer_name='A',
+        )
+        payouts = self._boot()['payouts']
+        self.assertEqual(len(payouts), 1)
+        row = payouts[0]
+        self.assertEqual(row['vendor'], 'Ravi')
+        self.assertEqual(row['grossNum'], (620 - 20) + (1220 - 20))
+        self.assertEqual(row['status'], 'pending')
+        self.assertEqual(row['periodStart'], self.last_mon.isoformat())
+
+    def test_walkins_and_refunds_excluded(self):
+        Booking.objects.create(   # walk-in — vendor already has the cash
+            listing=self.listing, user=None, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=600,
+            method=Booking.Method.WALK_IN, walk_in=True,
+        )
+        Booking.objects.create(   # refunded — no payout
+            listing=self.listing, user=self.customer, date=self.last_tue,
+            slots=['12:00 – 13:00'], amount=1220, status='refunded',
+        )
+        self.assertEqual(self._boot()['payouts'], [])
+
+    def test_generation_is_idempotent_and_keeps_admin_status(self):
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=620,
+        )
+        payout_id = self._boot()['payouts'][0]['id']
+        self.client.patch(
+            f'/api/admin/payouts/{payout_id}', {'status': 'completed'}, format='json'
+        )
+        payouts = self._boot()['payouts']  # regenerating must not duplicate/reset
+        self.assertEqual(len(payouts), 1)
+        self.assertEqual(payouts[0]['status'], 'completed')
+
+    def test_booking_rows_have_iso_date(self):
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=620,
+        )
+        bookings = self._boot()['bookings']
+        self.assertEqual(bookings[0]['date'], self.last_mon.isoformat())
+        self.assertIn('createdAt', bookings[0])
