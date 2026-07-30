@@ -553,3 +553,51 @@ class OldWizardRemovedTests(DraftTestBase):
     def test_old_payout_endpoint_gone(self):
         response = self.client.get('/api/v1/vendor/payout')
         self.assertEqual(response.status_code, 404)
+
+
+class MapsResolveTests(APITestCase):
+    """GET /api/maps/resolve — P2. The HTTP redirect is always mocked."""
+
+    URL = '/api/maps/resolve'
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # the resolver caches results — isolate tests
+
+    def _fake(self, final_url):
+        class FakeResponse:
+            url = final_url
+        return FakeResponse()
+
+    def test_resolves_short_link(self):
+        final = 'https://www.google.com/maps/place/@17.88,79.59'
+        with patch('venues.maps.requests.get', return_value=self._fake(final)):
+            response = self.client.get(self.URL, {'url': 'https://maps.app.goo.gl/XYZ'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['resolved'], final)
+
+    def test_rejects_non_allowed_host(self):
+        # No network call happens — the SSRF guard blocks it first.
+        response = self.client.get(self.URL, {'url': 'https://evil.example.com/x'})
+        self.assertEqual(response.status_code, 400)
+
+    def test_rejects_missing_url(self):
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 400)
+
+    def test_result_is_cached(self):
+        with patch(
+            'venues.maps.requests.get',
+            return_value=self._fake('https://www.google.com/maps/x'),
+        ) as mock_get:
+            self.client.get(self.URL, {'url': 'https://goo.gl/maps/ABC'})
+            self.client.get(self.URL, {'url': 'https://goo.gl/maps/ABC'})
+        self.assertEqual(mock_get.call_count, 1)  # 2nd request served from cache
+
+    def test_public_no_auth_needed(self):
+        with patch(
+            'venues.maps.requests.get',
+            return_value=self._fake('https://www.google.com/maps/y'),
+        ):
+            response = self.client.get(self.URL, {'url': 'https://g.co/maps/Q'})
+        self.assertEqual(response.status_code, 200)

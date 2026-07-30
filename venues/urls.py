@@ -4,9 +4,11 @@ Photo upload/delete routes join in Phase 3.
 """
 from django.urls import path
 
-from . import public_views, views
+from . import maps, public_views, views
 
 urlpatterns = [
+    # Google Maps short-link resolver (P2) — public, no auth.
+    path('maps/resolve', maps.MapsResolveView.as_view(), name='maps-resolve'),
     # Vendor: publish / delete listings (contract 3.5, 3.6)
     path('vendors/me/listings', views.VendorListingPublishView.as_view(), name='listing-publish'),
     path(

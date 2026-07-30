@@ -2,7 +2,7 @@
 
 Living status board. Rewritten as each phase lands. Base `/api` · JWT · errors `{ "message": "..." }`.
 
-**Last updated:** after Phase 2 · Production: `https://bookmyvenues-backend.onrender.com`
+**Last updated:** after Phase 3 · Production: `https://bookmyvenues-backend.onrender.com`
 
 ---
 
@@ -16,7 +16,7 @@ Living status board. Rewritten as each phase lands. Base `/api` · JWT · errors
 | 🟡 **P5a** | Structured amount-mismatch error (`code`, `expectedAmount`) | ✅ **DONE** |
 | 🟡 **P5b** | JSON `{ "message" }` 404s for bad/non-UUID ids | ✅ **DONE** |
 | ✅ **P5c** | Pagination for `GET /venues` | ✅ Already works (`?page=`) |
-| 🟠 **P2** | `GET /maps/resolve` — resolve Google Maps short links | ⏳ Planned (Phase 3) |
+| 🟠 **P2** | `GET /maps/resolve` — resolve Google Maps short links | ✅ **DONE** |
 | 🔴 **P6** | Per-unit bookings (multi-pitch / court / screen) | ⏳ Planned (Phase 4) |
 
 ---
@@ -90,11 +90,21 @@ default 20, response includes `total`). No backend change needed.
 
 ---
 
-## Planned next (in order)
+## ✅ P2 — Google Maps short-link resolver
 
-- **Phase 3:** P2 `GET /maps/resolve` — follow the short-link redirect
-  server-side, cache it, host allowlist `maps.app.goo.gl` / `goo.gl` / `g.co`
-  only (SSRF guard). Public, no auth.
+- **`GET /maps/resolve?url=<shortlink>`** (public, no auth)
+  → `200 { "resolved": "https://www.google.com/maps/place/…!3d..!4d.." }`
+
+The server follows the redirect and returns the final URL; results are cached
+30 days. **SSRF guard:** only `maps.app.goo.gl`, `goo.gl`, `g.co` are accepted
+(exact host match, no subdomains) — any other host → `400`. Only the final URL
+string is returned, never the fetched page body. `400` on a missing/unsupported
+url or a redirect that fails to resolve.
+
+---
+
+## Planned next
+
 - **Phase 4:** P6 per-unit bookings — new booking fields (`sport`, `unit`,
   `unitLabel`), overlap keyed per `(venue, sport, unit)`, per-unit rate
   validation, `bookedUnits` in availability. Needs a DB migration; will inspect
