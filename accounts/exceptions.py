@@ -14,6 +14,12 @@ from rest_framework.views import exception_handler
 def api_exception_handler(exc, context):
     response = exception_handler(exc, context)
 
+    # The super-admin panel (/api/admin/...) keeps DRF's native {"detail": ...}
+    # shape. The customer/vendor API renames it to {"message": ...}.
+    request = context.get('request') if context else None
+    if request is not None and request.path.startswith('/api/admin'):
+        return response
+
     if response is not None and isinstance(response.data, dict):
         detail = response.data.get('detail')
         if detail is not None:

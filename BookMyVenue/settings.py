@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     'accounts',
     'venues',
     'bookings',
+    'adminpanel',
 ]
 
 MIDDLEWARE = [
@@ -199,6 +200,12 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# The admin panel authenticates with a cookie session, so the browser must be
+# allowed to send credentials cross-origin. NOTE: browsers refuse credentialed
+# requests when CORS_ALLOW_ALL_ORIGINS is True — the admin panel's origin must
+# be listed explicitly in CORS_ALLOWED_ORIGINS for its cookie login to work.
+CORS_ALLOW_CREDENTIALS = True
+
 
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
@@ -260,3 +267,6 @@ if not DEBUG:
     SECURE_HSTS_PRELOAD = True
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    # The admin panel is served from a different site, so its session cookie
+    # must be sent cross-site. SameSite=None requires Secure (set above).
+    SESSION_COOKIE_SAMESITE = 'None'

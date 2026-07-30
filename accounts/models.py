@@ -106,6 +106,7 @@ class PhoneOTP(models.Model):
     class Purpose(models.TextChoices):
         USER = 'USER', 'User'        # customer login
         VENDOR = 'VENDOR', 'Vendor'  # vendor login / signup
+        ADMIN = 'ADMIN', 'Admin'     # super-admin login (2nd step after password)
 
     LIFETIME_MINUTES = 5   # code expires 5 minutes after sending
     MAX_ATTEMPTS = 5       # wrong guesses allowed before the OTP is locked

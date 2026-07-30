@@ -25,6 +25,8 @@ urlpatterns = [
     # venue-detail catch-all route.
     path('api/', include('bookings.urls')),
     path('api/', include('venues.urls')),
+    # Super-admin panel (cookie-session auth, {"detail"} errors) — /api/admin/
+    path('api/admin/', include('adminpanel.urls')),
     # Utility routes (health, me, refresh) — /api/v1/
     path('api/v1/', include('accounts.urls')),
 ]
