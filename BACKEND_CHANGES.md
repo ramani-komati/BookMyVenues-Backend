@@ -136,6 +136,35 @@ untouched and keep working as whole-venue bookings.
 
 ---
 
+## ✅ Coupons / offers
+
+Offers live inside a venue's `detail.offers` (like `packages`/`addons`):
+`{ title, code, type: percent|flat, value, minAmount, maxDiscount, expiry }`.
+
+- **Items 1–3 needed no code** — draft sections, the listing `record`, and the
+  public detail response all store & echo the `detail` blob **verbatim**, so
+  `detail.offers` rides along automatically (PATCH draft details → GET draft;
+  publish → listing; `GET /venues/:idOrSlug`).
+- **Item 4 — discount applied at booking** (`POST /users/me/bookings` and
+  `/vendors/me/walkin-bookings`):
+
+  ```
+  base     = Σ round(rate × min/60) + Σ(addon.price × qty)     # slots + add-ons
+  discount = percent → min(round(base × value/100), maxDiscount?)   (banker's rounding)
+             flat    → min(value, base)
+  discount = min(discount, base)
+  amount   = max(0, base − discount) + ₹20 fee                 # fee is NOT discounted
+  ```
+
+  Server **validates** the coupon against the venue's `detail.offers`: unknown
+  code / expired / below `minAmount` → `400 { "message" }`. A blank/absent code
+  matches the venue's auto-apply (`code == ""`) offer. The applied `offer` and
+  `discountAmount` are **persisted and echoed** on the booking (my-bookings +
+  dashboard). Walk-ins apply the discount too (no ₹20 fee). Migration `0005`
+  adds `Booking.offer` + `discount_amount` (nullable/default — existing rows safe).
+
+---
+
 ## 🎉 All backlog items complete
 
 Every item in `BACKEND_ISSUES.md` and `BACKEND_UNITS_SPEC.md` is done and live.

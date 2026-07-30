@@ -60,6 +60,9 @@ class Booking(models.Model):
     slots = models.JSONField(default=list)      # ["19:30 – 21:00", ...]
     per_slot = models.PositiveIntegerField(default=0)  # hourly rate (₹)
     addons = models.JSONField(default=list)     # [{"name", "qty", "price"}]
+    # Applied coupon/offer (server-validated) + the discount it gave, in ₹.
+    offer = models.JSONField(null=True, blank=True)  # {code,title,type,value} or null
+    discount_amount = models.PositiveIntegerField(default=0)
     amount = models.PositiveIntegerField()      # total, server-computed (₹)
 
     method = models.CharField(max_length=10, choices=Method.choices, default=Method.ONLINE)
@@ -94,6 +97,8 @@ class Booking(models.Model):
             'unitLabel': self.unit_label or None,
             'perSlot': self.per_slot,
             'addons': self.addons,
+            'offer': self.offer or None,
+            'discountAmount': self.discount_amount,
             'amount': self.amount,
             'method': self.method,
             'walkIn': self.walk_in,

@@ -7,6 +7,7 @@ Listing row (select_for_update) inside a transaction, which forces
 concurrent bookings for the same venue to run one after another.
 Error shape everywhere: {"message": "..."}.
 """
+import datetime
 from collections import defaultdict
 
 from django.db import transaction
@@ -133,28 +134,14 @@ def _unit_rate(listing, sport, unit):
     return None
 
 
-def compute_amount(listing, intervals, requested_addons, rate=None):
+def _addon_total(requested_addons):
     """
-    Server-side price:
-        round(hourly rate x minutes / 60)   (slot — per-unit rate if given,
-                                             else the listing price)
-      + sum(addon.price x qty)              (add-ons — priced FROM THE REQUEST)
-      + ₹20 fee
-
-    The frontend folds packages and extra-person charges INTO the `addons`
-    array as ordinary priced line items (names that deliberately are NOT in the
-    listing's add-on catalogue). We therefore take each add-on's price from the
-    request and never reject a line for having an unrecognised name — otherwise
-    packages / extra persons / vendor-custom add-ons would fail every booking.
-
-    NOTE: this trusts client-supplied add-on prices. That is acceptable while
-    there is no live payment (amount is only a recorded number today); revisit
-    and re-validate against the catalogue when real payments land.
+    (total, cleaned_lines) for the add-ons. Prices are taken FROM THE REQUEST:
+    the frontend folds packages and extra-person charges into the addons array
+    as priced line items (names deliberately not in the listing catalogue), so
+    we never reject a line for an unrecognised name. Trusting client add-on
+    prices is acceptable while there is no live payment; revisit when it lands.
     """
-    if rate is None:
-        rate = _to_int(listing.record.get('price') or 0, 'venue price')
-    base = round(rate * total_minutes(intervals) / 60)
-
     addon_total = 0
     cleaned = []
     for addon in requested_addons or []:
@@ -169,8 +156,86 @@ def compute_amount(listing, intervals, requested_addons, rate=None):
             raise SlotError('addon price cannot be negative.')
         addon_total += price * qty
         cleaned.append({'name': name, 'qty': qty, 'price': price})
+    return addon_total, cleaned
 
-    return base + addon_total + _booking_fee(), cleaned
+
+def _apply_offer(listing, base, offer_request):
+    """
+    Validate the requested coupon against the venue's stored `detail.offers`
+    and return (discount, applied_offer) — discount in ₹, applied_offer a
+    {code,title,type,value} dict (or None when no offer was sent).
+
+    `base` = slots + add-ons (NEVER the fee). Raises SlotError (-> 400) when the
+    offer is unknown / expired / below its minimum spend.
+    """
+    if not offer_request or not isinstance(offer_request, dict):
+        return 0, None
+
+    code = str(offer_request.get('code') or '').strip().upper()
+    catalog = (listing.record.get('detail') or {}).get('offers') or []
+    matched = next(
+        (o for o in catalog if str(o.get('code') or '').strip().upper() == code),
+        None,
+    )
+    if matched is None:
+        if code == '':
+            return 0, None  # no auto-apply ("") offer for this venue -> no discount
+        raise SlotError('This offer is not valid for this venue.')
+
+    expiry = str(matched.get('expiry') or '').strip()
+    if expiry:
+        try:
+            parsed_expiry = datetime.date.fromisoformat(expiry)
+        except ValueError:
+            parsed_expiry = None  # unparseable -> treat as no expiry
+        # NB: raise OUTSIDE the try — SlotError subclasses ValueError and would
+        # otherwise be swallowed by the except above.
+        if parsed_expiry is not None and parsed_expiry < today_ist():
+            raise SlotError('This offer has expired.')
+
+    min_amount = _to_int(matched.get('minAmount') or 0, 'minAmount')
+    if base < min_amount:
+        raise SlotError(f'This offer needs a minimum spend of ₹{min_amount}.')
+
+    offer_type = str(matched.get('type') or '').strip().lower()
+    value = _to_int(matched.get('value') or 0, 'offer value')
+    if offer_type == 'percent':
+        discount = round(base * value / 100)  # banker's rounding, matches frontend
+        cap = matched.get('maxDiscount')
+        if str(cap or '').strip():
+            discount = min(discount, _to_int(cap, 'maxDiscount'))
+    else:  # flat
+        discount = min(value, base)
+    discount = min(discount, base)  # never exceed the discountable base
+
+    applied = {
+        'code': matched.get('code') or '',
+        'title': matched.get('title') or '',
+        'type': offer_type,
+        'value': value,
+    }
+    return discount, applied
+
+
+def compute_amount(listing, intervals, requested_addons, rate=None, offer_request=None):
+    """
+    Server-side total:
+        base     = round(rate x minutes / 60) + sum(addon.price x qty)
+        discount = coupon applied to `base` (slots + add-ons only)
+        amount   = max(0, base - discount) + fee   (the ₹ fee is NOT discounted)
+
+    `rate` is the per-unit rate when given, else the listing price. Returns
+    (amount, cleaned_addons, applied_offer, discount).
+    """
+    if rate is None:
+        rate = _to_int(listing.record.get('price') or 0, 'venue price')
+    slot_base = round(rate * total_minutes(intervals) / 60)
+    addon_total, cleaned = _addon_total(requested_addons)
+    base = slot_base + addon_total
+
+    discount, applied_offer = _apply_offer(listing, base, offer_request)
+    amount = max(0, base - discount) + _booking_fee()
+    return amount, cleaned, applied_offer, discount
 
 
 def _slot_start(text):
@@ -306,7 +371,10 @@ class MyBookingsView(APIView):
             intervals = parse_slots(body.get('slots'))
             sport, unit, unit_label = _parse_unit(body)
             rate = _unit_rate(listing, sport, unit)  # None -> listing price
-            amount, addons = compute_amount(listing, intervals, body.get('addons'), rate=rate)
+            amount, addons, applied_offer, discount = compute_amount(
+                listing, intervals, body.get('addons'), rate=rate,
+                offer_request=body.get('offer'),
+            )
             client_amount = _to_int(body.get('amount'), 'amount')
         except SlotError as error:
             return _message(str(error), status.HTTP_400_BAD_REQUEST)
@@ -352,6 +420,8 @@ class MyBookingsView(APIView):
                 slots=[str(slot) for slot in body['slots']],
                 per_slot=_to_int(body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'),
                 addons=addons,
+                offer=applied_offer,
+                discount_amount=discount,
                 amount=amount,
             )
 

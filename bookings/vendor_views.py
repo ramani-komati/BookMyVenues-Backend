@@ -26,6 +26,7 @@ from .slots import (
 )
 from .views import (
     _amount_mismatch,
+    _apply_offer,
     _booked_intervals,
     _message,
     _parse_unit,
@@ -199,8 +200,14 @@ class WalkInBookingView(APIView):
         if date < today_ist():
             return _message('Cannot book a past date.', status.HTTP_400_BAD_REQUEST)
 
-        # Contract: walk-in amount = hourly rate x duration (no fee).
-        amount = round(per_slot * total_minutes(intervals) / 60)
+        # Contract: walk-in amount = hourly rate x duration, minus any coupon,
+        # NO ₹20 fee.
+        base = round(per_slot * total_minutes(intervals) / 60)
+        try:
+            discount, applied_offer = _apply_offer(listing, base, body.get('offer'))
+        except SlotError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+        amount = max(0, base - discount)
         if client_amount != amount:
             return _amount_mismatch(amount)
 
@@ -229,6 +236,8 @@ class WalkInBookingView(APIView):
                 slots=[str(slot) for slot in body['slots']],
                 per_slot=per_slot,
                 addons=[],
+                offer=applied_offer,
+                discount_amount=discount,
                 amount=amount,
                 method=Booking.Method.WALK_IN,
                 walk_in=True,

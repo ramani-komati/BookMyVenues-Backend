@@ -438,6 +438,18 @@ class PublishListingTests(ListingTestBase):
         self.assertEqual(Listing.objects.count(), 1)
         self.assertEqual(Listing.objects.get(pk=self.draft.id).name, 'Renamed Palace')
 
+    def test_offers_persist_in_detail(self):
+        # detail.offers rides along verbatim (like packages/addons) — items 2 & 3.
+        record = {
+            **LISTING_RECORD,
+            'detail': {
+                **LISTING_RECORD['detail'],
+                'offers': [{'code': 'SAVE10', 'type': 'percent', 'value': '10'}],
+            },
+        }
+        r = self.publish(record=record)
+        self.assertEqual(r.data['listing']['detail']['offers'][0]['code'], 'SAVE10')
+
     def test_update_without_gallery_keeps_old_photos(self):
         self.publish()
         record = {**LISTING_RECORD}

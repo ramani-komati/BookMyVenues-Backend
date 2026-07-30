@@ -514,6 +514,112 @@ PLAYZONE_RECORD = {
 }
 
 
+OFFER_RECORD = {
+    'name': 'Offer Hall', 'category': 'hall', 'location': 'x',
+    'price': 600, 'image': '', 'gallery': [],
+    'detail': {
+        'addons': [],
+        'offers': [
+            {'title': 'Weekend', 'code': 'SAVE10', 'type': 'percent',
+             'value': '10', 'minAmount': '500', 'maxDiscount': '300', 'expiry': ''},
+            {'title': 'Flat', 'code': 'FLAT100', 'type': 'flat',
+             'value': '100', 'minAmount': '', 'maxDiscount': '', 'expiry': ''},
+            {'title': 'Auto', 'code': '', 'type': 'percent',
+             'value': '5', 'minAmount': '', 'maxDiscount': '', 'expiry': ''},
+            {'title': 'Old', 'code': 'OLD', 'type': 'percent',
+             'value': '50', 'minAmount': '', 'maxDiscount': '', 'expiry': '2020-01-01'},
+        ],
+    },
+}
+
+
+class OfferBookingTests(BookingTestBase):
+    """Coupon/offer discounts applied at booking time (item 4)."""
+
+    def setUp(self):
+        super().setUp()
+        self.offer_listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='offer-hall',
+            record={**OFFER_RECORD, 'id': 'o', 'status': 'live'},
+            name='Offer Hall', category='hall', locality='x', pincode='560001',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, offer=None, **overrides):
+        body = {
+            'venueId': str(self.offer_listing.id),
+            'date': TOMORROW,
+            'slots': ['19:00 – 21:00'],   # 2h x 600 = 1200 base
+            'addons': [],
+            'perSlot': 600,
+            'offer': offer,
+            **overrides,
+        }
+        return self.client.post('/api/users/me/bookings', body, format='json')
+
+    def test_percent_offer(self):
+        # 1200 - 10% (120) + 20 fee = 1100
+        r = self.book(offer={'code': 'SAVE10'}, amount=1100)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 120)
+        self.assertEqual(r.data['booking']['amount'], 1100)
+        self.assertEqual(r.data['booking']['offer']['code'], 'SAVE10')
+
+    def test_percent_offer_capped_by_maxDiscount(self):
+        # 6h x 600 = 3600; 10% = 360 but capped at 300; 3300 + 20 = 3320
+        r = self.book(slots=['12:00 – 18:00'], offer={'code': 'SAVE10'}, amount=3320)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 300)
+
+    def test_flat_offer(self):
+        # 1200 - 100 + 20 = 1120
+        r = self.book(offer={'code': 'FLAT100'}, amount=1120)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 100)
+
+    def test_blank_code_auto_applies(self):
+        # Auto offer: 5% of 1200 = 60; 1140 + 20 = 1160
+        r = self.book(offer={'code': ''}, amount=1160)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 60)
+
+    def test_no_offer_means_no_discount(self):
+        r = self.book(offer=None, amount=1220)  # 1200 + 20
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 0)
+        self.assertIsNone(r.data['booking']['offer'])
+
+    def test_min_amount_rejected(self):
+        # 30 min x 600 = 300 base, below SAVE10's ₹500 minimum
+        r = self.book(slots=['19:00 – 19:30'], offer={'code': 'SAVE10'}, amount=300)
+        self.assertEqual(r.status_code, 400)
+
+    def test_expired_offer_rejected(self):
+        r = self.book(offer={'code': 'OLD'}, amount=620)
+        self.assertEqual(r.status_code, 400)
+
+    def test_unknown_offer_rejected(self):
+        r = self.book(offer={'code': 'NOPE'}, amount=1220)
+        self.assertEqual(r.status_code, 400)
+
+    def test_fee_is_not_discounted(self):
+        # discount 120 applies to base only; fee stays ₹20 (1200-120+20=1100)
+        r = self.book(offer={'code': 'SAVE10'}, amount=1100)
+        self.assertEqual(r.data['booking']['amount'] - (1200 - 120), 20)
+
+    def test_walkin_applies_offer_without_fee(self):
+        self.client.force_authenticate(user=self.vendor)
+        body = {
+            'venueId': str(self.offer_listing.id), 'date': TOMORROW,
+            'slots': ['19:00 – 21:00'], 'customer': 'Walk-in',
+            'perSlot': 600, 'offer': {'code': 'FLAT100'}, 'amount': 1100,  # 1200-100, no fee
+        }
+        r = self.client.post('/api/vendors/me/walkin-bookings', body, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 100)
+        self.assertEqual(r.data['booking']['amount'], 1100)
+
+
 class PerUnitBookingTests(BookingTestBase):
     """P6 — a venue with several pitches/courts/screens (per-unit bookings)."""
 
