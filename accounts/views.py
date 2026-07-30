@@ -11,6 +11,8 @@ Error shape everywhere: {"message": "..."} (frontend contract).
 import datetime
 
 from django.contrib.auth.hashers import check_password, make_password
+from django.core.exceptions import ValidationError
+from django.core.validators import validate_email
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -68,6 +70,71 @@ class MeView(APIView):
 
     def get(self, request):
         return Response(UserSerializer(request.user).data)
+
+
+# ---------------------------------------------------------------
+# Profile update (customers and vendors) — contract P4
+# ---------------------------------------------------------------
+
+def _apply_profile_update(user, data):
+    """
+    Apply {name?, email?} to the user IN PLACE and return an error message,
+    or None on success. `phone` is NEVER read from the body — it is the
+    sign-in identity and must stay immutable.
+    """
+    if not isinstance(data, dict):
+        return 'Request body must be a JSON object.'
+
+    if 'name' in data:
+        name = str(data.get('name') or '').strip()
+        if not name:
+            return 'Name cannot be empty.'
+        user.name = name
+
+    if 'email' in data:
+        email = str(data.get('email') or '').strip()
+        if email:
+            try:
+                validate_email(email)
+            except ValidationError:
+                return 'Enter a valid email address.'
+            if User.objects.filter(email__iexact=email).exclude(pk=user.pk).exists():
+                return 'Email already in use.'
+            user.email = email
+        else:
+            user.email = None  # clearing the email is allowed
+    return None
+
+
+class UserProfileUpdateView(APIView):
+    """PATCH /api/users/me {name?, email?} -> {"user": {phone, name, email}}."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        error = _apply_profile_update(request.user, request.data)
+        if error:
+            return _message(error, status.HTTP_400_BAD_REQUEST)
+        request.user.save()
+        return Response({'user': ProfileSerializer(request.user).data})
+
+
+class VendorProfileUpdateView(APIView):
+    """PATCH /api/vendors/me {name?, email?} -> {"vendor": {phone, name, email}}."""
+
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request):
+        if request.user.role != User.Role.VENDOR:
+            return _message(
+                'Only vendor accounts can access this endpoint.',
+                status.HTTP_403_FORBIDDEN,
+            )
+        error = _apply_profile_update(request.user, request.data)
+        if error:
+            return _message(error, status.HTTP_400_BAD_REQUEST)
+        request.user.save()
+        return Response({'vendor': ProfileSerializer(request.user).data})
 
 
 # ---------------------------------------------------------------

@@ -10,8 +10,10 @@ urlpatterns = [
     # Customers
     path('users/auth/otp', views.UserOTPRequestView.as_view(), name='user-otp'),
     path('users/auth/verify', views.UserOTPVerifyView.as_view(), name='user-verify'),
+    path('users/me', views.UserProfileUpdateView.as_view(), name='user-profile'),
     # Vendors
     path('vendors/auth/otp', views.VendorOTPRequestView.as_view(), name='vendor-otp'),
     path('vendors/auth/verify', views.VendorOTPVerifyView.as_view(), name='vendor-verify'),
+    path('vendors/me', views.VendorProfileUpdateView.as_view(), name='vendor-profile'),
     path('vendors', views.VendorRegisterView.as_view(), name='vendor-register'),
 ]

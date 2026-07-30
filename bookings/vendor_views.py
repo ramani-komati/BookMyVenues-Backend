@@ -24,7 +24,7 @@ from .slots import (
     today_ist,
     total_minutes,
 )
-from .views import _booked_intervals, _message, _to_int
+from .views import _amount_mismatch, _booked_intervals, _message, _to_int
 
 TODAY_BOOKINGS_LIMIT = 8
 
@@ -195,9 +195,7 @@ class WalkInBookingView(APIView):
         # Contract: walk-in amount = hourly rate x duration (no fee).
         amount = round(per_slot * total_minutes(intervals) / 60)
         if client_amount != amount:
-            return _message(
-                f'Amount mismatch: expected ₹{amount}.', status.HTTP_400_BAD_REQUEST
-            )
+            return _amount_mismatch(amount)
 
         with transaction.atomic():
             Listing.objects.select_for_update().get(pk=listing.pk)

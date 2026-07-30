@@ -28,3 +28,7 @@ urlpatterns = [
     # Utility routes (health, me, refresh) — /api/v1/
     path('api/v1/', include('accounts.urls')),
 ]
+
+# JSON error bodies for unmatched URLs (P5b), instead of Django's HTML pages.
+handler404 = 'BookMyVenue.handlers.not_found'
+handler500 = 'BookMyVenue.handlers.server_error'

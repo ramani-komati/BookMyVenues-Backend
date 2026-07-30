@@ -195,6 +195,78 @@ class VendorOTPTests(OTPAuthTestBase):
         self.assertEqual(response.status_code, 400)
 
 
+class ProfileUpdateTests(APITestCase):
+    """PATCH /users/me and /vendors/me — contract P4."""
+
+    def setUp(self):
+        self.customer = User.objects.create_user(
+            phone='9800000001', name='Old Name', email='old@example.com',
+        )
+        self.vendor = User.objects.create_user(
+            phone='9800000002', name='Vendor', email='vendor@example.com',
+            role=User.Role.VENDOR,
+        )
+
+    def test_customer_updates_name_and_email(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.patch(
+            '/api/users/me',
+            {'name': 'New Name', 'email': 'new@example.com'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['user']['name'], 'New Name')
+        self.assertEqual(response.data['user']['email'], 'new@example.com')
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.name, 'New Name')
+        self.assertEqual(self.customer.email, 'new@example.com')
+
+    def test_phone_is_immutable(self):
+        self.client.force_authenticate(user=self.customer)
+        self.client.patch(
+            '/api/users/me', {'phone': '9999999999', 'name': 'X'}, format='json'
+        )
+        self.customer.refresh_from_db()
+        self.assertEqual(self.customer.phone, '9800000001')  # unchanged
+
+    def test_invalid_email_rejected(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.patch(
+            '/api/users/me', {'email': 'not-an-email'}, format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_duplicate_email_rejected(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.patch(
+            '/api/users/me', {'email': 'vendor@example.com'}, format='json'
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_empty_name_rejected(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.patch('/api/users/me', {'name': '   '}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_requires_auth(self):
+        response = self.client.patch('/api/users/me', {'name': 'X'}, format='json')
+        self.assertEqual(response.status_code, 401)
+
+    def test_vendor_updates_profile(self):
+        self.client.force_authenticate(user=self.vendor)
+        response = self.client.patch(
+            '/api/vendors/me', {'name': 'Ravi Sharma'}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['vendor']['name'], 'Ravi Sharma')
+        self.assertEqual(response.data['vendor']['phone'], '9800000002')
+
+    def test_customer_cannot_use_vendor_profile(self):
+        self.client.force_authenticate(user=self.customer)
+        response = self.client.patch('/api/vendors/me', {'name': 'X'}, format='json')
+        self.assertEqual(response.status_code, 403)
+
+
 class RemovedPasswordEndpointsTests(APITestCase):
     def test_password_login_gone(self):
         response = self.client.post(

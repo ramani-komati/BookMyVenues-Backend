@@ -2,7 +2,7 @@
 
 Living status board. Rewritten as each phase lands. Base `/api` · JWT · errors `{ "message": "..." }`.
 
-**Last updated:** after Phase 1 · Production: `https://bookmyvenues-backend.onrender.com`
+**Last updated:** after Phase 2 · Production: `https://bookmyvenues-backend.onrender.com`
 
 ---
 
@@ -10,21 +10,18 @@ Living status board. Rewritten as each phase lands. Base `/api` · JWT · errors
 
 | # | Item | Status |
 |---|------|--------|
-| 🔴 **P1** | Booking accepts packages / extra-persons / custom add-ons | ✅ **DONE** (shipped) |
+| 🔴 **P1** | Booking accepts packages / extra-persons / custom add-ons | ✅ **DONE** |
+| 🟠 **P3** | `gallery` in venue list + dashboard `venues[]` | ✅ **DONE** |
+| 🟡 **P4** | `PATCH /users/me` + `PATCH /vendors/me` (profile edits) | ✅ **DONE** |
+| 🟡 **P5a** | Structured amount-mismatch error (`code`, `expectedAmount`) | ✅ **DONE** |
+| 🟡 **P5b** | JSON `{ "message" }` 404s for bad/non-UUID ids | ✅ **DONE** |
+| ✅ **P5c** | Pagination for `GET /venues` | ✅ Already works (`?page=`) |
 | 🟠 **P2** | `GET /maps/resolve` — resolve Google Maps short links | ⏳ Planned (Phase 3) |
-| 🟠 **P3** | `gallery` in venue list + dashboard `venues[]` | ⏳ Planned (Phase 2) |
-| 🟡 **P4** | `PATCH /users/me` + `PATCH /vendors/me` (profile edits) | ⏳ Planned (Phase 2) |
-| 🟡 **P5a** | Structured amount-mismatch error (`code`, `expectedAmount`) | ⏳ Planned (Phase 2) |
-| 🟡 **P5b** | JSON `{ "message" }` 404s for bad/non-UUID ids | ⏳ Planned (Phase 2) |
-| ✅ **P5c** | Pagination for `GET /venues` | ✅ **Already works** — see note below |
 | 🔴 **P6** | Per-unit bookings (multi-pitch / court / screen) | ⏳ Planned (Phase 4) |
 
 ---
 
-## ✅ P1 — Bookings now accept packages, extra-persons & custom add-ons
-
-**Shipped.** The booking endpoint no longer rejects add-on names it doesn't
-recognise, and it prices the add-on lines **from the request**.
+## ✅ P1 — Bookings accept packages, extra-persons & custom add-ons
 
 `POST /users/me/bookings` recomputes:
 
@@ -34,39 +31,73 @@ amount = round(hourlyRate × minutes / 60)     ← slot: from the listing (serve
        + ₹20 fee
 ```
 
-- Packages and extra-persons folded into `addons` as line items are accepted,
-  priced, **persisted, and echoed** in the booking record (2.3 my-bookings,
-  3.4 dashboard `allBookings`) — no frontend change needed.
-- Custom add-ons (e.g. `smoke`, `juice`) no longer 400 with `Unknown add-on`.
-- Guards kept: each add-on needs a name, `qty ≥ 1`, `price ≥ 0`. The slot
-  portion is still computed from the listing (not trusted from the client),
-  and the total is still checked against the client's `amount` (mismatch → 400).
+Packages / extra-persons / custom add-ons folded into `addons` are accepted,
+priced, persisted, and echoed. `Unknown add-on` is gone. Guards kept: name
+required, `qty ≥ 1`, `price ≥ 0`.
 
-> **Security note:** add-on prices are currently **trusted from the request**.
-> Fine today because no live payment moves money (amount is a recorded number).
-> When real payments land we'll re-validate add-on prices against the listing
-> catalogue + `detail.packages[]` + `detail.extraPersonPrice`.
+> **Security note:** add-on prices are trusted from the request for now (no live
+> payment yet). Revisit when real payments land.
 
-Walk-ins (`POST /vendors/me/walkin-bookings`) unchanged — the walk-in modal
-sends no add-ons; amount stays `round(perSlot × minutes / 60)`, no fee.
+---
+
+## ✅ P3 — `gallery` in venue list responses
+
+`GET /venues` and the dashboard's `venues[]` (3.4) now include
+`"gallery": ["url", …]` on every item (always present, `[]` if the vendor added
+none). The heavy `detail` block still stays out of list rows.
+
+---
+
+## ✅ P4 — Profile update endpoints
+
+- **`PATCH /users/me`** (User JWT) · body `{ "name"?, "email"? }`
+  → `200 { "user": { "phone", "name", "email" } }`
+- **`PATCH /vendors/me`** (Vendor JWT) → `200 { "vendor": { … } }`
+
+Rules: `phone` is **immutable** (never read from the body). `name`, if sent,
+must be non-empty (trimmed). `email`, if non-empty, is format-checked and must be
+unique (sending `""`/null clears it). Errors: `400` invalid/duplicate email or
+empty name · `401` no token · `403` non-vendor calling `/vendors/me`.
+
+---
+
+## ✅ P5a — Structured amount-mismatch error
+
+A wrong `amount` on `POST /users/me/bookings` **and**
+`POST /vendors/me/walkin-bookings` now returns:
+
+```json
+{ "message": "Amount mismatch: expected ₹2119.", "code": "AMOUNT_MISMATCH", "expectedAmount": 2119 }
+```
+
+No more regexing the message text.
+
+---
+
+## ✅ P5b — JSON 404s for malformed ids
+
+Any URL that matches no route (e.g. a non-UUID id like
+`/venues/not-a-uuid/availability`) now returns `{ "message": "Not found" }` with
+status `404` instead of Django's HTML error page. `500`s return
+`{ "message": "Something went wrong." }`.
 
 ---
 
 ## ✅ P5c — Pagination already supported
 
-`GET /venues?page=2&limit=20` already works today (offset paging, `limit` 1–50,
-default 20; response includes `total`). If venues past the first page aren't
-showing, send `?page=`. No backend change required.
+`GET /venues?page=2&limit=20` already works (offset paging, `limit` 1–50,
+default 20, response includes `total`). No backend change needed.
 
 ---
 
 ## Planned next (in order)
 
-- **Phase 2 (quick wins):** P3 `gallery` in list responses · P4 profile
-  endpoints · P5a structured amount error · P5b JSON 404s.
-- **Phase 3:** P2 `GET /maps/resolve` (with an SSRF host allowlist:
-  `maps.app.goo.gl`, `goo.gl`, `g.co` only).
-- **Phase 4:** P6 per-unit bookings (needs a DB migration; will inspect the
-  real listing `detail` shape first).
+- **Phase 3:** P2 `GET /maps/resolve` — follow the short-link redirect
+  server-side, cache it, host allowlist `maps.app.goo.gl` / `goo.gl` / `g.co`
+  only (SSRF guard). Public, no auth.
+- **Phase 4:** P6 per-unit bookings — new booking fields (`sport`, `unit`,
+  `unitLabel`), overlap keyed per `(venue, sport, unit)`, per-unit rate
+  validation, `bookedUnits` in availability. Needs a DB migration; will inspect
+  the real listing `detail` shape first.
 
-Each phase is test-first and pushed to `main` (Render auto-deploys).
+Each phase is test-first and pushed to `main` (Render auto-deploys). Tests: 135 passing.

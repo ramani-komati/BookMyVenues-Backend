@@ -34,15 +34,17 @@ def _message(text, http_status):
 
 
 def _summary(listing):
-    """List row: the record without the heavy gallery/detail blocks."""
+    """List row: the record minus the heavy `detail` block. Keeps `gallery`
+    (P3) so venue cards can show the photo slideshow without a call per venue."""
     summary = {
         key: value
         for key, value in listing.record.items()
-        if key not in ('gallery', 'detail')
+        if key != 'detail'
     }
     summary['id'] = str(listing.id)
     summary['status'] = listing.status
     summary['slug'] = listing.slug
+    summary.setdefault('gallery', [])  # always present, even if the vendor added none
     return summary
 
 

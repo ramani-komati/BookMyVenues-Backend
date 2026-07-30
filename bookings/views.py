@@ -35,6 +35,19 @@ def _message(text, http_status):
     return Response({'message': text}, status=http_status)
 
 
+def _amount_mismatch(expected):
+    """Structured 400 for a wrong amount (P5a) — the frontend reads `code`
+    and `expectedAmount` directly instead of regexing the message text."""
+    return Response(
+        {
+            'message': f'Amount mismatch: expected ₹{expected}.',
+            'code': 'AMOUNT_MISMATCH',
+            'expectedAmount': expected,
+        },
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 def _to_int(value, field):
     """Numeric form fields may arrive as strings ('120') — coerce."""
     try:
@@ -197,9 +210,7 @@ class MyBookingsView(APIView):
 
         # SECURITY: the client's amount is only ACCEPTED, never trusted.
         if client_amount != amount:
-            return _message(
-                f'Amount mismatch: expected ₹{amount}.', status.HTTP_400_BAD_REQUEST
-            )
+            return _amount_mismatch(amount)
 
         # --- The race-safe part ------------------------------------
         with transaction.atomic():

@@ -487,8 +487,8 @@ class PublicBrowsingTests(ListingTestBase):
         venue = response.data['venues'][0]
         self.assertEqual(venue['name'], 'Grand Palace Hall')
         self.assertEqual(venue['status'], 'live')
-        self.assertNotIn('gallery', venue)  # summaries stay light
-        self.assertNotIn('detail', venue)
+        self.assertEqual(venue['gallery'], LISTING_RECORD['gallery'])  # P3: cards show slideshow
+        self.assertNotIn('detail', venue)  # the heavy detail block stays out
 
     def test_non_live_listing_hidden(self):
         from venues.models import Listing

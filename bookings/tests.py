@@ -129,6 +129,12 @@ class CreateBookingTests(BookingTestBase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('Amount mismatch', response.data['message'])
 
+    def test_amount_mismatch_is_structured(self):
+        # P5a: frontend reads code + expectedAmount without regexing the text.
+        response = self.book(amount=100)
+        self.assertEqual(response.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(response.data['expectedAmount'], 920)
+
     def test_custom_and_package_addons_accepted(self):
         # P1: packages, extra-persons and custom add-ons are folded into the
         # addons array as priced line items. The server must accept them ALL
@@ -284,6 +290,7 @@ class WalkInBookingTests(BookingTestBase):
     def test_amount_mismatch_rejected(self):
         response = self.walk_in(amount=500)
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'AMOUNT_MISMATCH')  # P5a
 
     def test_conflicts_with_customer_booking(self):
         self.book(slots=['21:30 – 23:30'], amount=1220)  # customer books first
@@ -479,3 +486,9 @@ class AvailabilityTests(BookingTestBase):
             f'/api/venues/{uuid.uuid4()}/availability?date={TOMORROW}'
         )
         self.assertEqual(response.status_code, 404)
+
+    def test_malformed_id_returns_json_404(self):
+        # P5b: a non-UUID id matches no route -> JSON, not Django's HTML page.
+        response = self.client.get(f'/api/venues/not-a-uuid/availability?date={TOMORROW}')
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()['message'], 'Not found')
