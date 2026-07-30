@@ -236,6 +236,9 @@ opaque and echoes them back in write URLs, so this works as-is.
 
 ---
 
-## Setup the admin needs (one-time)
-1. Create an admin: `python manage.py createsuperuser` (phone gets the OTP; email+password log in).
-2. Add the admin site's URL to `CORS_ALLOWED_ORIGINS` on the backend host.
+## Admin setup — already done
+- An admin account exists in production (email + password log in; OTP goes to the
+  admin's phone). More admins: `python manage.py createsuperuser`.
+- CORS is currently allow-all **and** credential-aware (the backend echoes the
+  caller's origin), so the admin panel works from any URL today — no origin
+  whitelisting needed until CORS is tightened for launch.

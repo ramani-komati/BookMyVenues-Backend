@@ -91,16 +91,16 @@ Payout / Review / AuditEntry).
 
 ---
 
-## ⚠️ Setup notes (important)
+## ✅ Setup — done
 
-1. **Create an admin account** on the server:
-   `python manage.py createsuperuser` — it asks for phone, name, email, password.
-   The **phone** is where the login OTP is sent; the **email + password** are the
-   login credentials.
-2. **CORS:** the admin panel is a different site using cookies, so its exact
-   origin **must be listed in `CORS_ALLOWED_ORIGINS`** (env var on Render).
-   Browsers refuse credentialed requests against a wildcard origin, so the
-   panel's cookie login will NOT work while `CORS_ALLOW_ALL_ORIGINS=True`.
+1. **Admin account exists** in production (created 30 Jul 2026): login is
+   email + password, OTP goes to the admin's phone. Add more admins later with
+   `python manage.py createsuperuser`.
+2. **CORS:** allow-all is currently ON and works with the cookie login — with
+   credentials enabled the backend echoes the caller's exact origin instead of
+   `*`, so the panel works from any URL today. **When tightening later**, set
+   `CORS_ALLOW_ALL_ORIGINS=False` and list both frontends' exact origins in
+   `CORS_ALLOWED_ORIGINS`.
 3. **Cookies:** cross-site sessions need HTTPS (production has it) and
    `SameSite=None` (already set for production).
 

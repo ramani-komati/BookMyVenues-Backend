@@ -201,9 +201,10 @@ CORS_ALLOWED_ORIGINS = [
 ]
 
 # The admin panel authenticates with a cookie session, so the browser must be
-# allowed to send credentials cross-origin. NOTE: browsers refuse credentialed
-# requests when CORS_ALLOW_ALL_ORIGINS is True — the admin panel's origin must
-# be listed explicitly in CORS_ALLOWED_ORIGINS for its cookie login to work.
+# allowed to send credentials cross-origin. With credentials on, corsheaders
+# echoes the request's Origin instead of "*", so cookie login works even while
+# CORS_ALLOW_ALL_ORIGINS=True. When tightening later, list the admin panel's
+# exact origin in CORS_ALLOWED_ORIGINS.
 CORS_ALLOW_CREDENTIALS = True
 
 
