@@ -3,7 +3,7 @@
 Response to the frontend's *Super-Admin PENDING Backend APIs* spec.
 Base `/api/admin` · **cookie session** auth · error shape `{ "detail": "..." }`.
 
-**Last updated:** after Phase 2 · Production: `https://bookmyvenues-backend.onrender.com`
+**Last updated:** after Phase 3 — **admin backend complete** · Production: `https://bookmyvenues-backend.onrender.com`
 
 ---
 
@@ -12,10 +12,11 @@ Base `/api/admin` · **cookie session** auth · error shape `{ "detail": "..." }
 | Area | Status |
 |------|--------|
 | Auth — `login` → `verify-otp` → `logout` (session cookie) | ✅ **DONE** |
-| `GET /bootstrap` — one aggregate read | ✅ **DONE** (real data where it exists) |
+| `GET /bootstrap` — one aggregate read | ✅ **DONE** |
 | Writes — approvals / venues / vendors / users / bookings | ✅ **DONE** |
-| Writes — payouts / reviews (need models) · settings · audit | ⏳ Phase 3 |
-| New models — Settings (real fee), Payouts, Reviews, Audit | ⏳ Phase 3 |
+| Settings (`PUT`, drives the live fee) · Payouts · Reviews · Audit | ✅ **DONE** |
+
+**Every endpoint in the super-admin spec now exists.** 🎉
 
 ---
 
@@ -68,6 +69,28 @@ New columns (all additive migrations, existing rows unaffected): `Listing.featur
 
 ---
 
+## ✅ Phase 3 — new models (settings / payouts / reviews / audit)
+
+- **`PUT /api/admin/settings`** — body is the full Settings object; saves and
+  returns it. **The `fee` field is now the live booking fee** — changing it here
+  changes what customers are charged (default ₹20). Also stores commission,
+  categories, cities, amenities, banners.
+- **`PATCH /api/admin/payouts/<id>`** — `{ status: "pending"|"failed"|"completed" }`
+  (process / retry). Payouts are created by the payments system (future); the
+  panel lists and updates them.
+- **`POST /api/admin/reviews/<id>/resolve`** — `{ action: "keep" }` or
+  `{ action: "remove", reason }`. Removed reviews drop out of the panel's queue.
+- **`POST /api/admin/audit`** — append an audit row (panel-written).
+  **The server ALSO writes its own audit row after every admin write** (approval,
+  venue, vendor, user, booking, payout, review, settings), so the audit log is
+  populated even without the frontend posting.
+
+`bootstrap` now returns real `payouts`, flagged `reviews`, recent `audit`, and
+the saved `settings`. New tables via `adminpanel/0001_initial` (Settings /
+Payout / Review / AuditEntry).
+
+---
+
 ## ⚠️ Setup notes (important)
 
 1. **Create an admin account** on the server:
@@ -92,13 +115,12 @@ New columns (all additive migrations, existing rows unaffected): `Listing.featur
 
 ---
 
-## Planned next
+## 🎉 Admin backend complete
 
-- **Phase 2 — writes on existing entities:** approval workflow
-  (approve/changes/reject/reopen, checklist, notes, timeline), venue
-  paused/featured, vendor KYC/suspend, user block, booking refund. Adds a few
-  columns to existing models.
-- **Phase 3 — new models:** Settings (persist + wire the real fee), Payouts,
-  Reviews, Audit log (server-side audit rows).
+Every endpoint in the super-admin spec is built, tested, and live. Test-first,
+pushed to `main` (Render auto-deploys). **Tests: 174 passing.**
 
-Test-first, pushed to `main` (Render auto-deploys). Tests: 156 passing.
+Left for the frontend/product side (not backend blockers): reviews & payouts
+have no *creation* path yet (they appear once the review-submission and
+payment-run features exist); the panel's numeric-id assumption differs from our
+UUID/`bk_` ids (see deviations above).

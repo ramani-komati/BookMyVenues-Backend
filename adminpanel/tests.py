@@ -4,6 +4,7 @@ Tests for the super-admin panel (Phase 1: auth + bootstrap).
 The 2Factor SMS call is MOCKED — no real SMS, and the code is captured
 in-memory (never printed).
 """
+import datetime
 import uuid
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
+from adminpanel.models import AuditEntry, Payout, Review
 from bookings.models import Booking
 from bookings.slots import today_ist
 from venues.models import Listing, VenueDraft
@@ -268,3 +270,103 @@ class AdminWriteTests(APITestCase):
         )
         self.assertEqual(r.status_code, 404)
         self.assertIn('detail', r.data)
+
+
+class AdminPhase3Tests(APITestCase):
+    """Settings, payouts, reviews, audit (new models)."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    # --- settings ---
+    def test_settings_put_and_bootstrap(self):
+        r = self.client.put(
+            '/api/admin/settings',
+            {'fee': '30', 'commission': '12', 'cities': ['HSR']},
+            format='json',
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['fee'], '30')
+        self.assertEqual(r.data['commission'], '12')
+        self.assertEqual(r.data['cities'], ['HSR'])
+        boot = self.client.get('/api/admin/bootstrap')
+        self.assertEqual(boot.data['settings']['fee'], '30')
+
+    def test_settings_fee_drives_booking_fee(self):
+        self.client.put('/api/admin/settings', {'fee': '50'}, format='json')
+        vendor = User.objects.create_user(
+            phone='9990000003', name='R', email='r@x.in', role=User.Role.VENDOR,
+        )
+        customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
+        listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=vendor, slug='h',
+            record={'name': 'H', 'price': 600, 'detail': {}},
+            name='H', category='hall', locality='x', pincode='560001',
+        )
+        self.client.force_authenticate(user=customer)
+        tomorrow = (today_ist() + datetime.timedelta(days=1)).isoformat()
+        resp = self.client.post('/api/users/me/bookings', {
+            'venueId': str(listing.id), 'date': tomorrow,
+            'slots': ['19:00 – 20:00'], 'addons': [], 'perSlot': 600,
+            'amount': 650,  # 600 (1h) + ₹50 fee
+        }, format='json')
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(resp.data['booking']['amount'], 650)
+
+    # --- payouts ---
+    def test_payout_update(self):
+        payout = Payout.objects.create(vendor='Ravi', period='6 – 12 Jul', gross=5000)
+        r = self.client.patch(
+            f'/api/admin/payouts/{payout.id}', {'status': 'completed'}, format='json'
+        )
+        self.assertEqual(r.data['status'], 'completed')
+        self.assertEqual(r.data['grossNum'], 5000)
+
+    # --- reviews ---
+    def test_review_remove(self):
+        review = Review.objects.create(venue='Grand Hall', reviewer='X', rating=1, text='spam')
+        r = self.client.post(
+            f'/api/admin/reviews/{review.id}/resolve',
+            {'action': 'remove', 'reason': 'Spam'}, format='json',
+        )
+        self.assertEqual(r.status_code, 200)
+        review.refresh_from_db()
+        self.assertEqual(review.status, 'removed')
+        boot = self.client.get('/api/admin/bootstrap')
+        self.assertEqual(len(boot.data['reviews']), 0)  # removed -> out of the queue
+
+    def test_review_keep_has_stars(self):
+        review = Review.objects.create(venue='V', reviewer='X', rating=3, text='ok')
+        r = self.client.post(
+            f'/api/admin/reviews/{review.id}/resolve', {'action': 'keep'}, format='json'
+        )
+        self.assertEqual(r.data['stars'], '★★★☆☆')
+
+    def test_bad_review_action_rejected(self):
+        review = Review.objects.create(venue='V', reviewer='X', rating=3)
+        r = self.client.post(
+            f'/api/admin/reviews/{review.id}/resolve', {'action': 'nuke'}, format='json'
+        )
+        self.assertEqual(r.status_code, 400)
+
+    # --- audit ---
+    def test_audit_append_and_bootstrap(self):
+        r = self.client.post('/api/admin/audit', {
+            'admin': 'Anita', 'action': 'Logged in', 'target': '-', 'change': '',
+        }, format='json')
+        self.assertEqual(r.status_code, 201)
+        boot = self.client.get('/api/admin/bootstrap')
+        self.assertTrue(any(a['action'] == 'Logged in' for a in boot.data['audit']))
+
+    def test_server_writes_audit_on_write(self):
+        vendor = User.objects.create_user(
+            phone='9990000009', name='Ravi', email='rv@x.in', role=User.Role.VENDOR,
+        )
+        self.client.patch(
+            f'/api/admin/vendors/{vendor.id}', {'kyc': 'verified'}, format='json'
+        )
+        self.assertTrue(AuditEntry.objects.filter(action='Vendor update').exists())

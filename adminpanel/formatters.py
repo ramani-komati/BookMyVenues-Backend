@@ -15,11 +15,12 @@ from django.utils import timezone
 from accounts.models import User
 from bookings.models import Booking
 from bookings.slots import today_ist
-from bookings.views import BOOKING_FEE
 from venues.completion import compute_completion
 from venues.models import Listing, VenueDraft
 
-CATEGORIES = ['Private Hall', 'Private Theatre', 'Open Theatre', 'Resort', 'Playzone']
+from .models import AuditEntry, Payout, Review, Settings
+
+AUDIT_LIMIT = 100
 
 
 def _int(value):
@@ -203,17 +204,54 @@ def format_approvals():
     return [approval_row(draft, now) for draft in pending]
 
 
-# --- Settings ----------------------------------------------------
+# --- Payouts / Reviews / Audit / Settings ------------------------
 
-def default_settings():
+def payout_row(payout):
     return {
-        'fee': str(BOOKING_FEE),
-        'feeDate': '',
-        'commission': '10',
-        'categories': CATEGORIES,
-        'cities': [],
-        'amenities': [],
-        'banners': [],
+        'id': payout.id,
+        'vendor': payout.vendor,
+        'period': payout.period,
+        'grossNum': payout.gross,
+        'status': payout.status,
+    }
+
+
+def _stars(rating):
+    rating = max(0, min(5, int(rating or 0)))
+    return '★' * rating + '☆' * (5 - rating)
+
+
+def review_row(review):
+    return {
+        'id': review.id,
+        'venue': review.venue,
+        'reviewer': review.reviewer,
+        'rating': review.rating,
+        'text': review.text,
+        'reason': review.reason,
+        'stars': _stars(review.rating),
+    }
+
+
+def audit_row(entry):
+    return {
+        'time': entry.time or entry.created_at.strftime('%d %b, %H:%M'),
+        'admin': entry.admin,
+        'action': entry.action,
+        'target': entry.target,
+        'change': entry.change,
+    }
+
+
+def settings_row(settings):
+    return {
+        'fee': str(settings.booking_fee),
+        'feeDate': settings.fee_date,
+        'commission': settings.commission,
+        'categories': settings.categories or [],
+        'cities': settings.cities or [],
+        'amenities': settings.amenities or [],
+        'banners': settings.banners or [],
     }
 
 
@@ -224,8 +262,10 @@ def build_bootstrap():
         'vendors': format_vendors(),
         'users': format_users(),
         'bookings': format_bookings(),
-        'payouts': [],
-        'reviews': [],
-        'audit': [],
-        'settings': default_settings(),
+        'payouts': [payout_row(p) for p in Payout.objects.all()],
+        'reviews': [
+            review_row(r) for r in Review.objects.filter(status=Review.Status.FLAGGED)
+        ],
+        'audit': [audit_row(a) for a in AuditEntry.objects.all()[:AUDIT_LIMIT]],
+        'settings': settings_row(Settings.load()),
     }

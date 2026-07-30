@@ -25,15 +25,36 @@ from venues.models import Listing, VenueDraft
 from .auth import CsrfExemptSessionAuthentication, IsAdmin, detail
 from .formatters import (
     approval_row,
+    audit_row,
     booking_row,
     build_bootstrap,
+    payout_row,
+    review_row,
+    settings_row,
     user_row,
     vendor_row,
     venue_row,
 )
+from .models import AuditEntry, Payout, Review, Settings
 
 REVIEW_STATUSES = {'pending', 'approved', 'changes', 'rejected'}
 BOOKING_STATUSES = {'confirmed', 'completed', 'refund_pending', 'refunded', 'cancelled'}
+PAYOUT_STATUSES = {'pending', 'failed', 'completed'}
+
+
+def _to_int(value, default=0):
+    try:
+        return int(float(str(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def record_audit(request, action, target, change=''):
+    """Write a server-side audit row for an admin action."""
+    admin = getattr(request.user, 'name', '') or getattr(request.user, 'phone', '')
+    AuditEntry.objects.create(
+        admin=admin, action=action, target=str(target), change=str(change)
+    )
 
 # The one backend the admin session is logged in with.
 _BACKEND = 'django.contrib.auth.backends.ModelBackend'
@@ -173,6 +194,7 @@ class AdminApprovalUpdateView(_AdminWriteView):
             draft.review_timeline = data['timeline']
 
         draft.save()
+        record_audit(request, 'Approval update', draft.id, draft.review_status)
         return Response(approval_row(draft))
 
 
@@ -197,6 +219,8 @@ class AdminVenueUpdateView(_AdminWriteView):
             listing.featured = bool(data['featured'])
 
         listing.save()
+        change = f"{listing.status}{' · featured' if listing.featured else ''}"
+        record_audit(request, 'Venue update', listing.name, change)
         return Response(venue_row(listing))
 
 
@@ -224,6 +248,8 @@ class AdminVendorUpdateView(_AdminWriteView):
                 return detail('Invalid acc value.', status.HTTP_400_BAD_REQUEST)
 
         vendor.save()
+        record_audit(request, 'Vendor update', vendor.name or vendor.phone,
+                     f"kyc={vendor.kyc}, active={vendor.is_active}")
         return Response(vendor_row(vendor))
 
 
@@ -246,6 +272,8 @@ class AdminUserUpdateView(_AdminWriteView):
                 return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
 
         user.save()
+        record_audit(request, 'User update', user.name or user.phone,
+                     'active' if user.is_active else 'blocked')
         return Response(user_row(user))
 
 
@@ -265,4 +293,90 @@ class AdminBookingUpdateView(_AdminWriteView):
             booking.status = value
 
         booking.save()
+        record_audit(request, 'Booking update', booking.id, booking.status)
         return Response(booking_row(booking))
+
+
+# ---------------------------------------------------------------
+# New models (Phase 3) — settings, payouts, reviews, audit.
+# ---------------------------------------------------------------
+
+class AdminSettingsView(_AdminWriteView):
+    """PUT /api/admin/settings — save the platform config; returns it."""
+
+    def put(self, request):
+        settings_obj = Settings.load()
+        data = self._body(request)
+
+        if 'fee' in data:
+            settings_obj.booking_fee = _to_int(data['fee'], settings_obj.booking_fee)
+        if 'feeDate' in data:
+            settings_obj.fee_date = str(data['feeDate'] or '')
+        if 'commission' in data:
+            settings_obj.commission = str(data['commission'] or '')
+        for key in ('categories', 'cities', 'amenities', 'banners'):
+            if isinstance(data.get(key), list):
+                setattr(settings_obj, key, data[key])
+
+        settings_obj.save()
+        record_audit(request, 'Settings saved', 'settings', f'fee ₹{settings_obj.booking_fee}')
+        return Response(settings_row(settings_obj))
+
+
+class AdminPayoutUpdateView(_AdminWriteView):
+    """PATCH /api/admin/payouts/<id> — process / retry (status)."""
+
+    def patch(self, request, payout_id):
+        payout = Payout.objects.filter(pk=payout_id).first()
+        if payout is None:
+            return detail('Payout not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        if 'status' in data:
+            value = str(data['status'])
+            if value not in PAYOUT_STATUSES:
+                return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+            payout.status = value
+
+        payout.save()
+        record_audit(request, 'Payout update', payout.vendor, payout.status)
+        return Response(payout_row(payout))
+
+
+class AdminReviewResolveView(_AdminWriteView):
+    """POST /api/admin/reviews/<id>/resolve — keep or remove."""
+
+    def post(self, request, review_id):
+        review = Review.objects.filter(pk=review_id).first()
+        if review is None:
+            return detail('Review not found.', status.HTTP_404_NOT_FOUND)
+        data = self._body(request)
+
+        action = str(data.get('action') or '')
+        if action == 'keep':
+            review.status = Review.Status.KEPT
+        elif action == 'remove':
+            review.status = Review.Status.REMOVED
+            if data.get('reason'):
+                review.reason = str(data['reason'])
+        else:
+            return detail('action must be "keep" or "remove".', status.HTTP_400_BAD_REQUEST)
+
+        review.save()
+        record_audit(request, f'Review {action}', review.venue, review.reason)
+        return Response(review_row(review))
+
+
+class AdminAuditView(_AdminWriteView):
+    """POST /api/admin/audit — append an audit row (panel-written)."""
+
+    def post(self, request):
+        data = self._body(request)
+        entry = AuditEntry.objects.create(
+            time=str(data.get('time') or ''),
+            admin=str(data.get('admin') or ''),
+            action=str(data.get('action') or ''),
+            target=str(data.get('target') or ''),
+            change=str(data.get('change') or ''),
+        )
+        return Response(audit_row(entry), status=status.HTTP_201_CREATED)

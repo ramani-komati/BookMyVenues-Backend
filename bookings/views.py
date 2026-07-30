@@ -28,9 +28,18 @@ from .slots import (
     total_minutes,
 )
 
-BOOKING_FEE = 20  # flat ₹20 per booking (contract cross-cutting rule 5)
+BOOKING_FEE = 20  # default flat ₹20 per booking (contract cross-cutting rule 5)
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
+
+
+def _booking_fee():
+    """The live booking fee — admin-configurable via Settings, default ₹20."""
+    try:
+        from adminpanel.models import Settings
+        return Settings.load().booking_fee
+    except Exception:
+        return BOOKING_FEE
 
 
 def _message(text, http_status):
@@ -161,7 +170,7 @@ def compute_amount(listing, intervals, requested_addons, rate=None):
         addon_total += price * qty
         cleaned.append({'name': name, 'qty': qty, 'price': price})
 
-    return base + addon_total + BOOKING_FEE, cleaned
+    return base + addon_total + _booking_fee(), cleaned
 
 
 def _slot_start(text):
