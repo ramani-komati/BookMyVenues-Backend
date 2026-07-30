@@ -7,6 +7,8 @@ Listing row (select_for_update) inside a transaction, which forces
 concurrent bookings for the same venue to run one after another.
 Error shape everywhere: {"message": "..."}.
 """
+from collections import defaultdict
+
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -56,10 +58,21 @@ def _to_int(value, field):
         raise SlotError(f'{field} must be a number.')
 
 
-def _booked_intervals(listing, date):
-    """All (start, end) minute-intervals already booked for venue+date."""
+def _booked_intervals(listing, date, sport=None, unit=None):
+    """
+    (start, end) minute-intervals already booked for venue+date that CONFLICT
+    with a booking for (sport, unit).
+
+    - unit=None (whole venue / single-unit) conflicts with every booking —
+      the original behaviour.
+    - unit set: conflicts only with the SAME (sport, unit), plus legacy /
+      whole-venue bookings (unit is None) which block every unit (safe default).
+    """
     intervals = []
     for booking in Booking.objects.filter(listing=listing, date=date):
+        if unit is not None and booking.unit is not None:
+            if booking.unit != unit or (booking.sport or '') != (sport or ''):
+                continue  # a different pitch/court/screen — no conflict
         try:
             intervals.extend(parse_slots(booking.slots))
         except SlotError:
@@ -67,10 +80,55 @@ def _booked_intervals(listing, date):
     return intervals
 
 
-def compute_amount(listing, intervals, requested_addons):
+def _parse_unit(body):
+    """
+    (sport, unit, unitLabel) from a booking request.
+    unit is a 1-based int, or None for a whole-venue / single-unit booking.
+    """
+    sport = str(body.get('sport') or '').strip()
+    raw = body.get('unit')
+    if raw in (None, ''):
+        unit = None
+    else:
+        unit = _to_int(raw, 'unit')
+        if unit < 1:
+            raise SlotError('unit must be 1 or higher.')
+    unit_label = str(body.get('unitLabel') or '').strip()
+    return sport, unit, unit_label
+
+
+def _unit_rate(listing, sport, unit):
+    """
+    The listing's hourly rate for a specific (sport, unit), or None when the
+    venue isn't priced per unit (caller then falls back to the listing price).
+
+      playzone:     detail.sports[name==sport].unitPrices[unit-1]
+      hall/theatre: detail.unitPrices[unit-1]
+    """
+    if unit is None:
+        return None
+    detail = listing.record.get('detail') or {}
+    if sport:
+        for entry in detail.get('sports') or []:
+            if str(entry.get('name')) == sport:
+                prices = entry.get('unitPrices') or []
+                if 1 <= unit <= len(prices) and str(prices[unit - 1]).strip():
+                    return _to_int(prices[unit - 1], 'unit price')
+                if str(entry.get('price') or '').strip():
+                    return _to_int(entry.get('price'), 'sport price')
+                return None
+        return None
+    prices = detail.get('unitPrices') or []
+    if 1 <= unit <= len(prices) and str(prices[unit - 1]).strip():
+        return _to_int(prices[unit - 1], 'unit price')
+    return None
+
+
+def compute_amount(listing, intervals, requested_addons, rate=None):
     """
     Server-side price:
-        round(hourly rate x minutes / 60)   (slot — from OUR listing, authoritative)
+        round(hourly rate x minutes / 60)   (slot — per-unit rate if given,
+                                             else the listing price)
       + sum(addon.price x qty)              (add-ons — priced FROM THE REQUEST)
       + ₹20 fee
 
@@ -84,7 +142,8 @@ def compute_amount(listing, intervals, requested_addons):
     there is no live payment (amount is only a recorded number today); revisit
     and re-validate against the catalogue when real payments land.
     """
-    rate = _to_int(listing.record.get('price') or 0, 'venue price')
+    if rate is None:
+        rate = _to_int(listing.record.get('price') or 0, 'venue price')
     base = round(rate * total_minutes(intervals) / 60)
 
     addon_total = 0
@@ -103,6 +162,56 @@ def compute_amount(listing, intervals, requested_addons):
         cleaned.append({'name': name, 'qty': qty, 'price': price})
 
     return base + addon_total + BOOKING_FEE, cleaned
+
+
+def _slot_start(text):
+    try:
+        return parse_slots([text])[0][0]
+    except SlotError:
+        return 0
+
+
+def _total_units(listing):
+    """How many bookable units the venue has (pitches/courts/screens)."""
+    detail = listing.record.get('detail') or {}
+    sports_units = sum(int(s.get('units') or 1) for s in (detail.get('sports') or []))
+    return sports_units or len(detail.get('unitPrices') or []) or 1
+
+
+def _availability(listing, date):
+    """
+    Availability payload (P6). Keeps the flat `booked` array (ranges taken on
+    EVERY unit, so single-unit clients still work) and adds per-unit `bookedUnits`.
+    """
+    total_units = _total_units(listing)
+    legacy = []                          # whole-venue bookings block every unit
+    per_unit = defaultdict(list)         # (sport, unit) -> [slot strings]
+    slot_units = defaultdict(set)        # slot string -> {(sport, unit), ...}
+
+    for booking in Booking.objects.filter(listing=listing, date=date):
+        if booking.unit is None:
+            legacy.extend(booking.slots)
+        else:
+            key = (booking.sport or '', booking.unit)
+            for slot in booking.slots:
+                per_unit[key].append(slot)
+                slot_units[slot].add(key)
+
+    booked = set(legacy)
+    for slot, units in slot_units.items():
+        if len(units) >= total_units:   # taken on every unit -> fully booked
+            booked.add(slot)
+
+    booked_units = [
+        {'sport': sport or None, 'unit': unit, 'ranges': sorted(ranges, key=_slot_start)}
+        for (sport, unit), ranges in sorted(per_unit.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+    ]
+
+    return {
+        'date': date.isoformat(),
+        'booked': sorted(booked, key=_slot_start),
+        'bookedUnits': booked_units,
+    }
 
 
 class AvailabilityView(APIView):
@@ -127,16 +236,7 @@ class AvailabilityView(APIView):
         if date < today_ist():
             return _message('date cannot be in the past.', status.HTTP_400_BAD_REQUEST)
 
-        # Every booked slot string for that day, sorted by start time.
-        slot_texts = []
-        for booking in Booking.objects.filter(listing=listing, date=date):
-            slot_texts.extend(booking.slots)
-        try:
-            slot_texts.sort(key=lambda text: parse_slots([text])[0][0])
-        except SlotError:
-            pass
-
-        return Response({'date': date.isoformat(), 'booked': slot_texts})
+        return Response(_availability(listing, date))
 
 
 class MyBookingsView(APIView):
@@ -191,11 +291,13 @@ class MyBookingsView(APIView):
         if listing is None:
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
 
-        # --- Validate date & slots ---------------------------------
+        # --- Validate date, slots, unit & amount -------------------
         try:
             date = parse_date(body.get('date'))
             intervals = parse_slots(body.get('slots'))
-            amount, addons = compute_amount(listing, intervals, body.get('addons'))
+            sport, unit, unit_label = _parse_unit(body)
+            rate = _unit_rate(listing, sport, unit)  # None -> listing price
+            amount, addons = compute_amount(listing, intervals, body.get('addons'), rate=rate)
             client_amount = _to_int(body.get('amount'), 'amount')
         except SlotError as error:
             return _message(str(error), status.HTTP_400_BAD_REQUEST)
@@ -218,7 +320,7 @@ class MyBookingsView(APIView):
             # venue now wait here and run strictly one at a time.
             Listing.objects.select_for_update().get(pk=listing.pk)
 
-            if overlaps(intervals, _booked_intervals(listing, date)):
+            if overlaps(intervals, _booked_intervals(listing, date, sport, unit)):
                 return _message(
                     'One or more selected time slots were just booked. '
                     'Please pick different slots.',
@@ -234,6 +336,9 @@ class MyBookingsView(APIView):
                 image=str(listing.record.get('image') or ''),
                 customer_name=str(body.get('customer') or request.user.name),
                 phone=request.user.phone,
+                sport=sport,
+                unit=unit,
+                unit_label=unit_label,
                 date=date,
                 slots=[str(slot) for slot in body['slots']],
                 per_slot=_to_int(body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'),

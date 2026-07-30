@@ -453,7 +453,9 @@ class AvailabilityTests(BookingTestBase):
             f'/api/venues/{self.listing.id}/availability?date={TOMORROW}'
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, {'date': TOMORROW, 'booked': []})
+        self.assertEqual(response.data['date'], TOMORROW)
+        self.assertEqual(response.data['booked'], [])
+        self.assertEqual(response.data['bookedUnits'], [])
 
     def test_shows_booked_ranges_sorted(self):
         self.book(slots=['21:30 – 23:30'], amount=1220)
@@ -481,7 +483,7 @@ class AvailabilityTests(BookingTestBase):
         )
         self.assertEqual(response.status_code, 400)
 
-    def test_unknown_venue_404(self):
+    def test_unknown_venue_404_avail(self):
         response = self.client.get(
             f'/api/venues/{uuid.uuid4()}/availability?date={TOMORROW}'
         )
@@ -492,3 +494,103 @@ class AvailabilityTests(BookingTestBase):
         response = self.client.get(f'/api/venues/not-a-uuid/availability?date={TOMORROW}')
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()['message'], 'Not found')
+
+
+# A playzone venue with two box-cricket pitches at DIFFERENT hourly rates.
+PLAYZONE_RECORD = {
+    'name': 'Turf Arena',
+    'category': 'Box cricket',
+    'location': 'HSR, Bengaluru',
+    'price': 599,
+    'image': 'https://cdn.example/turf.jpg',
+    'gallery': [],
+    'detail': {
+        'sports': [
+            {'name': 'Box Cricket', 'price': '599', 'units': 2,
+             'unitPrices': ['599', '1999']},
+        ],
+        'addons': [],
+    },
+}
+
+
+class PerUnitBookingTests(BookingTestBase):
+    """P6 — a venue with several pitches/courts/screens (per-unit bookings)."""
+
+    def setUp(self):
+        super().setUp()
+        self.turf = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='turf-arena',
+            record={**PLAYZONE_RECORD, 'id': 'y', 'status': 'live'},
+            name='Turf Arena', category='Box cricket',
+            locality='HSR', pincode='560102',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book_unit(self, **overrides):
+        body = {
+            'venueId': str(self.turf.id),
+            'date': TOMORROW,
+            'slots': ['19:00 – 21:00'],   # 2h
+            'sport': 'Box Cricket',
+            'unit': 1,
+            'unitLabel': 'Box Cricket · Pitch 1',
+            'perSlot': 599,
+            'addons': [],
+            'amount': 1218,               # 599*2 + ₹20 fee
+            **overrides,
+        }
+        return self.client.post('/api/users/me/bookings', body, format='json')
+
+    def test_two_pitches_bookable_in_same_slot(self):
+        first = self.book_unit()
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.data['booking']['unit'], 1)
+        self.assertEqual(first.data['booking']['unitLabel'], 'Box Cricket · Pitch 1')
+        # Pitch 2 costs a different rate (₹1999) — same slot, still bookable.
+        second = self.book_unit(
+            unit=2, perSlot=1999, amount=4018, unitLabel='Box Cricket · Pitch 2'
+        )
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(second.data['booking']['amount'], 4018)
+
+    def test_same_pitch_same_slot_conflicts(self):
+        self.book_unit()
+        self.assertEqual(self.book_unit().status_code, 409)
+
+    def test_wrong_unit_rate_rejected(self):
+        # Pitch 2 costs ₹1999 — paying the pitch-1 price must fail.
+        response = self.book_unit(unit=2, perSlot=599, amount=1218)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(response.data['expectedAmount'], 4018)
+
+    def test_availability_reports_units(self):
+        self.book_unit()  # pitch 1 only
+        self.client.force_authenticate(user=None)
+        data = self.client.get(
+            f'/api/venues/{self.turf.id}/availability?date={TOMORROW}'
+        ).data
+        self.assertEqual(data['booked'], [])  # pitch 2 free -> slot not fully booked
+        self.assertEqual(len(data['bookedUnits']), 1)
+        self.assertEqual(data['bookedUnits'][0]['unit'], 1)
+        self.assertEqual(data['bookedUnits'][0]['ranges'], ['19:00 – 21:00'])
+
+    def test_slot_fully_booked_when_all_units_taken(self):
+        self.book_unit(unit=1, perSlot=599, amount=1218)
+        self.book_unit(unit=2, perSlot=1999, amount=4018)
+        self.client.force_authenticate(user=None)
+        data = self.client.get(
+            f'/api/venues/{self.turf.id}/availability?date={TOMORROW}'
+        ).data
+        self.assertEqual(data['booked'], ['19:00 – 21:00'])  # both pitches taken
+        self.assertEqual(len(data['bookedUnits']), 2)
+
+    def test_legacy_whole_venue_booking_blocks_all_units(self):
+        # A booking with no unit (legacy) blocks every pitch (safe default).
+        Booking.objects.create(
+            listing=self.turf, user=self.customer,
+            date=today_ist() + datetime.timedelta(days=1),
+            slots=['19:00 – 21:00'], amount=1218,
+        )
+        self.assertEqual(self.book_unit().status_code, 409)

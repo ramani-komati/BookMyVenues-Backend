@@ -49,6 +49,13 @@ class Booking(models.Model):
     customer_name = models.CharField(max_length=150, blank=True, default='')
     phone = models.CharField(max_length=10, blank=True, default='')
 
+    # Per-unit booking (P6): a venue can have several pitches/courts/screens.
+    # sport is '' for non-playzone venues; unit is 1-based; unit=None means a
+    # legacy / whole-venue booking that blocks every unit (safe default).
+    sport = models.CharField(max_length=100, blank=True, default='')
+    unit = models.PositiveSmallIntegerField(null=True, blank=True)
+    unit_label = models.CharField(max_length=150, blank=True, default='')
+
     date = models.DateField()
     slots = models.JSONField(default=list)      # ["19:30 – 21:00", ...]
     per_slot = models.PositiveIntegerField(default=0)  # hourly rate (₹)
@@ -79,6 +86,9 @@ class Booking(models.Model):
             'image': self.image,
             'date': self.date.isoformat(),
             'slots': self.slots,
+            'sport': self.sport or None,
+            'unit': self.unit,
+            'unitLabel': self.unit_label or None,
             'perSlot': self.per_slot,
             'addons': self.addons,
             'amount': self.amount,

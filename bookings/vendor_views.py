@@ -24,7 +24,13 @@ from .slots import (
     today_ist,
     total_minutes,
 )
-from .views import _amount_mismatch, _booked_intervals, _message, _to_int
+from .views import (
+    _amount_mismatch,
+    _booked_intervals,
+    _message,
+    _parse_unit,
+    _to_int,
+)
 
 TODAY_BOOKINGS_LIMIT = 8
 
@@ -182,6 +188,7 @@ class WalkInBookingView(APIView):
         try:
             date = parse_date(body.get('date'))
             intervals = parse_slots(body.get('slots'))
+            sport, unit, unit_label = _parse_unit(body)
             per_slot = _to_int(body.get('perSlot'), 'perSlot')
             client_amount = _to_int(body.get('amount'), 'amount')
         except SlotError as error:
@@ -200,7 +207,7 @@ class WalkInBookingView(APIView):
         with transaction.atomic():
             Listing.objects.select_for_update().get(pk=listing.pk)
 
-            if overlaps(intervals, _booked_intervals(listing, date)):
+            if overlaps(intervals, _booked_intervals(listing, date, sport, unit)):
                 return _message(
                     'One or more selected time slots are already booked.',
                     status.HTTP_409_CONFLICT,
@@ -215,6 +222,9 @@ class WalkInBookingView(APIView):
                 image=str(listing.record.get('image') or ''),
                 customer_name=str(body.get('customer') or 'Walk-in'),
                 phone='',
+                sport=sport,
+                unit=unit,
+                unit_label=unit_label,
                 date=date,
                 slots=[str(slot) for slot in body['slots']],
                 per_slot=per_slot,
