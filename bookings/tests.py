@@ -111,13 +111,17 @@ class CreateBookingTests(BookingTestBase):
         self.assertTrue(booking['id'].startswith('bk_'))
 
     def test_amount_with_addons(self):
+        # The frontend sends each add-on's price; the server sums them.
         response = self.book(
-            addons=[{'name': 'Photographer', 'qty': 1}, {'name': 'Cake', 'qty': 2}],
+            addons=[
+                {'name': 'Photographer', 'qty': 1, 'price': 2000},
+                {'name': 'Cake', 'qty': 2, 'price': 500},
+            ],
             amount=920 + 2000 + 1000,
         )
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.data['booking']['amount'], 3920)
-        # Server pinned the real prices from the listing:
+        # Server echoes the add-on lines from the request:
         self.assertEqual(response.data['booking']['addons'][0]['price'], 2000)
 
     def test_wrong_amount_rejected(self):
@@ -125,16 +129,39 @@ class CreateBookingTests(BookingTestBase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('Amount mismatch', response.data['message'])
 
-    def test_client_addon_price_ignored(self):
-        # Client claims the photographer costs ₹1 — server must refuse.
+    def test_custom_and_package_addons_accepted(self):
+        # P1: packages, extra-persons and custom add-ons are folded into the
+        # addons array as priced line items. The server must accept them ALL
+        # (never reject an unrecognised name) and sum the request prices.
         response = self.book(
-            addons=[{'name': 'Photographer', 'qty': 1, 'price': 1}],
-            amount=920 + 1,
+            addons=[
+                {'name': 'Water bottle 1L', 'qty': 4, 'price': 30},    # custom add-on
+                {'name': 'Birthday Deluxe', 'qty': 1, 'price': 5000},  # a package
+                {'name': 'Extra persons', 'qty': 4, 'price': 200},     # extra-person line
+            ],
+            # 900 slot + (120 + 5000 + 800) add-ons + 20 fee
+            amount=6840,
         )
-        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['booking']['amount'], 6840)
+        self.assertEqual(len(response.data['booking']['addons']), 3)
 
-    def test_unknown_addon_rejected(self):
-        response = self.book(addons=[{'name': 'Helicopter', 'qty': 1}], amount=999)
+    def test_request_addon_price_used(self):
+        # The listing catalogues 'Photographer' at ₹2000, but the request line
+        # says ₹2500 (e.g. a vendor edited the price). The server now honours
+        # the request price — proving it no longer overrides from the catalogue.
+        response = self.book(
+            addons=[{'name': 'Photographer', 'qty': 1, 'price': 2500}],
+            amount=920 + 2500,
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['booking']['amount'], 3420)
+
+    def test_negative_addon_price_rejected(self):
+        response = self.book(
+            addons=[{'name': 'Weird', 'qty': 1, 'price': -50}],
+            amount=920 - 50,
+        )
         self.assertEqual(response.status_code, 400)
 
     def test_overlap_conflict_409(self):

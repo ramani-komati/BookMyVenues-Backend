@@ -56,27 +56,36 @@ def _booked_intervals(listing, date):
 
 def compute_amount(listing, intervals, requested_addons):
     """
-    Server-side price: round(hourly rate x minutes / 60)
-    + add-ons (PRICES FROM THE LISTING, never from the client) + ₹20 fee.
+    Server-side price:
+        round(hourly rate x minutes / 60)   (slot — from OUR listing, authoritative)
+      + sum(addon.price x qty)              (add-ons — priced FROM THE REQUEST)
+      + ₹20 fee
+
+    The frontend folds packages and extra-person charges INTO the `addons`
+    array as ordinary priced line items (names that deliberately are NOT in the
+    listing's add-on catalogue). We therefore take each add-on's price from the
+    request and never reject a line for having an unrecognised name — otherwise
+    packages / extra persons / vendor-custom add-ons would fail every booking.
+
+    NOTE: this trusts client-supplied add-on prices. That is acceptable while
+    there is no live payment (amount is only a recorded number today); revisit
+    and re-validate against the catalogue when real payments land.
     """
     rate = _to_int(listing.record.get('price') or 0, 'venue price')
     base = round(rate * total_minutes(intervals) / 60)
 
-    catalog = {
-        str(addon.get('name')): _to_int(addon.get('price') or 0, 'addon price')
-        for addon in (listing.record.get('detail') or {}).get('addons') or []
-    }
-
     addon_total = 0
     cleaned = []
     for addon in requested_addons or []:
-        name = str(addon.get('name'))
-        if name not in catalog:
-            raise SlotError(f'Unknown add-on: "{name}".')
+        name = str(addon.get('name') or '').strip()
+        if not name:
+            raise SlotError('Each add-on needs a name.')
         qty = _to_int(addon.get('qty') or 1, 'addon qty')
         if qty < 1:
             raise SlotError('addon qty must be at least 1.')
-        price = catalog[name]
+        price = _to_int(addon.get('price') or 0, 'addon price')
+        if price < 0:
+            raise SlotError('addon price cannot be negative.')
         addon_total += price * qty
         cleaned.append({'name': name, 'qty': qty, 'price': price})
 
