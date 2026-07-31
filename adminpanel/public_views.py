@@ -56,3 +56,21 @@ class PublicBannersView(APIView):
         return Response({
             'banners': [b for b in banners if _is_active(b, today)],
         })
+
+
+@method_decorator(cache_page(CACHE_SECONDS), name='get')
+class PublicConfigView(APIView):
+    """GET /api/config -> {"fee": 20, "feeDate": "2026-08-01"}.
+
+    `fee` is the fee that applies TODAY (a future feeDate returns the default
+    until it kicks in) — the exact value the booking recompute charges, so the
+    customer bill and the server can never disagree."""
+
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        settings_obj = Settings.load()
+        return Response({
+            'fee': settings_obj.effective_fee(),
+            'feeDate': settings_obj.fee_date,
+        })

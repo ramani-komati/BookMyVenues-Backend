@@ -36,10 +36,12 @@ DEFAULT_LIMIT = 20
 
 
 def _booking_fee():
-    """The live booking fee — admin-configurable via Settings, default ₹20."""
+    """The fee that applies TODAY — the same Settings.effective_fee() that
+    GET /api/config serves, so bill and recompute always agree. Honours
+    feeDate (a future date means the new fee hasn't kicked in yet)."""
     try:
         from adminpanel.models import Settings
-        return Settings.load().booking_fee
+        return Settings.load().effective_fee()
     except Exception:
         return BOOKING_FEE
 
@@ -226,7 +228,8 @@ def compute_amount(listing, intervals, requested_addons, rate=None, offer_reques
         amount   = max(0, base - discount) + fee   (the ₹ fee is NOT discounted)
 
     `rate` is the per-unit rate when given, else the listing price. Returns
-    (amount, cleaned_addons, applied_offer, discount).
+    (amount, cleaned_addons, applied_offer, discount, fee) — `fee` is what was
+    actually charged, stored on the booking for payout math.
     """
     if rate is None:
         rate = _to_int(listing.record.get('price') or 0, 'venue price')
@@ -235,8 +238,9 @@ def compute_amount(listing, intervals, requested_addons, rate=None, offer_reques
     base = slot_base + addon_total
 
     discount, applied_offer = _apply_offer(listing, base, offer_request)
-    amount = max(0, base - discount) + _booking_fee()
-    return amount, cleaned, applied_offer, discount
+    fee = _booking_fee()
+    amount = max(0, base - discount) + fee
+    return amount, cleaned, applied_offer, discount, fee
 
 
 def _slot_start(text):
@@ -372,7 +376,7 @@ class MyBookingsView(APIView):
             intervals = parse_slots(body.get('slots'))
             sport, unit, unit_label = _parse_unit(body)
             rate = _unit_rate(listing, sport, unit)  # None -> listing price
-            amount, addons, applied_offer, discount = compute_amount(
+            amount, addons, applied_offer, discount, fee = compute_amount(
                 listing, intervals, body.get('addons'), rate=rate,
                 offer_request=body.get('offer'),
             )
@@ -423,6 +427,7 @@ class MyBookingsView(APIView):
                 addons=addons,
                 offer=applied_offer,
                 discount_amount=discount,
+                fee=fee,   # frozen at booking time — payouts deduct THIS
                 amount=amount,
             )
 

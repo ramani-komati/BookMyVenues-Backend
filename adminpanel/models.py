@@ -2,7 +2,11 @@
 Models that exist only for the super-admin panel (Phase 3):
 Settings (a single config row), Payout, Review, and the AuditEntry log.
 """
+import datetime
+
 from django.db import models
+
+DEFAULT_BOOKING_FEE = 20  # ₹ — used until a saved fee takes effect
 
 
 def _default_categories():
@@ -28,6 +32,23 @@ class Settings(models.Model):
         """The singleton config row, created with defaults on first use."""
         obj, _ = cls.objects.get_or_create(pk=1)
         return obj
+
+    def effective_fee(self, today=None):
+        """The fee that applies TODAY, honouring fee_date: a future fee_date
+        means the saved fee hasn't kicked in yet, so the default ₹20 applies.
+        This is THE single source both GET /api/config and the booking
+        recompute read — they can never disagree."""
+        if today is None:
+            from bookings.slots import today_ist
+            today = today_ist()
+        fee_date = str(self.fee_date or '').strip()
+        if fee_date:
+            try:
+                if today < datetime.date.fromisoformat(fee_date):
+                    return DEFAULT_BOOKING_FEE
+            except ValueError:
+                pass  # unparseable date -> the saved fee applies now
+        return self.booking_fee
 
     def __str__(self):
         return f'Platform settings (fee ₹{self.booking_fee})'

@@ -238,6 +238,7 @@ class WalkInBookingView(APIView):
                 addons=[],
                 offer=applied_offer,
                 discount_amount=discount,
+                fee=0,  # walk-ins carry no platform fee
                 amount=amount,
                 method=Booking.Method.WALK_IN,
                 walk_in=True,

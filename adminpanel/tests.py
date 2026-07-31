@@ -433,6 +433,102 @@ class PublicBannersTests(APITestCase):
         self.assertEqual(response.data, {'banners': []})
 
 
+class PlatformFeeTests(APITestCase):
+    """GET /api/config + the fee actually applying (and freezing per booking)."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # /api/config caches 60s — isolate tests
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9990000003', name='Ravi', email='ravi@x.in', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='hall',
+            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            name='Hall', category='hall', locality='x', pincode='560001',
+        )
+
+    def set_fee(self, fee, fee_date=''):
+        from django.core.cache import cache
+        self.client.force_authenticate(user=self.admin)
+        self.client.put(
+            '/api/admin/settings', {'fee': fee, 'feeDate': fee_date}, format='json'
+        )
+        self.client.force_authenticate(user=None)
+        cache.clear()
+
+    def book(self, amount, slot='10:00 – 11:00'):
+        import datetime as dt
+        self.client.force_authenticate(user=self.customer)
+        tomorrow = (today_ist() + dt.timedelta(days=1)).isoformat()
+        return self.client.post('/api/users/me/bookings', {
+            'venueId': str(self.listing.id), 'date': tomorrow,
+            'slots': [slot], 'addons': [], 'perSlot': 600,
+            'amount': amount,
+        }, format='json')
+
+    def test_config_default(self):
+        response = self.client.get('/api/config')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['fee'], 20)
+
+    def test_config_effective_today(self):
+        self.set_fee('30', today_ist().isoformat())
+        self.assertEqual(self.client.get('/api/config').data['fee'], 30)
+
+    def test_future_feeDate_not_applied_yet(self):
+        import datetime as dt
+        future = (today_ist() + dt.timedelta(days=5)).isoformat()
+        self.set_fee('30', future)
+        data = self.client.get('/api/config').data
+        self.assertEqual(data['fee'], 20)        # upcoming fee not active yet
+        self.assertEqual(data['feeDate'], future)
+
+    def test_acceptance_flow_fee_change_and_freeze(self):
+        # 1-2: fee 30 effective today -> /api/config says 30.
+        self.set_fee('30', today_ist().isoformat())
+        # 3: 1h at 600 -> bill 630, booking succeeds, fee frozen on record.
+        response = self.book(630)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['booking']['amount'], 630)
+        self.assertEqual(response.data['booking']['fee'], 30)
+        booking_id = response.data['booking']['id']
+        # 4: back to 20 -> new bookings charge 20; the old one keeps fee 30.
+        self.set_fee('20')
+        second = self.book(620, slot='12:00 – 13:00')
+        self.assertEqual(second.status_code, 201)
+        self.assertEqual(second.data['booking']['fee'], 20)
+        self.assertEqual(Booking.objects.get(pk=booking_id).fee, 30)
+
+    def test_recompute_matches_config_with_future_feeDate(self):
+        # Future feeDate: /api/config says 20 AND the recompute charges 20 —
+        # both read the same source, no mismatch possible.
+        import datetime as dt
+        self.set_fee('30', (today_ist() + dt.timedelta(days=5)).isoformat())
+        response = self.book(620)  # 600 + default 20
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['booking']['fee'], 20)
+
+    def test_payout_deducts_frozen_fee(self):
+        # A booking charged fee 30 last week -> payout deducts 30, not the
+        # current setting.
+        import datetime as dt
+        monday = today_ist() - dt.timedelta(days=today_ist().weekday())
+        last_mon = monday - dt.timedelta(days=7)
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=last_mon,
+            slots=['10:00 – 11:00'], amount=630, fee=30,
+        )
+        self.client.force_authenticate(user=self.admin)
+        payouts = self.client.get('/api/admin/bootstrap').data['payouts']
+        self.assertEqual(payouts[0]['grossNum'], 600)  # 630 − 30
+
+
 class ApprovalWorkflowTests(APITestCase):
     """Integration round 2, item 1 — the full approve/reject lifecycle."""
 

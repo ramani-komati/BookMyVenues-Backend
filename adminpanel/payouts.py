@@ -1,10 +1,12 @@
 """
 Weekly payout generation.
 
-Business model: the platform's ONLY revenue is the flat ₹20 booking fee — no
-percentage commission. The customer pays slots + add-ons + ₹20; the vendor's
-payout is therefore Σ(booking.amount − ₹20) over their completed ONLINE
-bookings in the week. Walk-ins are excluded (the vendor already has that cash);
+Business model: the platform's ONLY revenue is the flat booking fee — no
+percentage commission. The customer pays slots + add-ons + fee; the vendor's
+payout is therefore Σ(booking.amount − booking.fee) over their completed ONLINE
+bookings in the week — deducting the fee that was ACTUALLY charged on each
+booking (frozen at creation), so later fee changes never corrupt old periods.
+Walk-ins are excluded (the vendor already has that cash, and carry fee=0);
 refunded/cancelled bookings are excluded.
 
 generate_payouts() is idempotent (one row per vendor per week, enforced by a DB
@@ -16,8 +18,6 @@ from bookings.models import Booking
 from bookings.slots import today_ist
 
 from .models import Payout
-
-PLATFORM_FEE = 20  # ₹ per online booking (the business model's constant)
 
 
 def _week_start(day):
@@ -55,7 +55,7 @@ def generate_payouts():
         for booking in payable.filter(date__range=(week, week_end)):
             vendor = booking.listing.vendor
             entry = totals.setdefault(vendor.id, [0, vendor.name or vendor.phone])
-            entry[0] += max(0, booking.amount - PLATFORM_FEE)
+            entry[0] += max(0, booking.amount - booking.fee)
 
         for vendor_id, (gross, name) in totals.items():
             if gross <= 0:

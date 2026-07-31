@@ -175,6 +175,7 @@ def booking_row(booking, today=None):
         'slots': booking.slots,                         # raw slot strings
         'slot': f"{booking.date.strftime('%d %b')}, {booking.slots[0] if booking.slots else ''}",
         'amountNum': booking.amount,
+        'fee': booking.fee,                             # fee actually charged
         'method': 'Cash' if booking.walk_in else 'UPI',
         'status': _booking_status(booking, today),
         'slotsDesc': ', '.join(booking.slots),
