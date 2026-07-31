@@ -597,3 +597,15 @@ class PayoutGenerationTests(APITestCase):
         bookings = self._boot()['bookings']
         self.assertEqual(bookings[0]['date'], self.last_mon.isoformat())
         self.assertIn('createdAt', bookings[0])
+        self.assertEqual(bookings[0]['slots'], ['10:00 – 11:00'])  # raw slots too
+
+    def test_todays_booking_completes_after_last_slot_ends(self):
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['06:00 – 08:00'], amount=620,
+        )
+        # 07:00 IST -> still running; 09:00 IST -> completed.
+        with patch('adminpanel.formatters.now_minutes_ist', return_value=7 * 60):
+            self.assertEqual(self._boot()['bookings'][0]['status'], 'confirmed')
+        with patch('adminpanel.formatters.now_minutes_ist', return_value=9 * 60):
+            self.assertEqual(self._boot()['bookings'][0]['status'], 'completed')

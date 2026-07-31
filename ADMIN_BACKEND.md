@@ -152,6 +152,22 @@ Payout / Review / AuditEntry).
     please change the panel wording. (2Factor's SMS route is still DLT-pending,
     so approval texts would arrive as voice calls — will revisit once approved.)
 
+## ✅ Integration round 3 (31 Jul)
+
+1. **Approval gating** — was already deployed; the crickBuzz repro happened in
+   the 12-minute deploy window (published 22:10 UTC, gate live 22:22 UTC).
+   crickBuzz was routed through the queue and approved via the panel —
+   acceptance flow verified end-to-end in production.
+2. **Time-based booking completion** — admin `bookings[]` rows flip
+   `confirmed → completed` once the LAST SLOT ENDS (IST), computed at read
+   time; explicit states (refunded etc.) always win. Rows now also carry the
+   raw `slots` array (plus the existing ISO `date`/`createdAt`).
+   `DELETE /users/me/bookings/:id` now refuses once the last slot has ended —
+   time-based, enforced server-side.
+3. **Payouts confirmed NET of the fee** — verified in production:
+   Thalla 20–26 Jul raw ₹5,378 (2 bookings) → stored ₹5,338 = Σ(amount − 20).
+   `periodStart`/`periodEnd` ISO already present on every row.
+
 ---
 
 ## 🎉 Admin backend complete

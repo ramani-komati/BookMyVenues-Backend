@@ -14,7 +14,7 @@ from django.utils import timezone
 
 from accounts.models import User
 from bookings.models import Booking
-from bookings.slots import today_ist
+from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 from venues.completion import compute_completion
 from venues.models import Listing, VenueDraft
 
@@ -150,10 +150,18 @@ def format_users():
 # --- Bookings ----------------------------------------------------
 
 def _booking_status(booking, today):
-    # Explicit admin states win; otherwise 'completed' is derived from the date.
+    """Explicit admin states (refunded etc.) win; otherwise a booking is
+    'completed' once its LAST SLOT HAS ENDED (IST) — time-based, not just
+    date-based, so a 06:00–08:00 booking flips the same afternoon."""
     if booking.status and booking.status != 'confirmed':
         return booking.status
-    return 'completed' if booking.date < today else 'confirmed'
+    if booking.date < today:
+        return 'completed'
+    if booking.date == today:
+        end = slots_end_minute(booking.slots)
+        if end and end <= now_minutes_ist():
+            return 'completed'
+    return 'confirmed'
 
 
 def booking_row(booking, today=None):
@@ -164,6 +172,7 @@ def booking_row(booking, today=None):
         'venue': booking.venue_name,
         'date': booking.date.isoformat(),               # machine-readable
         'createdAt': booking.created_at.isoformat(),
+        'slots': booking.slots,                         # raw slot strings
         'slot': f"{booking.date.strftime('%d %b')}, {booking.slots[0] if booking.slots else ''}",
         'amountNum': booking.amount,
         'method': 'Cash' if booking.walk_in else 'UPI',

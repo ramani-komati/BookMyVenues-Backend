@@ -25,6 +25,7 @@ from .slots import (
     overlaps,
     parse_date,
     parse_slots,
+    slots_end_minute,
     today_ist,
     total_minutes,
 )
@@ -444,7 +445,15 @@ class CancelBookingView(APIView):
         if booking is None:
             return _message('Booking not found.', status.HTTP_404_NOT_FOUND)
 
-        if booking.date < today_ist():
+        # Time-based, not date-based: a same-day booking whose last slot has
+        # ENDED can no longer be cancelled.
+        today = today_ist()
+        ended_today = (
+            booking.date == today
+            and (end := slots_end_minute(booking.slots))
+            and end <= now_minutes_ist()
+        )
+        if booking.date < today or ended_today:
             return _message('This booking is already completed.', status.HTTP_400_BAD_REQUEST)
 
         booking.delete()  # the freed slots reappear in availability instantly

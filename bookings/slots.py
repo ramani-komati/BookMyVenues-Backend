@@ -84,6 +84,19 @@ def total_minutes(intervals):
     return sum(end - start for start, end in intervals)
 
 
+def slots_end_minute(slot_texts):
+    """Latest end minute across a booking's slot strings; 0 when nothing
+    parses (bad historic data must never crash a read)."""
+    latest = 0
+    for text in slot_texts or []:
+        try:
+            _, end = parse_slot(text)
+        except SlotError:
+            continue
+        latest = max(latest, end)
+    return latest
+
+
 def parse_date(text):
     """'2026-07-21' -> date. Raises SlotError when invalid."""
     try:

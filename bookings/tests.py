@@ -262,6 +262,28 @@ class CancelBookingTests(BookingTestBase):
         response = self.client.delete(f'/api/users/me/bookings/{booking.id}')
         self.assertEqual(response.status_code, 400)
 
+    def test_cannot_cancel_same_day_booking_after_it_ended(self):
+        # 06:00–08:00 today; the clock says 09:00 -> ended, cancel refused.
+        booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['06:00 – 08:00'], amount=1220,
+        )
+        from unittest.mock import patch
+        with patch('bookings.views.now_minutes_ist', return_value=9 * 60):
+            response = self.client.delete(f'/api/users/me/bookings/{booking.id}')
+        self.assertEqual(response.status_code, 400)
+
+    def test_can_cancel_same_day_booking_before_it_ends(self):
+        # Same booking, but the clock says 07:00 -> still running, cancel OK.
+        booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['06:00 – 08:00'], amount=1220,
+        )
+        from unittest.mock import patch
+        with patch('bookings.views.now_minutes_ist', return_value=7 * 60):
+            response = self.client.delete(f'/api/users/me/bookings/{booking.id}')
+        self.assertEqual(response.status_code, 200)
+
 
 class WalkInBookingTests(BookingTestBase):
     def walk_in(self, **overrides):
