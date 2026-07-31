@@ -376,6 +376,63 @@ class AdminPhase3Tests(APITestCase):
         self.assertEqual(entry.target_id, str(vendor.id))  # id kept separately
 
 
+class PublicBannersTests(APITestCase):
+    """GET /api/banners — homepage promo banners from admin Settings."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # the endpoint caches 60s — isolate tests
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+
+    def save_banners(self, banners):
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.put(
+            '/api/admin/settings', {'banners': banners}, format='json'
+        )
+        self.client.force_authenticate(user=None)
+        return response
+
+    def test_all_banner_fields_round_trip(self):
+        banner = {
+            'id': 1722400000000, 'title': 'Weekend turf offer',
+            'text': 'On all box cricket turfs', 'type': 'percent',
+            'value': 15, 'from': '2026-08-01', 'to': '2026-08-15',
+        }
+        response = self.save_banners([banner])
+        self.assertEqual(response.data['banners'], [banner])  # verbatim echo
+        self.client.force_authenticate(user=self.admin)
+        boot = self.client.get('/api/admin/bootstrap')
+        self.assertEqual(boot.data['settings']['banners'], [banner])
+
+    def test_public_endpoint_filters_by_date_window(self):
+        import datetime as dt
+        today = today_ist()
+        active = {'id': 1, 'title': 'Active', 'text': '', 'type': 'none', 'value': 0,
+                  'from': today.isoformat(), 'to': today.isoformat()}
+        future = {'id': 2, 'title': 'Future', 'text': '', 'type': 'flat', 'value': 100,
+                  'from': (today + dt.timedelta(days=5)).isoformat(), 'to': ''}
+        expired = {'id': 3, 'title': 'Expired', 'text': '', 'type': 'percent', 'value': 10,
+                   'from': '', 'to': (today - dt.timedelta(days=1)).isoformat()}
+        open_ended = {'id': 4, 'title': 'Always', 'text': '', 'type': 'none', 'value': 0,
+                      'from': '', 'to': ''}
+        untitled = {'id': 5, 'title': '', 'text': 'no title', 'type': 'none', 'value': 0,
+                    'from': '', 'to': ''}
+        self.save_banners([active, future, expired, open_ended, untitled])
+
+        response = self.client.get('/api/banners')  # public, no auth
+        self.assertEqual(response.status_code, 200)
+        ids = [b['id'] for b in response.data['banners']]
+        self.assertEqual(ids, [1, 4])  # admin order preserved; others filtered
+
+    def test_no_banners_returns_empty_list(self):
+        response = self.client.get('/api/banners')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'banners': []})
+
+
 class ApprovalWorkflowTests(APITestCase):
     """Integration round 2, item 1 — the full approve/reject lifecycle."""
 

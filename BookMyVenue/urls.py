@@ -17,8 +17,12 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from adminpanel.public_views import PublicBannersView
+
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # Public: admin-managed homepage banners (customer hero carousel).
+    path('api/banners', PublicBannersView.as_view(), name='public-banners'),
     # Frontend-contract routes (OTP auth, drafts, bookings, public) — /api/
     path('api/', include('accounts.urls_auth')),
     # bookings BEFORE venues: availability must win over the public
