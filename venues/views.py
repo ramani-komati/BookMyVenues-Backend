@@ -367,6 +367,12 @@ class VendorListingDeleteView(APIView):
                 status.HTTP_409_CONFLICT,
             )
 
+        # Deletions are irreversible — log who did it, so "where did this
+        # venue go?" is always answerable from the server logs.
+        logger.info(
+            'Vendor %s (%s) deleted listing %s (%s)',
+            request.user.name, request.user.phone, listing.name, listing_id,
+        )
         listing.delete()  # past bookings survive (listing FK is SET_NULL)
         return Response({'deleted': True, 'id': str(listing_id)})
 

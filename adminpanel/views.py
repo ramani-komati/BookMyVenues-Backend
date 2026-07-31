@@ -220,7 +220,11 @@ class AdminApprovalUpdateView(_AdminWriteView):
 
 
 class AdminVenueUpdateView(_AdminWriteView):
-    """PATCH /api/admin/venues/<id> — status (live/paused) / featured."""
+    """PATCH /api/admin/venues/<id> — status (live/paused) / featured.
+
+    Status changes apply to the venue's WHOLE listing set: the base row and
+    its unit siblings (detail.unitOf family) move together, in both
+    directions — pause hides all, live restores all."""
 
     def patch(self, request, listing_id):
         listing = Listing.objects.filter(pk=listing_id).first()
@@ -236,6 +240,10 @@ class AdminVenueUpdateView(_AdminWriteView):
                 listing.status = Listing.Status.PAUSED
             else:
                 return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+            # Cascade to the unit family — symmetric for pause AND unpause.
+            Listing.objects.filter(
+                record__detail__unitOf=str(listing.pk)
+            ).update(status=listing.status)
         if 'featured' in data:
             listing.featured = bool(data['featured'])
 

@@ -466,6 +466,32 @@ class ApprovalWorkflowTests(APITestCase):
         venues = self.client.get('/api/admin/bootstrap').data['venues']
         self.assertEqual([v['name'] for v in venues], ['Turf'])
 
+    def test_pause_unpause_cascade_is_symmetric(self):
+        # Approve first so the family is live.
+        self.client.force_authenticate(user=self.admin)
+        self.client.patch(
+            f'/api/admin/approvals/{self.base.id}', {'status': 'approved'}, format='json'
+        )
+        for _ in range(3):  # repeatable: pause → hidden, unpause → back
+            r = self.client.patch(
+                f'/api/admin/venues/{self.base.id}', {'status': 'paused'}, format='json'
+            )
+            self.assertEqual(r.status_code, 200)
+            self.sibling.refresh_from_db()
+            self.assertEqual(self.sibling.status, 'paused')  # family hidden too
+            self._clear_cache()
+            self.assertEqual(self.client.get('/api/venues').data['total'], 0)
+
+            r = self.client.patch(
+                f'/api/admin/venues/{self.base.id}', {'status': 'live'}, format='json'
+            )
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.data['status'], 'live')  # echoes updated entity
+            self.sibling.refresh_from_db()
+            self.assertEqual(self.sibling.status, 'live')    # family restored
+            self._clear_cache()
+            self.assertEqual(self.client.get('/api/venues').data['total'], 2)
+
 
 class CustomerVendorIdentityTests(APITestCase):
     """Integration round 2, item 2 — one phone can be customer AND vendor."""
