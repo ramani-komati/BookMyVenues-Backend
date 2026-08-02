@@ -206,6 +206,27 @@ class CreateBookingTests(BookingTestBase):
         response = self.book(amount='920')
         self.assertEqual(response.status_code, 201)
 
+    def test_pay_at_venue_method_stored_and_echoed(self):
+        response = self.book(method='venue')
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['booking']['method'], 'venue')
+        self.assertFalse(response.data['booking']['walkIn'])
+        # Amount is identical to online — vendor collects it all on arrival.
+        self.assertEqual(response.data['booking']['amount'], 920)
+
+    def test_default_method_is_online(self):
+        response = self.book()
+        self.assertEqual(response.data['booking']['method'], 'online')
+
+    def test_bogus_method_rejected(self):
+        response = self.book(method='crypto')
+        self.assertEqual(response.status_code, 400)
+
+    def test_pay_at_venue_blocks_slots(self):
+        self.book(method='venue')
+        response = self.book(slots=['20:00 – 22:00'], amount=1220)
+        self.assertEqual(response.status_code, 409)  # overlap sees it
+
 
 class MyBookingsTests(BookingTestBase):
     def test_lists_only_my_bookings(self):

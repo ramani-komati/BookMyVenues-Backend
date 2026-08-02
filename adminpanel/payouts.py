@@ -2,11 +2,14 @@
 Weekly payout generation.
 
 Business model: the platform's ONLY revenue is the flat booking fee — no
-percentage commission. The customer pays slots + add-ons + fee; the vendor's
-payout is therefore Σ(booking.amount − booking.fee) over their completed ONLINE
-bookings in the week — deducting the fee that was ACTUALLY charged on each
-booking (frozen at creation), so later fee changes never corrupt old periods.
-Walk-ins are excluded (the vendor already has that cash, and carry fee=0);
+percentage commission. Per completed week, a vendor's payout is:
+
+    Σ online-paid (amount − fee)   we hold the money, pass it on minus our fee
+  − Σ pay-at-venue (fee)           vendor collected the FULL amount (incl. our
+                                   fee) in cash — only the fee comes back to us
+
+Each booking's own frozen fee is used (set at creation), so later fee changes
+never corrupt old periods. Walk-ins are excluded entirely (vendor cash, fee=0);
 refunded/cancelled bookings are excluded.
 
 generate_payouts() is idempotent (one row per vendor per week, enforced by a DB
@@ -55,7 +58,10 @@ def generate_payouts():
         for booking in payable.filter(date__range=(week, week_end)):
             vendor = booking.listing.vendor
             entry = totals.setdefault(vendor.id, [0, vendor.name or vendor.phone])
-            entry[0] += max(0, booking.amount - booking.fee)
+            if booking.method == Booking.Method.VENUE:
+                entry[0] -= booking.fee  # vendor holds the cash; fee comes back
+            else:
+                entry[0] += max(0, booking.amount - booking.fee)
 
         for vendor_id, (gross, name) in totals.items():
             if gross <= 0:

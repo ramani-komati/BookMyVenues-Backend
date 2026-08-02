@@ -755,6 +755,28 @@ class PayoutGenerationTests(APITestCase):
         )
         self.assertEqual(self._boot()['payouts'], [])
 
+    def test_pay_at_venue_deducts_only_the_fee(self):
+        # Frontend example: online bookings pass through minus their fees,
+        # at-venue bookings contribute MINUS their fee only (vendor holds the
+        # cash). 1220+620 online (fee 20 each) + one at-venue (fee 20):
+        # (1220-20) + (620-20) - 20 = 1780.
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=1220, fee=20,
+        )
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['12:00 – 13:00'], amount=620, fee=20,
+        )
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_tue,
+            slots=['14:00 – 15:00'], amount=620, fee=20,
+            method=Booking.Method.VENUE,
+        )
+        payouts = self._boot()['payouts']
+        self.assertEqual(len(payouts), 1)
+        self.assertEqual(payouts[0]['grossNum'], 1200 + 600 - 20)
+
     def test_generation_is_idempotent_and_keeps_admin_status(self):
         Booking.objects.create(
             listing=self.listing, user=self.customer, date=self.last_mon,

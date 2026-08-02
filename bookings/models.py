@@ -14,8 +14,9 @@ def make_booking_id():
 
 class Booking(models.Model):
     class Method(models.TextChoices):
-        ONLINE = 'online', 'Online'
-        WALK_IN = 'walk-in', 'Walk-in'
+        ONLINE = 'online', 'Online'      # paid online (future: gateway)
+        VENUE = 'venue', 'Pay at venue'  # customer pays FULL amount on arrival
+        WALK_IN = 'walk-in', 'Walk-in'   # vendor-recorded offline booking
 
     id = models.CharField(
         max_length=20, primary_key=True, default=make_booking_id, editable=False
