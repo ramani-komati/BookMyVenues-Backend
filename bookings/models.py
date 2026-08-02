@@ -82,6 +82,9 @@ class Booking(models.Model):
     # Lifecycle state for the admin panel (P-admin Phase 2). 'completed' is
     # derived from the date; an admin can set 'refunded' etc.
     status = models.CharField(max_length=20, default='confirmed')
+    # Set by the admin Refunds panel when issuing a refund.
+    refund_reason = models.CharField(max_length=200, blank=True, default='')
+    refund_amount = models.PositiveIntegerField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

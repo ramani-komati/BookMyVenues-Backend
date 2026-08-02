@@ -71,6 +71,15 @@ def _to_int(value, field):
         raise SlotError(f'{field} must be a number.')
 
 
+def _active_bookings(listing, date):
+    """The rows that HOLD time: every booking except refunded/cancelled
+    (those free their slots). Availability and the overlap check both read
+    exactly this queryset so they can never disagree."""
+    return Booking.objects.filter(listing=listing, date=date).exclude(
+        status__in=('refunded', 'cancelled')
+    )
+
+
 def _booked_intervals(listing, date, sport=None, unit=None):
     """
     (start, end) minute-intervals already booked for venue+date that CONFLICT
@@ -82,7 +91,7 @@ def _booked_intervals(listing, date, sport=None, unit=None):
       whole-venue bookings (unit is None) which block every unit (safe default).
     """
     intervals = []
-    for booking in Booking.objects.filter(listing=listing, date=date):
+    for booking in _active_bookings(listing, date):
         if unit is not None and booking.unit is not None:
             if booking.unit != unit or (booking.sport or '') != (sport or ''):
                 continue  # a different pitch/court/screen — no conflict
@@ -262,7 +271,7 @@ def _availability(listing, date):
     booked = set()
     per_unit = defaultdict(list)         # (sport, unit) -> [slot strings]
 
-    for booking in Booking.objects.filter(listing=listing, date=date):
+    for booking in _active_bookings(listing, date):
         booked.update(booking.slots)
         if booking.unit is not None:
             per_unit[(booking.sport or '', booking.unit)].extend(booking.slots)

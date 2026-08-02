@@ -185,6 +185,11 @@ class WalkInBookingView(APIView):
             listing = matches[0] if len(matches) == 1 else None
         if listing is None:
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
+        if listing.status != Listing.Status.LIVE:
+            return _message(
+                'This venue is not live yet — walk-ins need an approved venue.',
+                status.HTTP_400_BAD_REQUEST,
+            )
 
         try:
             date = parse_date(body.get('date'))

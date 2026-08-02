@@ -376,6 +376,152 @@ class AdminPhase3Tests(APITestCase):
         self.assertEqual(entry.target_id, str(vendor.id))  # id kept separately
 
 
+class ConsolidatedRoundTests(APITestCase):
+    """New items from the consolidated backlog: refunds free slots + carry
+    reason/amount, suspension cascade, walk-in live-only, payout carry-forward,
+    enriched admin rows."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9990000003', name='Ravi', email='ravi@x.in', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='hall',
+            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            name='Hall', category='hall', locality='x', pincode='560001',
+        )
+        import datetime as dt
+        self.tomorrow = today_ist() + dt.timedelta(days=1)
+
+    def _make_booking(self, **overrides):
+        fields = dict(
+            listing=self.listing, user=self.customer, date=self.tomorrow,
+            slots=['18:00 – 20:00'], amount=1220, fee=20, customer_name='A',
+            venue_name='Hall',
+        )
+        fields.update(overrides)
+        return Booking.objects.create(**fields)
+
+    # --- refunds free slots + store reason/amount + online-only ---
+    def test_refund_frees_the_slot_and_stores_details(self):
+        booking = self._make_booking()
+        avail = f'/api/venues/{self.listing.id}/availability?date={self.tomorrow.isoformat()}'
+        self.assertEqual(self.client.get(avail).data['booked'], ['18:00 – 20:00'])
+
+        self.client.force_authenticate(user=self.admin)
+        r = self.client.patch(
+            f'/api/admin/bookings/{booking.id}',
+            {'status': 'refunded', 'reason': 'Venue paused (rain)', 'refundAmount': 1220},
+            format='json',
+        )
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.data['refundReason'], 'Venue paused (rain)')
+        self.assertEqual(r.data['refundAmount'], 1220)
+
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get(avail).data['booked'], [])  # slot freed
+        # And the slot is genuinely rebookable:
+        self.client.force_authenticate(user=self.customer)
+        rebook = self.client.post('/api/users/me/bookings', {
+            'venueId': str(self.listing.id), 'date': self.tomorrow.isoformat(),
+            'slots': ['18:00 – 20:00'], 'addons': [], 'perSlot': 600, 'amount': 1220,
+        }, format='json')
+        self.assertEqual(rebook.status_code, 201)
+
+    def test_pay_at_venue_booking_not_refundable(self):
+        booking = self._make_booking(method=Booking.Method.VENUE)
+        self.client.force_authenticate(user=self.admin)
+        r = self.client.patch(
+            f'/api/admin/bookings/{booking.id}', {'status': 'refunded'}, format='json'
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('detail', r.data)
+
+    # --- vendor suspension cascade ---
+    def test_suspend_blocked_by_active_booking(self):
+        self._make_booking()
+        self.client.force_authenticate(user=self.admin)
+        r = self.client.patch(
+            f'/api/admin/vendors/{self.vendor.id}', {'acc': 'suspended'}, format='json'
+        )
+        self.assertEqual(r.status_code, 409)
+        self.vendor.refresh_from_db()
+        self.assertTrue(self.vendor.is_active)  # unchanged
+
+    def test_suspend_after_refund_pauses_venues(self):
+        booking = self._make_booking()
+        self.client.force_authenticate(user=self.admin)
+        self.client.patch(
+            f'/api/admin/bookings/{booking.id}', {'status': 'refunded'}, format='json'
+        )
+        r = self.client.patch(
+            f'/api/admin/vendors/{self.vendor.id}', {'acc': 'suspended'}, format='json'
+        )
+        self.assertEqual(r.status_code, 200)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'paused')  # gone from /venues
+        # Reactivate: venues STAY paused (manual review before relisting).
+        self.client.patch(
+            f'/api/admin/vendors/{self.vendor.id}', {'acc': 'active'}, format='json'
+        )
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'paused')
+
+    # --- walk-ins only on live venues ---
+    def test_walkin_rejected_on_pending_venue(self):
+        Listing.objects.filter(pk=self.listing.pk).update(status='pending')
+        self.client.force_authenticate(user=self.vendor)
+        r = self.client.post('/api/vendors/me/walkin-bookings', {
+            'venueId': str(self.listing.id), 'date': self.tomorrow.isoformat(),
+            'slots': ['10:00 – 11:00'], 'customer': 'W', 'perSlot': 600, 'amount': 600,
+        }, format='json')
+        self.assertEqual(r.status_code, 400)
+
+    # --- payout carry-forward ---
+    def test_negative_week_carries_into_next_payout(self):
+        import datetime as dt
+        monday = today_ist() - dt.timedelta(days=today_ist().weekday())
+        week1, week2 = monday - dt.timedelta(days=14), monday - dt.timedelta(days=7)
+        # Week 1: only an at-venue booking -> net −20, no row.
+        self._make_booking(date=week1, method=Booking.Method.VENUE, amount=620)
+        # Week 2: online 620 -> (620−20) − carried 20 = 580.
+        self._make_booking(date=week2, slots=['10:00 – 11:00'], amount=620)
+        self.client.force_authenticate(user=self.admin)
+        payouts = self.client.get('/api/admin/bootstrap').data['payouts']
+        self.assertEqual(len(payouts), 1)
+        self.assertEqual(payouts[0]['grossNum'], 580)
+        self.assertEqual(payouts[0]['periodStart'], week2.isoformat())
+
+    # --- enriched admin rows ---
+    def test_admin_booking_rows_carry_phone_and_unit(self):
+        self._make_booking(
+            phone='9990000004', sport='Box Cricket', unit=2, unit_label='Pitch 2',
+        )
+        self.client.force_authenticate(user=self.admin)
+        row = self.client.get('/api/admin/bootstrap').data['bookings'][0]
+        self.assertEqual(row['phone'], '9990000004')
+        self.assertEqual(row['sport'], 'Box Cricket')
+        self.assertEqual(row['unit'], 2)
+        self.assertEqual(row['unitLabel'], 'Pitch 2')
+
+    def test_venue_rows_carry_district_from_draft(self):
+        VenueDraft.objects.create(
+            vendor=self.vendor, id=self.listing.id,
+            data={'location': {'district': 'Warangal', 'city': 'Hanamkonda'}},
+        )
+        self.client.force_authenticate(user=self.admin)
+        venues = self.client.get('/api/admin/bootstrap').data['venues']
+        self.assertEqual(venues[0]['district'], 'Warangal')
+        self.assertEqual(venues[0]['city'], 'Hanamkonda')
+
+
 class PublicBannersTests(APITestCase):
     """GET /api/banners — homepage promo banners from admin Settings."""
 

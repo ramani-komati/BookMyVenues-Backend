@@ -55,6 +55,28 @@ def _unit_of(listing):
     return str(((listing.record or {}).get('detail') or {}).get('unitOf') or '').strip()
 
 
+def _draft_location(listing_id):
+    """The wizard's location bucket for this id ({} when no draft exists) —
+    the fallback source for district/city on rows published before the
+    frontend started sending them flat on the record."""
+    draft = VenueDraft.objects.filter(pk=listing_id).first()
+    return ((draft.data or {}).get('location') or {}) if draft else {}
+
+
+def _district_and_city(listing):
+    record = listing.record or {}
+    detail = record.get('detail') or {}
+    district = str(record.get('district') or detail.get('district') or '').strip()
+    city = str(record.get('city') or detail.get('city') or '').strip()
+    if not district or not city:
+        location = _draft_location(listing.pk)
+        district = district or str(location.get('district') or '').strip()
+        city = city or str(
+            location.get('city') or location.get('district') or ''
+        ).strip()
+    return district, city
+
+
 def _venue_status(listing):
     if listing.status == Listing.Status.LIVE:
         return 'live'
@@ -67,12 +89,14 @@ def venue_row(listing):
     record = listing.record or {}
     detail = record.get('detail') or {}
     bookings = list(listing.bookings.all())
+    district, city = _district_and_city(listing)
     return {
         'id': str(listing.id),
         'name': listing.name or record.get('name') or '',
         'vendor': listing.vendor.name or listing.vendor.phone,
         'category': listing.category or record.get('category') or '',
-        'city': str(record.get('city') or detail.get('city') or ''),
+        'city': city,
+        'district': district,
         'area': listing.locality or record.get('locality') or '',
         'price': _rupees(record.get('price') or 0),
         'rating': 0.0,
@@ -177,6 +201,12 @@ def booking_row(booking, today=None):
         'slot': f"{booking.date.strftime('%d %b')}, {booking.slots[0] if booking.slots else ''}",
         'amountNum': booking.amount,
         'fee': booking.fee,                             # fee actually charged
+        'phone': booking.phone or '',
+        'sport': booking.sport or None,
+        'unit': booking.unit,
+        'unitLabel': booking.unit_label or None,
+        'refundReason': booking.refund_reason,
+        'refundAmount': booking.refund_amount,
         'method': booking.method,   # echoed exactly as stored (upi/card/…/venue/walk-in)
         'status': _booking_status(booking, today),
         'slotsDesc': ', '.join(booking.slots),
@@ -206,6 +236,7 @@ def approval_row(listing, now=None):
     now = now or timezone.now()
     record = listing.record or {}
     detail = record.get('detail') or {}
+    district, city = _district_and_city(listing)
     # The draft (same id) still holds the payout bucket + wizard completion.
     draft = VenueDraft.objects.filter(pk=listing.pk).first()
     payout_mask = ''
@@ -223,7 +254,8 @@ def approval_row(listing, now=None):
         'vendor': listing.vendor.name or listing.vendor.phone,
         'phone': str(detail.get('contactPhone') or listing.vendor.phone),
         'category': listing.category or '',
-        'city': str(record.get('city') or detail.get('city') or ''),
+        'city': city,
+        'district': district,
         'area': listing.locality or '',
         'submitted': submitted.date().isoformat(),
         'waitingH': int((now - submitted).total_seconds() // 3600),

@@ -253,8 +253,32 @@ class AdminVenueUpdateView(_AdminWriteView):
         return Response(venue_row(listing))
 
 
+def _vendor_has_active_bookings(vendor):
+    """True when any venue of the vendor has a confirmed, not-yet-completed
+    booking (time-based: today's bookings count until their last slot ends)."""
+    from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
+
+    today = today_ist()
+    base = Booking.objects.filter(listing__vendor=vendor).exclude(
+        status__in=('refunded', 'cancelled')
+    )
+    if base.filter(date__gt=today).exists():
+        return True
+    for booking in base.filter(date=today):
+        end = slots_end_minute(booking.slots)
+        if not end or end > now_minutes_ist():
+            return True
+    return False
+
+
 class AdminVendorUpdateView(_AdminWriteView):
-    """PATCH /api/admin/vendors/<id> — kyc / acc (suspend/reactivate)."""
+    """PATCH /api/admin/vendors/<id> — kyc / acc (suspend/reactivate).
+
+    Suspending removes the vendor from the platform: refused (409) while any
+    of their venues has an active booking; otherwise all their live venues
+    (incl. unit siblings) are paused and the account is deactivated — which
+    also blocks re-publishing, since inactive accounts fail authentication.
+    Reactivating does NOT auto-relist: venues stay paused for manual review."""
 
     def patch(self, request, vendor_id):
         vendor = User.objects.filter(pk=vendor_id, role=User.Role.VENDOR).first()
@@ -270,9 +294,17 @@ class AdminVendorUpdateView(_AdminWriteView):
         if 'acc' in data:
             value = str(data['acc'])
             if value == 'suspended':
+                if _vendor_has_active_bookings(vendor):
+                    return detail(
+                        'Vendor has active bookings. Refund or complete them first.',
+                        status.HTTP_409_CONFLICT,
+                    )
                 vendor.is_active = False
+                vendor.listings.filter(status=Listing.Status.LIVE).update(
+                    status=Listing.Status.PAUSED
+                )
             elif value == 'active':
-                vendor.is_active = True
+                vendor.is_active = True  # venues stay paused — unpause manually
             else:
                 return detail('Invalid acc value.', status.HTTP_400_BAD_REQUEST)
 
@@ -319,7 +351,19 @@ class AdminBookingUpdateView(_AdminWriteView):
             value = str(data['status'])
             if value not in BOOKING_STATUSES:
                 return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
+            if value == 'refunded' and booking.method in (
+                Booking.Method.VENUE, Booking.Method.WALK_IN
+            ):
+                return detail(
+                    'Only online-paid bookings can be refunded.',
+                    status.HTTP_400_BAD_REQUEST,
+                )
             booking.status = value
+        # Refund details from the panel (stored alongside the status change).
+        if 'reason' in data:
+            booking.refund_reason = str(data['reason'] or '')[:200]
+        if 'refundAmount' in data:
+            booking.refund_amount = _to_int(data['refundAmount'], None)
 
         booking.save()
         record_audit(request, 'Booking update', booking.venue_name or booking.id,
