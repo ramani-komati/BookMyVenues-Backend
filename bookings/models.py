@@ -14,9 +14,16 @@ def make_booking_id():
 
 class Booking(models.Model):
     class Method(models.TextChoices):
-        ONLINE = 'online', 'Online'      # paid online (future: gateway)
-        VENUE = 'venue', 'Pay at venue'  # customer pays FULL amount on arrival
-        WALK_IN = 'walk-in', 'Walk-in'   # vendor-recorded offline booking
+        ONLINE = 'online', 'Online'          # generic online payment
+        UPI = 'upi', 'UPI'
+        CARD = 'card', 'Card'
+        NETBANKING = 'netbanking', 'Netbanking'
+        VENUE = 'venue', 'Pay at venue'      # customer pays FULL amount on arrival
+        WALK_IN = 'walk-in', 'Walk-in'       # vendor-recorded offline booking
+
+    # Methods a customer may send on POST /users/me/bookings. Everything except
+    # 'venue' means the money was collected online (payout passes it through).
+    CUSTOMER_METHODS = {'online', 'upi', 'card', 'netbanking', 'venue'}
 
     id = models.CharField(
         max_length=20, primary_key=True, default=make_booking_id, editable=False

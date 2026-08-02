@@ -177,7 +177,7 @@ def booking_row(booking, today=None):
         'slot': f"{booking.date.strftime('%d %b')}, {booking.slots[0] if booking.slots else ''}",
         'amountNum': booking.amount,
         'fee': booking.fee,                             # fee actually charged
-        'method': 'Cash' if (booking.walk_in or booking.method == Booking.Method.VENUE) else 'UPI',
+        'method': booking.method,   # echoed exactly as stored (upi/card/…/venue/walk-in)
         'status': _booking_status(booking, today),
         'slotsDesc': ', '.join(booking.slots),
         'slotsAmt': _rupees(booking.amount),

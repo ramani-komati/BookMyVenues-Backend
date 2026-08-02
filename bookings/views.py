@@ -378,13 +378,15 @@ class MyBookingsView(APIView):
             if first_start <= now_minutes_ist():
                 return _message('That time has already passed today.', status.HTTP_400_BAD_REQUEST)
 
-        # Payment method: online (default) or pay-at-venue. The amount is the
-        # same either way — at-venue just means the vendor collects it (incl.
-        # the platform fee, which payouts claw back).
+        # Payment method — stored and echoed EXACTLY as received ('online'
+        # only when the client sends none). The amount is the same for all;
+        # 'venue' just means the vendor collects it (incl. the platform fee,
+        # which payouts claw back).
         method = str(body.get('method') or Booking.Method.ONLINE)
-        if method not in (Booking.Method.ONLINE, Booking.Method.VENUE):
+        if method not in Booking.CUSTOMER_METHODS:
             return _message(
-                'method must be "online" or "venue".', status.HTTP_400_BAD_REQUEST
+                'method must be one of: online, upi, card, netbanking, venue.',
+                status.HTTP_400_BAD_REQUEST,
             )
 
         # SECURITY: the client's amount is only ACCEPTED, never trusted.

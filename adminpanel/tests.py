@@ -777,6 +777,15 @@ class PayoutGenerationTests(APITestCase):
         self.assertEqual(len(payouts), 1)
         self.assertEqual(payouts[0]['grossNum'], 1200 + 600 - 20)
 
+    def test_upi_counts_as_online_paid_in_payouts(self):
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=620, fee=20,
+            method=Booking.Method.UPI,
+        )
+        payouts = self._boot()['payouts']
+        self.assertEqual(payouts[0]['grossNum'], 600)  # amount − fee, passed through
+
     def test_generation_is_idempotent_and_keeps_admin_status(self):
         Booking.objects.create(
             listing=self.listing, user=self.customer, date=self.last_mon,

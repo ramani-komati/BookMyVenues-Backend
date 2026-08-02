@@ -222,6 +222,26 @@ class CreateBookingTests(BookingTestBase):
         response = self.book(method='crypto')
         self.assertEqual(response.status_code, 400)
 
+    def test_method_echoed_verbatim_everywhere(self):
+        # upi booking + venue booking -> all three read paths echo them raw.
+        self.book(method='upi')
+        self.book(method='venue', slots=['21:00 – 22:00'], amount=620)
+
+        mine = self.client.get('/api/users/me/bookings').data['bookings']
+        self.assertEqual({b['method'] for b in mine}, {'upi', 'venue'})
+
+        self.client.force_authenticate(user=self.vendor)
+        dash = self.client.get('/api/vendors/me/dashboard').data['allBookings']
+        self.assertEqual({b['method'] for b in dash}, {'upi', 'venue'})
+
+        admin = User.objects.create_user(
+            phone='9000000099', name='Admin', email='adm@example.com',
+            role=User.Role.ADMIN, password='AdminPass123',
+        )
+        self.client.force_authenticate(user=admin)
+        rows = self.client.get('/api/admin/bootstrap').data['bookings']
+        self.assertEqual({b['method'] for b in rows}, {'upi', 'venue'})
+
     def test_pay_at_venue_blocks_slots(self):
         self.book(method='venue')
         response = self.book(slots=['20:00 – 22:00'], amount=1220)
