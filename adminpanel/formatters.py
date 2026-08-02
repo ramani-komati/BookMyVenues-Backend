@@ -129,6 +129,7 @@ def user_row(user):
     return {
         'id': user.id,
         'name': user.name or '',
+        'email': user.email or '',
         'phone': user.phone,
         'bookings': len(bookings),
         'spentNum': sum(b.amount for b in bookings),

@@ -267,6 +267,61 @@ class ProfileUpdateTests(APITestCase):
         self.assertEqual(response.status_code, 403)
 
 
+class OneTimeProfileFlowTests(OTPAuthTestBase):
+    """The frontend's one-time name+email screen — full acceptance flow:
+    fresh verify -> empty profile -> PATCH saves -> every later verify
+    (any device) echoes the saved values -> admin Users row shows them."""
+
+    OTP_URL = '/api/users/auth/otp'
+    VERIFY_URL = '/api/users/auth/verify'
+
+    def test_full_profile_cycle(self):
+        # 1. Brand-new phone: verify returns an empty profile + a token.
+        self.request_otp(self.OTP_URL)
+        first = self.verify(self.VERIFY_URL)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.data['user']['name'], '')
+        self.assertFalse(first.data['user']['email'])  # empty/null -> ask once
+
+        # 2. Save the profile with the verify-issued token (same session).
+        token = first.data['token']
+        response = self.client.patch(
+            '/api/users/me',
+            {'name': 'Ravi Kumar', 'email': 'ravi@x.in'},
+            format='json', HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['user']['name'], 'Ravi Kumar')
+
+        # 3. Sign in again ("different device") -> profile echoed, no screen.
+        self.request_otp(self.OTP_URL)
+        second = self.verify(self.VERIFY_URL)
+        self.assertEqual(second.data['user']['name'], 'Ravi Kumar')
+        self.assertEqual(second.data['user']['email'], 'ravi@x.in')
+
+        # 4. Admin Users row carries the same name AND email.
+        admin = User.objects.create_user(
+            phone='9990000099', name='Admin', email='ad@x.in',
+            role=User.Role.ADMIN, password='AdminPass123',
+        )
+        self.client.force_authenticate(user=admin)
+        users = self.client.get('/api/admin/bootstrap').data['users']
+        row = next(u for u in users if u['phone'] == PHONE)
+        self.assertEqual(row['name'], 'Ravi Kumar')
+        self.assertEqual(row['email'], 'ravi@x.in')
+
+    def test_phone_in_patch_body_is_never_applied(self):
+        self.request_otp(self.OTP_URL)
+        token = self.verify(self.VERIFY_URL).data['token']
+        self.client.patch(
+            '/api/users/me',
+            {'phone': '1111111111', 'name': 'X'},
+            format='json', HTTP_AUTHORIZATION=f'Bearer {token}',
+        )
+        self.assertTrue(User.objects.filter(phone=PHONE).exists())
+        self.assertFalse(User.objects.filter(phone='1111111111').exists())
+
+
 class BlockedUserTests(OTPAuthTestBase):
     """Admin-blocked accounts must be locked out of OTP sign-in entirely."""
 
