@@ -247,6 +247,36 @@ class CreateBookingTests(BookingTestBase):
         response = self.book(slots=['20:00 – 22:00'], amount=1220)
         self.assertEqual(response.status_code, 409)  # overlap sees it
 
+    def test_vendor_paused_venue_rejects_customer_bookings(self):
+        # Vendor pauses via the record flag (frontend republish) — customers
+        # who already had the flow open get a clean 409.
+        record = {**self.listing.record, 'paused': True, 'pauseReason': 'Rain'}
+        Listing.objects.filter(pk=self.listing.pk).update(record=record)
+        response = self.book()
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.data['message'],
+            'This venue is temporarily not accepting bookings',
+        )
+
+    def test_detail_paused_flag_also_rejects(self):
+        record = dict(self.listing.record)
+        record['detail'] = {**(record.get('detail') or {}), 'paused': True}
+        Listing.objects.filter(pk=self.listing.pk).update(record=record)
+        self.assertEqual(self.book().status_code, 409)
+
+    def test_walkins_still_allowed_on_vendor_paused_venue(self):
+        # Pausing blocks CUSTOMERS, not the vendor's own walk-in entries.
+        record = {**self.listing.record, 'paused': True, 'pauseReason': 'Rain'}
+        Listing.objects.filter(pk=self.listing.pk).update(record=record)
+        self.client.force_authenticate(user=self.vendor)
+        response = self.client.post('/api/vendors/me/walkin-bookings', {
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': ['10:00 – 11:00'], 'customer': 'W',
+            'perSlot': 600, 'amount': 600,
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+
 
 class MyBookingsTests(BookingTestBase):
     def test_lists_only_my_bookings(self):

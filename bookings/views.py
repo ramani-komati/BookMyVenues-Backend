@@ -71,6 +71,18 @@ def _to_int(value, field):
         raise SlotError(f'{field} must be a number.')
 
 
+def _vendor_paused(listing):
+    """True when the VENDOR paused this venue (rain/maintenance) via the
+    listing record's paused flag (top-level or detail.paused). Distinct from
+    the admin's status='paused', which hides the venue entirely — a
+    vendor-paused venue stays visible (customers see the reason) but takes no
+    customer bookings. Walk-ins stay allowed (pausing blocks customers, not
+    the vendor's own entries)."""
+    record = listing.record or {}
+    detail = record.get('detail') or {}
+    return bool(record.get('paused') or detail.get('paused'))
+
+
 def _active_bookings(listing, date):
     """The rows that HOLD time: every booking except refunded/cancelled
     (those free their slots). Availability and the overlap check both read
@@ -364,6 +376,13 @@ class MyBookingsView(APIView):
             listing = matches[0] if len(matches) == 1 else None
         if listing is None:
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
+
+        # Vendor-paused venue: visible, but not taking customer bookings.
+        if _vendor_paused(listing):
+            return _message(
+                'This venue is temporarily not accepting bookings',
+                status.HTTP_409_CONFLICT,
+            )
 
         # --- Validate date, slots, unit & amount -------------------
         try:
