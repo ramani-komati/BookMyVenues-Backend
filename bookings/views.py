@@ -231,6 +231,10 @@ def _apply_offer(listing, base, offer_request):
     else:  # flat
         discount = min(value, base)
     discount = min(discount, base)  # never exceed the discountable base
+    if discount <= 0:
+        # A matched offer must actually discount something — a zero-value
+        # "applied offer" on the receipt would be misleading.
+        raise SlotError('This offer is not applicable to this booking.')
 
     applied = {
         'code': matched.get('code') or '',
@@ -416,6 +420,21 @@ class MyBookingsView(APIView):
                 'method must be one of: online, upi, card, netbanking, venue.',
                 status.HTTP_400_BAD_REQUEST,
             )
+
+        # Cross-check the client's INFORMATIONAL discountAmount (money math
+        # always uses our recomputed value): a drift beyond ₹1 means a stale
+        # or tampered client trying to lock in a wrong price.
+        client_discount = body.get('discountAmount')
+        if client_discount not in (None, ''):
+            try:
+                client_discount = int(str(client_discount))
+            except (TypeError, ValueError):
+                client_discount = None
+            if client_discount is not None and abs(client_discount - discount) > 1:
+                return _message(
+                    'Offer amount mismatch — please retry the booking',
+                    status.HTTP_400_BAD_REQUEST,
+                )
 
         # SECURITY: the client's amount is only ACCEPTED, never trusted.
         if client_amount != amount:

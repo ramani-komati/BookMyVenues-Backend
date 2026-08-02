@@ -700,6 +700,33 @@ class OfferBookingTests(BookingTestBase):
         r = self.book(offer={'code': 'SAVE10'}, amount=1100)
         self.assertEqual(r.data['booking']['amount'] - (1200 - 120), 20)
 
+    def test_client_discount_amount_cross_checked(self):
+        # SAVE10 on 1200 base -> our discount is 120. A client claiming 200
+        # (drift > ₹1) is rejected with the dedicated message.
+        r = self.book(offer={'code': 'SAVE10'}, discountAmount=200, amount=1100)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(
+            r.data['message'], 'Offer amount mismatch — please retry the booking'
+        )
+
+    def test_client_discount_within_one_rupee_tolerated(self):
+        r = self.book(offer={'code': 'SAVE10'}, discountAmount=119, amount=1100)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 120)  # ours wins
+
+    def test_matched_offer_with_zero_discount_rejected(self):
+        record = dict(self.offer_listing.record)
+        record['detail'] = {
+            **record['detail'],
+            'offers': record['detail']['offers'] + [
+                {'title': 'Dud', 'code': 'ZERO', 'type': 'percent',
+                 'value': '0', 'minAmount': '', 'maxDiscount': '', 'expiry': ''},
+            ],
+        }
+        Listing.objects.filter(pk=self.offer_listing.pk).update(record=record)
+        r = self.book(offer={'code': 'ZERO'}, amount=1220)
+        self.assertEqual(r.status_code, 400)
+
     def test_walkin_applies_offer_without_fee(self):
         self.client.force_authenticate(user=self.vendor)
         body = {
