@@ -123,3 +123,26 @@ class Booking(models.Model):
 
     def __str__(self):
         return f'{self.id} — {self.venue_name} on {self.date}'
+
+
+class Rating(models.Model):
+    """One customer rating for one completed booking (1–5 stars).
+
+    The OneToOne on booking enforces "one rating per booking" at the DB level
+    — a double-submit can never skew the average."""
+
+    booking = models.OneToOneField(
+        Booking, on_delete=models.CASCADE, related_name='rating'
+    )
+    listing = models.ForeignKey(
+        'venues.Listing', on_delete=models.CASCADE, related_name='ratings'
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='ratings',
+    )
+    stars = models.PositiveSmallIntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.stars}★ for {self.listing_id} ({self.booking_id})'

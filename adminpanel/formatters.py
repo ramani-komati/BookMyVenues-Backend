@@ -86,10 +86,13 @@ def _venue_status(listing):
 
 
 def venue_row(listing):
+    from bookings.ratings import venue_rating
+
     record = listing.record or {}
     detail = record.get('detail') or {}
     bookings = list(listing.bookings.all())
     district, city = _district_and_city(listing)
+    average, _count = venue_rating(listing)
     return {
         'id': str(listing.id),
         'name': listing.name or record.get('name') or '',
@@ -99,7 +102,7 @@ def venue_row(listing):
         'district': district,
         'area': listing.locality or record.get('locality') or '',
         'price': _rupees(record.get('price') or 0),
-        'rating': 0.0,
+        'rating': average or 0.0,
         'bookings': len(bookings),
         'status': _venue_status(listing),
         'featured': listing.featured,

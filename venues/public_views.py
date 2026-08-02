@@ -36,6 +36,8 @@ def _message(text, http_status):
 def _summary(listing):
     """List row: the record minus the heavy `detail` block. Keeps `gallery`
     (P3) so venue cards can show the photo slideshow without a call per venue."""
+    from bookings.ratings import venue_rating  # avoid import cycle at load
+
     summary = {
         key: value
         for key, value in listing.record.items()
@@ -45,6 +47,10 @@ def _summary(listing):
     summary['status'] = listing.status
     summary['slug'] = listing.slug
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
+    average, count = venue_rating(listing)
+    if average is not None:  # server rating takes precedence on the frontend
+        summary['rating'] = average
+        summary['ratingCount'] = count
     return summary
 
 
@@ -113,6 +119,11 @@ class PublicVenueDetailView(APIView):
         if listing is None:
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
 
+        from bookings.ratings import venue_rating
         record = dict(listing.record)
         record['slug'] = listing.slug
+        average, count = venue_rating(listing)
+        if average is not None:
+            record['rating'] = average
+            record['ratingCount'] = count
         return Response(record)

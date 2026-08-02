@@ -683,6 +683,113 @@ class OfferBookingTests(BookingTestBase):
         self.assertEqual(r.data['booking']['amount'], 1100)
 
 
+class RatingTests(BookingTestBase):
+    """POST /api/venues/:venueId/ratings — one rating per completed booking."""
+
+    def setUp(self):
+        super().setUp()
+        yesterday = today_ist() - datetime.timedelta(days=1)
+        self.done = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=yesterday,
+            slots=['10:00 – 11:00'], amount=620, venue_name='Grand Palace Hall',
+        )
+
+    def rate(self, stars=4, booking_id=None, venue_id=None):
+        return self.client.post(
+            f'/api/venues/{venue_id or self.listing.id}/ratings',
+            {'bookingId': booking_id or self.done.id, 'stars': stars},
+            format='json',
+        )
+
+    def test_happy_path_returns_aggregate(self):
+        response = self.rate(stars=4)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data, {'rating': 4.0, 'count': 1})
+
+    def test_average_over_multiple_bookings(self):
+        self.rate(stars=4)
+        other = Booking.objects.create(
+            listing=self.listing, user=self.customer,
+            date=today_ist() - datetime.timedelta(days=2),
+            slots=['12:00 – 13:00'], amount=620,
+        )
+        response = self.rate(stars=5, booking_id=other.id)
+        self.assertEqual(response.data, {'rating': 4.5, 'count': 2})
+
+    def test_bad_stars_rejected(self):
+        for stars in (0, 6, 'abc', None):
+            self.assertEqual(self.rate(stars=stars).status_code, 400)
+
+    def test_unknown_booking_404(self):
+        self.assertEqual(self.rate(booking_id='bk_nope').status_code, 404)
+
+    def test_foreign_booking_403(self):
+        other = User.objects.create_user(phone='9000000033', name='O', email='o2@example.com')
+        self.client.force_authenticate(user=other)
+        self.assertEqual(self.rate().status_code, 403)
+
+    def test_wrong_venue_400(self):
+        other_listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='other-hall',
+            record={'name': 'Other', 'price': 500, 'detail': {}},
+            name='Other', category='hall', locality='x', pincode='560001',
+        )
+        self.assertEqual(self.rate(venue_id=other_listing.id).status_code, 400)
+
+    def test_unit_sibling_counts_as_same_venue(self):
+        # Booking made on a unit sibling; rating posted to the base id -> OK,
+        # and both share one aggregate.
+        sibling = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='gph-hall-2',
+            record={'name': 'Grand Palace Hall — Hall 2', 'price': 600,
+                    'detail': {'unitOf': str(self.listing.id)}},
+            name='Grand Palace Hall — Hall 2', category='hall',
+            locality='x', pincode='560001',
+        )
+        on_sibling = Booking.objects.create(
+            listing=sibling, user=self.customer,
+            date=today_ist() - datetime.timedelta(days=1),
+            slots=['12:00 – 13:00'], amount=620,
+        )
+        response = self.rate(stars=5, booking_id=on_sibling.id)  # posted to BASE id
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['count'], 1)
+
+    def test_upcoming_booking_409(self):
+        upcoming = Booking.objects.create(
+            listing=self.listing, user=self.customer,
+            date=today_ist() + datetime.timedelta(days=1),
+            slots=['10:00 – 11:00'], amount=620,
+        )
+        response = self.rate(booking_id=upcoming.id)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['message'], 'Booking not completed yet')
+
+    def test_double_rating_409(self):
+        self.rate(stars=4)
+        response = self.rate(stars=5)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['message'], 'Already rated')
+        # The average is untouched by the double-submit:
+        from bookings.ratings import venue_rating
+        self.assertEqual(venue_rating(self.listing), (4.0, 1))
+
+    def test_anonymous_401(self):
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.rate().status_code, 401)
+
+    def test_rating_surfaces_on_public_venue(self):
+        self.rate(stars=4)
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_authenticate(user=None)
+        detail = self.client.get(f'/api/venues/{self.listing.id}').data
+        self.assertEqual(detail['rating'], 4.0)
+        self.assertEqual(detail['ratingCount'], 1)
+        listing_row = self.client.get('/api/venues').data['venues'][0]
+        self.assertEqual(listing_row['rating'], 4.0)
+
+
 class PerUnitBookingTests(BookingTestBase):
     """P6 — a venue with several pitches/courts/screens (per-unit bookings)."""
 
