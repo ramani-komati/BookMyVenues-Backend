@@ -693,26 +693,46 @@ class PerUnitBookingTests(BookingTestBase):
         self.assertEqual(response.data['code'], 'AMOUNT_MISMATCH')
         self.assertEqual(response.data['expectedAmount'], 4018)
 
-    def test_availability_reports_units(self):
-        self.book_unit()  # pitch 1 only
+    def test_availability_lists_every_booking(self):
+        # A booking carrying sport/unit metadata must STILL appear in the flat
+        # `booked` array — each listing is one bookable resource, and the time
+        # picker renders exactly this array.
+        self.book_unit()  # pitch 1, with sport/unit fields set
         self.client.force_authenticate(user=None)
         data = self.client.get(
             f'/api/venues/{self.turf.id}/availability?date={TOMORROW}'
         ).data
-        self.assertEqual(data['booked'], [])  # pitch 2 free -> slot not fully booked
+        self.assertEqual(data['booked'], ['19:00 – 21:00'])
         self.assertEqual(len(data['bookedUnits']), 1)
         self.assertEqual(data['bookedUnits'][0]['unit'], 1)
         self.assertEqual(data['bookedUnits'][0]['ranges'], ['19:00 – 21:00'])
 
-    def test_slot_fully_booked_when_all_units_taken(self):
+    def test_availability_merges_all_units_sorted(self):
         self.book_unit(unit=1, perSlot=599, amount=1218)
-        self.book_unit(unit=2, perSlot=1999, amount=4018)
+        self.book_unit(unit=2, perSlot=1999, amount=4018)  # same slot, pitch 2
+        self.book_unit(unit=2, perSlot=1999, amount=2019, slots=['10:00 – 11:00'])
         self.client.force_authenticate(user=None)
         data = self.client.get(
             f'/api/venues/{self.turf.id}/availability?date={TOMORROW}'
         ).data
-        self.assertEqual(data['booked'], ['19:00 – 21:00'])  # both pitches taken
+        self.assertEqual(data['booked'], ['10:00 – 11:00', '19:00 – 21:00'])
         self.assertEqual(len(data['bookedUnits']), 2)
+
+    def test_walkin_with_unit_shows_in_availability(self):
+        # Acceptance #2: a walk-in on a unit listing blocks time identically.
+        self.client.force_authenticate(user=self.vendor)
+        r = self.client.post('/api/vendors/me/walkin-bookings', {
+            'venueId': str(self.turf.id), 'date': TOMORROW,
+            'slots': ['06:00 – 07:00'], 'customer': 'Walk-in',
+            'sport': 'Box Cricket', 'unit': 2, 'unitLabel': 'Pitch 2',
+            'perSlot': 600, 'amount': 600,
+        }, format='json')
+        self.assertEqual(r.status_code, 201)
+        self.client.force_authenticate(user=None)
+        data = self.client.get(
+            f'/api/venues/{self.turf.id}/availability?date={TOMORROW}'
+        ).data
+        self.assertEqual(data['booked'], ['06:00 – 07:00'])
 
     def test_legacy_whole_venue_booking_blocks_all_units(self):
         # A booking with no unit (legacy) blocks every pitch (safe default).

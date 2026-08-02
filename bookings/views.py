@@ -250,36 +250,22 @@ def _slot_start(text):
         return 0
 
 
-def _total_units(listing):
-    """How many bookable units the venue has (pitches/courts/screens)."""
-    detail = listing.record.get('detail') or {}
-    sports_units = sum(int(s.get('units') or 1) for s in (detail.get('sports') or []))
-    return sports_units or len(detail.get('unitPrices') or []) or 1
-
-
 def _availability(listing, date):
     """
-    Availability payload (P6). Keeps the flat `booked` array (ranges taken on
-    EVERY unit, so single-unit clients still work) and adds per-unit `bookedUnits`.
+    Availability payload. Each listing is ONE bookable resource in the
+    frontend's model (pitches/screens are separate sibling listings), so the
+    flat `booked` array lists the ranges of EVERY booking on this listing+date
+    — the same rows the booking-create overlap check reads. The sport/unit
+    fields bookings carry are display metadata and must never hide a range.
+    `bookedUnits` groups the same ranges per (sport, unit) for detail views.
     """
-    total_units = _total_units(listing)
-    legacy = []                          # whole-venue bookings block every unit
+    booked = set()
     per_unit = defaultdict(list)         # (sport, unit) -> [slot strings]
-    slot_units = defaultdict(set)        # slot string -> {(sport, unit), ...}
 
     for booking in Booking.objects.filter(listing=listing, date=date):
-        if booking.unit is None:
-            legacy.extend(booking.slots)
-        else:
-            key = (booking.sport or '', booking.unit)
-            for slot in booking.slots:
-                per_unit[key].append(slot)
-                slot_units[slot].add(key)
-
-    booked = set(legacy)
-    for slot, units in slot_units.items():
-        if len(units) >= total_units:   # taken on every unit -> fully booked
-            booked.add(slot)
+        booked.update(booking.slots)
+        if booking.unit is not None:
+            per_unit[(booking.sport or '', booking.unit)].extend(booking.slots)
 
     booked_units = [
         {'sport': sport or None, 'unit': unit, 'ranges': sorted(ranges, key=_slot_start)}
