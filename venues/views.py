@@ -320,6 +320,19 @@ class VendorListingPublishView(APIView):
         listing_status = _resolve_publish_status(record, existing)
         record['id'] = str(listing_id)
         record['status'] = listing_status
+
+        # submittedAt is SERVER-OWNED and immutable per listing id: set once at
+        # first insert, never overwritten by a republish (the frontend sends a
+        # fresh timestamp on every publish incl. self-heals — copying it would
+        # reset the 15-day "New" clock forever).
+        if existing is not None:
+            record['submittedAt'] = (
+                existing.record.get('submittedAt')
+                or existing.created_at.isoformat()
+            )
+        elif not str(record.get('submittedAt') or '').strip():
+            record['submittedAt'] = timezone.now().isoformat()
+
         columns = _extract_listing_columns(record)
 
         if existing is not None:

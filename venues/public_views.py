@@ -20,6 +20,8 @@ from .models import Listing
 CACHE_SECONDS = 60
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
+# How long a venue wears the "New" badge (also exposed in GET /api/config).
+NEW_BADGE_DAYS = 15
 
 SORTS = {
     # No ratings/booking counts yet — "popular" falls back to recently
@@ -31,6 +33,29 @@ SORTS = {
 
 def _message(text, http_status):
     return Response({'message': text}, status=http_status)
+
+
+def _derive_meta(listing):
+    """meta is SERVER-DERIVED at read time — 'New' while submittedAt is within
+    the last NEW_BADGE_DAYS, '' after. The client's stored meta string is
+    ignored (stale values like 'Under review' can never leak again)."""
+    import datetime
+
+    from django.utils import timezone
+
+    raw = str((listing.record or {}).get('submittedAt') or '').strip()
+    submitted = None
+    if raw:
+        try:
+            submitted = datetime.datetime.fromisoformat(raw.replace('Z', '+00:00'))
+            if submitted.tzinfo is None:
+                submitted = submitted.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            submitted = None
+    if submitted is None:
+        submitted = listing.created_at
+    age = timezone.now() - submitted
+    return 'New' if age.days < NEW_BADGE_DAYS else ''
 
 
 def _summary(listing):
@@ -46,6 +71,7 @@ def _summary(listing):
     summary['id'] = str(listing.id)
     summary['status'] = listing.status
     summary['slug'] = listing.slug
+    summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
     average, count = venue_rating(listing)
     if average is not None:  # server rating takes precedence on the frontend
@@ -129,6 +155,7 @@ class PublicVenueDetailView(APIView):
         from bookings.ratings import venue_rating
         record = dict(listing.record)
         record['slug'] = listing.slug
+        record['meta'] = _derive_meta(listing)
         average, count = venue_rating(listing)
         if average is not None:
             record['rating'] = average

@@ -69,8 +69,11 @@ class PublicConfigView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from venues.public_views import NEW_BADGE_DAYS
+
         settings_obj = Settings.load()
         return Response({
             'fee': settings_obj.effective_fee(),
             'feeDate': settings_obj.fee_date,
+            'newBadgeDays': NEW_BADGE_DAYS,
         })

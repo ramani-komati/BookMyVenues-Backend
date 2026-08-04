@@ -454,6 +454,24 @@ class PublishListingTests(ListingTestBase):
         self.assertEqual(Listing.objects.count(), 1)
         self.assertEqual(Listing.objects.get(pk=self.draft.id).name, 'Renamed Palace')
 
+    def test_submittedAt_set_on_first_publish(self):
+        record = {**LISTING_RECORD}
+        record.pop('submittedAt', None)  # client sent none -> server stamps it
+        response = self.publish(record=record)
+        self.assertTrue(response.data['listing']['submittedAt'])
+
+    def test_submittedAt_immutable_on_republish(self):
+        # First publish stores the original timestamp...
+        first = self.publish(submittedAt='2026-07-01T10:00:00+00:00')
+        self.assertEqual(
+            first.data['listing']['submittedAt'], '2026-07-01T10:00:00+00:00'
+        )
+        # ...and a self-heal republish with a FRESH timestamp must not reset it.
+        second = self.publish(submittedAt='2026-08-04T09:00:00+00:00')
+        self.assertEqual(
+            second.data['listing']['submittedAt'], '2026-07-01T10:00:00+00:00'
+        )
+
     def test_offers_persist_in_detail(self):
         # detail.offers rides along verbatim (like packages/addons) — items 2 & 3.
         record = {
@@ -571,6 +589,29 @@ class PublicBrowsingTests(ListingTestBase):
     def test_bad_offset_rejected(self):
         self.assertEqual(self.client.get('/api/venues?offset=-1').status_code, 400)
         self.assertEqual(self.client.get('/api/venues?offset=abc').status_code, 400)
+
+    def test_meta_derived_new_for_fresh_listing(self):
+        # Fresh submittedAt -> 'New', regardless of the stored meta string.
+        response = self.client.get('/api/venues')
+        self.assertEqual(response.data['venues'][0]['meta'], 'New')
+
+    def test_meta_empty_after_15_days_even_if_stale_string_stored(self):
+        from venues.models import Listing
+        listing = Listing.objects.get(pk=self.draft.id)
+        record = dict(listing.record)
+        record['submittedAt'] = '2026-07-01T10:00:00+00:00'  # long past
+        record['meta'] = 'Under review'                      # stale stored string
+        Listing.objects.filter(pk=self.draft.id).update(record=record)
+        self.clear_cache()
+        listed = self.client.get('/api/venues').data['venues'][0]
+        detail = self.client.get(f'/api/venues/{self.draft.id}').data
+        self.assertEqual(listed['meta'], '')  # derived, stale string gone
+        self.assertEqual(detail['meta'], '')
+        self.assertEqual(listed['submittedAt'], '2026-07-01T10:00:00+00:00')  # kept
+
+    def test_config_exposes_new_badge_days(self):
+        response = self.client.get('/api/config')
+        self.assertEqual(response.data['newBadgeDays'], 15)
 
     def test_bad_limit_rejected(self):
         response = self.client.get('/api/venues?limit=abc')
