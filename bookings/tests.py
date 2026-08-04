@@ -846,6 +846,14 @@ class PaymentFlowTests(BookingTestBase):
         self._webhook('payment.failed')
         self.assertEqual(self.book(slots=['19:30 – 21:00']).status_code, 201)
 
+    def test_webhook_unhandled_event_acknowledged(self):
+        # Dispute/downtime events must get a 200 (Razorpay disables webhooks
+        # that keep failing), even though we don't process them.
+        self.order()
+        response = self._webhook('payment.dispute.created')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'status': 'ignored'})
+
     def test_webhook_bad_signature_rejected(self):
         self.order()
         response = self.client.post(

@@ -167,9 +167,19 @@ class RazorpayWebhookView(APIView):
 
         try:
             payload = json.loads(request.body)
-            event = str(payload.get('event') or '')
+        except ValueError:
+            return _message('Malformed webhook payload.', status.HTTP_400_BAD_REQUEST)
+
+        # Events we don't handle (disputes, downtime notices, authorized…)
+        # are acknowledged with 200 — answering 4xx would make Razorpay
+        # retry and eventually auto-disable the webhook.
+        event = str(payload.get('event') or '')
+        if event not in ('payment.captured', 'payment.failed'):
+            return Response({'status': 'ignored'})
+
+        try:
             entity = payload['payload']['payment']['entity']
-        except (ValueError, KeyError, TypeError):
+        except (KeyError, TypeError):
             return _message('Malformed webhook payload.', status.HTTP_400_BAD_REQUEST)
 
         order_id = str(entity.get('order_id') or '')
