@@ -653,6 +653,100 @@ class OldWizardRemovedTests(DraftTestBase):
         self.assertEqual(response.status_code, 404)
 
 
+class FavoritesTests(APITestCase):
+    """Customer wishlist sync — GET/PUT /api/users/me/favorites."""
+
+    URL = '/api/users/me/favorites'
+
+    def setUp(self):
+        from venues.models import Listing
+        self.vendor = User.objects.create_user(
+            phone='9600000001', name='V', email='fv@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(
+            phone='9600000002', name='C', email='fc@example.com',
+        )
+        self.base = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='fav-hall',
+            record={'name': 'Fav Hall', 'price': 500, 'detail': {}},
+            name='Fav Hall', category='hall', locality='x', pincode='560001',
+        )
+        self.sibling = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='fav-hall-2',
+            record={'name': 'Fav Hall — Hall 2', 'price': 500,
+                    'detail': {'unitOf': str(self.base.id)}},
+            name='Fav Hall — Hall 2', category='hall', locality='x', pincode='560001',
+        )
+        self.other = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='other-fav',
+            record={'name': 'Other', 'price': 500, 'detail': {}},
+            name='Other', category='hall', locality='x', pincode='560001',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def put(self, favorites):
+        return self.client.put(self.URL, {'favorites': favorites}, format='json')
+
+    def test_empty_list_not_404(self):
+        response = self.client.get(self.URL)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'favorites': []})
+
+    def test_put_and_get_newest_first(self):
+        self.put([
+            {'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'},
+            {'venueId': str(self.other.id), 'addedAt': '2026-08-05T10:00:00Z'},
+        ])
+        response = self.client.get(self.URL)
+        ids = [f['venueId'] for f in response.data['favorites']]
+        self.assertEqual(ids, [str(self.other.id), str(self.base.id)])  # newest first
+
+    def test_put_is_full_replace(self):
+        self.put([{'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'}])
+        self.put([{'venueId': str(self.other.id), 'addedAt': '2026-08-02T10:00:00Z'}])
+        ids = [f['venueId'] for f in self.client.get(self.URL).data['favorites']]
+        self.assertEqual(ids, [str(self.other.id)])  # removals are free
+
+    def test_cap_at_100(self):
+        too_many = [
+            {'venueId': str(uuid.uuid4()), 'addedAt': '2026-08-01T10:00:00Z'}
+            for _ in range(101)
+        ]
+        self.assertEqual(self.put(too_many).status_code, 400)
+
+    def test_stale_ids_dropped_silently(self):
+        response = self.put([
+            {'venueId': str(uuid.uuid4()), 'addedAt': '2026-08-01T10:00:00Z'},  # dead
+            {'venueId': 'not-a-uuid', 'addedAt': '2026-08-01T10:00:00Z'},        # junk
+            {'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'},  # real
+        ])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['favorites']), 1)  # rest saved fine
+
+    def test_sibling_folds_to_base_and_dedupes(self):
+        response = self.put([
+            {'venueId': str(self.sibling.id), 'addedAt': '2026-08-01T10:00:00Z'},
+            {'venueId': str(self.base.id), 'addedAt': '2026-08-03T10:00:00Z'},
+        ])
+        favorites = response.data['favorites']
+        self.assertEqual(len(favorites), 1)                       # one venue set
+        self.assertEqual(favorites[0]['venueId'], str(self.base.id))  # base stored
+        self.assertTrue(favorites[0]['addedAt'].startswith('2026-08-01'))  # earliest wins
+
+    def test_scoped_per_user(self):
+        self.put([{'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'}])
+        other_user = User.objects.create_user(
+            phone='9600000003', name='C2', email='fc2@example.com',
+        )
+        self.client.force_authenticate(user=other_user)
+        self.assertEqual(self.client.get(self.URL).data, {'favorites': []})
+
+    def test_anonymous_401(self):
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get(self.URL).status_code, 401)
+
+
 class MapsResolveTests(APITestCase):
     """GET /api/maps/resolve — P2. The HTTP redirect is always mocked."""
 

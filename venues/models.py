@@ -313,6 +313,29 @@ class VenueDraft(models.Model):
         return f'Draft {self.id} ({self.vendor})'
 
 
+class Favorite(models.Model):
+    """A customer's wishlist entry. Stored against the BASE listing (unit
+    siblings fold into their base, like ratings). Listing deletion cascades,
+    so dead venues silently vanish from wishlists."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='favorites'
+    )
+    listing = models.ForeignKey(
+        'venues.Listing', on_delete=models.CASCADE, related_name='favorited_by'
+    )
+    added_at = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-added_at']
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'listing'], name='unique_user_favorite'),
+        ]
+
+    def __str__(self):
+        return f'{self.user_id} ♥ {self.listing_id}'
+
+
 class Listing(models.Model):
     """
     A published venue listing (what the public browses).
