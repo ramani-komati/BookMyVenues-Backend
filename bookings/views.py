@@ -164,26 +164,67 @@ def _unit_rate(listing, sport, unit):
     return None
 
 
-def _addon_total(requested_addons):
+def _addon_total(listing, requested_addons):
     """
-    (total, cleaned_lines) for the add-ons. Prices are taken FROM THE REQUEST:
-    the frontend folds packages and extra-person charges into the addons array
-    as priced line items (names deliberately not in the listing catalogue), so
-    we never reject a line for an unrecognised name. Trusting client add-on
-    prices is acceptable while there is no live payment; revisit when it lands.
+    (total, cleaned_lines) for the add-on line items. With LIVE payments the
+    client's prices can no longer be trusted — every line is priced from the
+    venue's stored data instead:
+      - plain add-ons        -> detail.addons        (name match)
+      - 'Package — <label>'  -> detail.packages      (label match)
+      - 'Extra person(s)'    -> detail.extraPersonPrice (qty ≤ maxExtraPersons)
+    Matching is case-insensitive. Unknown names are rejected. A client that
+    sent a tampered price simply hits the structured AMOUNT_MISMATCH and
+    retries with the server total.
     """
+    detail = (listing.record or {}).get('detail') or {}
+
+    catalogue = {}
+    for addon in detail.get('addons') or []:
+        name = str(addon.get('name') or '').strip().lower()
+        if name:
+            catalogue[name] = _to_int(addon.get('price') or 0, 'addon price')
+    packages = {}
+    for package in detail.get('packages') or []:
+        label = str(package.get('label') or package.get('name') or '').strip().lower()
+        if label:
+            packages[label] = _to_int(package.get('price') or 0, 'package price')
+    extra_raw = str(detail.get('extraPersonPrice') or '').strip()
+    extra_price = _to_int(extra_raw, 'extraPersonPrice') if extra_raw else None
+    max_raw = str(detail.get('maxExtraPersons') or '').strip()
+    max_extra = _to_int(max_raw, 'maxExtraPersons') if max_raw else 0
+
     addon_total = 0
     cleaned = []
-    for addon in requested_addons or []:
-        name = str(addon.get('name') or '').strip()
+    for line in requested_addons or []:
+        name = str(line.get('name') or '').strip()
         if not name:
             raise SlotError('Each add-on needs a name.')
-        qty = _to_int(addon.get('qty') or 1, 'addon qty')
+        qty = _to_int(line.get('qty') or 1, 'addon qty')
         if qty < 1:
             raise SlotError('addon qty must be at least 1.')
-        price = _to_int(addon.get('price') or 0, 'addon price')
-        if price < 0:
-            raise SlotError('addon price cannot be negative.')
+
+        key = name.lower()
+        package_key = None
+        for prefix in ('package — ', 'package - '):
+            if key.startswith(prefix):
+                package_key = key[len(prefix):].strip()
+                break
+
+        if key in catalogue:
+            price = catalogue[key]
+        elif package_key is not None and package_key in packages:
+            price = packages[package_key]
+        elif key in packages:
+            price = packages[key]
+        elif 'extra person' in key:
+            if extra_price is None:
+                raise SlotError('This venue does not charge for extra persons.')
+            if max_extra and qty > max_extra:
+                raise SlotError(f'Maximum {max_extra} extra persons allowed.')
+            price = extra_price
+        else:
+            raise SlotError(f'Unknown add-on: "{name}".')
+
         addon_total += price * qty
         cleaned.append({'name': name, 'qty': qty, 'price': price})
     return addon_total, cleaned
@@ -339,7 +380,7 @@ def compute_amount(listing, intervals, requested_addons, rate=None, offer_reques
     if rate is None:
         rate = _to_int(listing.record.get('price') or 0, 'venue price')
     slot_base = round(rate * total_minutes(intervals) / 60)
-    addon_total, cleaned = _addon_total(requested_addons)
+    addon_total, cleaned = _addon_total(listing, requested_addons)
     base = slot_base + addon_total
 
     discount, applied_offer = _apply_offer(listing, base, offer_request)

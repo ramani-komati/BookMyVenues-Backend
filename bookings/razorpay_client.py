@@ -50,6 +50,8 @@ def create_order(amount_rupees, receipt):
 
 def verify_payment_signature(order_id, payment_id, signature):
     """Checkout callback signature: HMAC-SHA256('order_id|payment_id', key_secret)."""
+    if not settings.RAZORPAY_KEY_SECRET:
+        return False  # fail closed — empty-key HMACs are forgeable
     expected = hmac.new(
         settings.RAZORPAY_KEY_SECRET.encode(),
         f'{order_id}|{payment_id}'.encode(),
@@ -71,6 +73,20 @@ def refund_payment(payment_id, amount_rupees=None):
     """Refund a captured payment (full when amount is None); returns refund id."""
     if not configured():
         raise RazorpayError('Payments are not configured (RAZORPAY keys missing).')
+    # Idempotency: if this payment already has a refund at the gateway
+    # (e.g. our previous attempt succeeded but the response was lost),
+    # reuse it instead of refunding twice.
+    try:
+        existing = requests.get(
+            f'{BASE}/payments/{payment_id}/refund', auth=_auth(), timeout=TIMEOUT
+        )
+        if existing.status_code == 200:
+            items = (existing.json() or {}).get('items') or []
+            if items and items[0].get('id'):
+                return items[0]['id']
+    except requests.RequestException:
+        pass  # can't check — proceed to attempt the refund normally
+
     payload = {}
     if amount_rupees:
         payload['amount'] = int(amount_rupees) * 100

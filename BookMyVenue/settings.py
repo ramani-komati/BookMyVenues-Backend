@@ -142,6 +142,9 @@ REST_FRAMEWORK = {
     # password brute-forcing and mass account creation.
     'DEFAULT_THROTTLE_RATES': {
         'auth': '10/min',
+        # Payment order/verify: each order call creates a real gateway order
+        # and a 30-min slot hold — throttled against hold-griefing.
+        'payments': '20/min',
     },
 }
 
@@ -211,6 +214,15 @@ CORS_ALLOWED_ORIGINS = [
 # CORS_ALLOW_ALL_ORIGINS=True. When tightening later, list the admin panel's
 # exact origin in CORS_ALLOWED_ORIGINS.
 CORS_ALLOW_CREDENTIALS = True
+
+if not DEBUG and CORS_ALLOW_ALL_ORIGINS:
+    import warnings
+    warnings.warn(
+        'CORS_ALLOW_ALL_ORIGINS=True in production while admin sessions use '
+        'credentialed cookies — any website can call the admin API with a '
+        'logged-in admin\'s session. Set CORS_ALLOW_ALL_ORIGINS=False and '
+        'list the real frontend origins in CORS_ALLOWED_ORIGINS.'
+    )
 
 
 # Password validation

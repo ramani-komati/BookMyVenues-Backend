@@ -28,7 +28,11 @@ RECORD = {
         'addons': [
             {'name': 'Photographer', 'price': 2000},
             {'name': 'Cake', 'price': 500},
+            {'name': 'Water bottle 1L', 'price': 30},
         ],
+        'packages': [{'label': 'Birthday Deluxe', 'price': 5000}],
+        'extraPersonPrice': '200',
+        'maxExtraPersons': '4',
     },
 }
 
@@ -152,21 +156,31 @@ class CreateBookingTests(BookingTestBase):
         self.assertEqual(response.data['booking']['amount'], 6840)
         self.assertEqual(len(response.data['booking']['addons']), 3)
 
-    def test_request_addon_price_used(self):
-        # The listing catalogues 'Photographer' at ₹2000, but the request line
-        # says ₹2500 (e.g. a vendor edited the price). The server now honours
-        # the request price — proving it no longer overrides from the catalogue.
+    def test_tampered_addon_price_rejected(self):
+        # LIVE money: the catalogue price (₹2000) wins over the client's ₹1 —
+        # the total no longer matches and the structured mismatch fires, so
+        # honest clients auto-retry with the server number.
         response = self.book(
-            addons=[{'name': 'Photographer', 'qty': 1, 'price': 2500}],
-            amount=920 + 2500,
+            addons=[{'name': 'Photographer', 'qty': 1, 'price': 1}],
+            amount=920 + 1,
         )
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['booking']['amount'], 3420)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(response.data['expectedAmount'], 920 + 2000)
 
-    def test_negative_addon_price_rejected(self):
+    def test_unknown_addon_rejected(self):
         response = self.book(
-            addons=[{'name': 'Weird', 'qty': 1, 'price': -50}],
-            amount=920 - 50,
+            addons=[{'name': 'Helicopter ride', 'qty': 1, 'price': 50}],
+            amount=970,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Unknown add-on', response.data['message'])
+
+    def test_extra_person_cap_enforced(self):
+        # maxExtraPersons is 4 — 5 must be rejected.
+        response = self.book(
+            addons=[{'name': 'Extra person', 'qty': 5, 'price': 200}],
+            amount=920 + 1000,
         )
         self.assertEqual(response.status_code, 400)
 
@@ -754,6 +768,11 @@ class PaymentFlowTests(BookingTestBase):
     """Razorpay order -> verify / webhook -> confirm. Gateway HTTP mocked;
     signatures are REAL HMACs computed with the test secrets."""
 
+    def setUp(self):
+        super().setUp()
+        from django.core.cache import cache
+        cache.clear()  # throttle counters persist in the cache between tests
+
     def order(self, **overrides):
         from unittest.mock import MagicMock, patch
         body = {
@@ -862,6 +881,84 @@ class PaymentFlowTests(BookingTestBase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_replayed_signature_cannot_revive_refunded_booking(self):
+        # CRITICAL fix: the customer holds a valid signature from their own
+        # checkout — replaying it after a refund must NOT re-confirm.
+        order = self.order().data
+        good = {
+            'bookingId': order['bookingId'],
+            'razorpay_order_id': 'order_TEST123',
+            'razorpay_payment_id': 'pay_ABC',
+            'razorpay_signature': self._sign('order_TEST123', 'pay_ABC'),
+        }
+        self.client.post('/api/payments/verify', good, format='json')  # confirm
+        Booking.objects.filter(pk=order['bookingId']).update(status='refunded')
+        replay = self.client.post('/api/payments/verify', good, format='json')
+        self.assertEqual(replay.status_code, 409)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'refunded')  # NOT revived
+
+    def test_late_webhook_capture_after_resale_goes_to_refund_queue(self):
+        # CRITICAL fix: hold expires, someone else books the slot, THEN the
+        # late payment.captured arrives -> refund_pending, never double-booked.
+        from django.utils import timezone as dj_tz
+        order = self.order().data
+        Booking.objects.filter(pk=order['bookingId']).update(
+            created_at=dj_tz.now() - datetime.timedelta(minutes=31)
+        )
+        self.assertEqual(self.book().status_code, 201)  # slot re-sold
+        response = self._webhook('payment.captured')
+        self.assertEqual(response.status_code, 200)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'refund_pending')  # queued, not confirmed
+
+    def test_webhook_amount_mismatch_never_confirms(self):
+        import hashlib, hmac, json as json_mod
+        order = self.order().data
+        payload = json_mod.dumps({
+            'event': 'payment.captured',
+            'payload': {'payment': {'entity': {
+                'id': 'pay_WH1', 'order_id': 'order_TEST123', 'amount': 100,
+            }}},
+        })
+        signature = hmac.new(
+            b'test_webhook_secret', payload.encode(), hashlib.sha256
+        ).hexdigest()
+        response = self.client.post(
+            '/api/payments/webhook', payload,
+            content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=signature,
+        )
+        self.assertEqual(response.status_code, 200)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'payment_pending')  # untouched
+
+    def test_refund_reuses_existing_gateway_refund(self):
+        # Idempotency: a refund already exists at the gateway (lost response
+        # last time) -> reuse it, never refund twice.
+        from unittest.mock import MagicMock, patch
+        booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=TOMORROW,
+            slots=['12:00 – 13:00'], amount=620, fee=20,
+            razorpay_order_id='order_Y', razorpay_payment_id='pay_Y',
+        )
+        admin = User.objects.create_user(
+            phone='9000000097', name='Admin2', email='ad3@example.com',
+            role=User.Role.ADMIN, password='AdminPass123',
+        )
+        self.client.force_authenticate(user=admin)
+        existing = MagicMock(status_code=200)
+        existing.json.return_value = {'items': [{'id': 'rfnd_OLD'}]}
+        with patch('bookings.razorpay_client.requests.get', return_value=existing), \
+             patch('bookings.razorpay_client.requests.post') as mock_post:
+            response = self.client.patch(
+                f'/api/admin/bookings/{booking.id}', {'status': 'refunded'},
+                format='json',
+            )
+        self.assertEqual(response.status_code, 200)
+        booking.refresh_from_db()
+        self.assertEqual(booking.refund_id, 'rfnd_OLD')
+        mock_post.assert_not_called()  # no second gateway refund
+
     def test_admin_refund_calls_gateway_and_stores_id(self):
         from unittest.mock import MagicMock, patch
         booking = Booking.objects.create(
@@ -876,7 +973,10 @@ class PaymentFlowTests(BookingTestBase):
         self.client.force_authenticate(user=admin)
         fake = MagicMock(status_code=200)
         fake.json.return_value = {'id': 'rfnd_001'}
-        with patch('bookings.razorpay_client.requests.post', return_value=fake) as mock_post:
+        no_existing = MagicMock(status_code=200)
+        no_existing.json.return_value = {'items': []}
+        with patch('bookings.razorpay_client.requests.post', return_value=fake) as mock_post, \
+             patch('bookings.razorpay_client.requests.get', return_value=no_existing):
             response = self.client.patch(
                 f'/api/admin/bookings/{booking.id}',
                 {'status': 'refunded', 'refundAmount': 300}, format='json',

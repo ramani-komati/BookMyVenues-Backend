@@ -358,6 +358,8 @@ class AdminBookingUpdateView(_AdminWriteView):
                     'Only online-paid bookings can be refunded.',
                     status.HTTP_400_BAD_REQUEST,
                 )
+            if value == 'refunded' and booking.status == 'refunded':
+                return Response(booking_row(booking))  # already refunded — no-op
             if value == 'refunded' and booking.razorpay_payment_id:
                 # Real gateway refund (partial when refundAmount is sent).
                 from bookings.razorpay_client import (

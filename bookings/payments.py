@@ -18,6 +18,7 @@ from django.conf import settings as django_settings
 from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -65,6 +66,8 @@ class PaymentOrderView(APIView):
     """POST /api/payments/order — booking draft in, Razorpay order out."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'payments'
 
     def post(self, request):
         body = request.data if isinstance(request.data, dict) else {}
@@ -120,6 +123,8 @@ class PaymentVerifyView(APIView):
     """POST /api/payments/verify — the checkout success callback."""
 
     permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'payments'
 
     def post(self, request):
         body = request.data if isinstance(request.data, dict) else {}
@@ -142,8 +147,20 @@ class PaymentVerifyView(APIView):
 
         with transaction.atomic():
             Listing.objects.select_for_update().get(pk=booking.listing_id)
-            if booking.status == 'payment_pending' and _conflicts_excluding_self(booking):
+            booking.refresh_from_db()
+            if booking.status == 'confirmed':
+                return Response({'booking': booking.as_record()})  # idempotent
+            if booking.status != 'payment_pending':
+                # refunded/cancelled — a replayed signature must NEVER revive it.
+                return _message(
+                    'This booking can no longer be confirmed.',
+                    status.HTTP_409_CONFLICT,
+                )
+            if _conflicts_excluding_self(booking):
                 # Hold expired and the slot was re-sold mid-payment (rare).
+                booking.status = 'refund_pending'  # admin Refunds panel picks it up
+                booking.razorpay_payment_id = payment_id
+                booking.save(update_fields=['status', 'razorpay_payment_id'])
                 return _message(
                     'Payment received but the slot was re-booked meanwhile — '
                     'our team will refund you.',
@@ -189,8 +206,27 @@ class RazorpayWebhookView(APIView):
             return Response({'status': 'ignored'})  # not one of ours
 
         if event == 'payment.captured':
-            if booking.status == 'payment_pending':
-                _confirm_booking(booking, payment_id)
+            # Defense in depth: never confirm for a different amount than ours.
+            entity_amount = entity.get('amount')
+            if entity_amount is not None:
+                try:
+                    if int(entity_amount) != booking.amount * 100:
+                        return Response({'status': 'amount-mismatch'})
+                except (TypeError, ValueError):
+                    return Response({'status': 'amount-mismatch'})
+            with transaction.atomic():
+                if booking.listing_id:
+                    Listing.objects.select_for_update().get(pk=booking.listing_id)
+                booking.refresh_from_db()
+                if booking.status == 'payment_pending':
+                    if booking.listing_id and _conflicts_excluding_self(booking):
+                        # Late capture after the hold expired and the slot was
+                        # re-sold — same rule as verify: queue for refund.
+                        booking.status = 'refund_pending'
+                        booking.razorpay_payment_id = payment_id
+                        booking.save(update_fields=['status', 'razorpay_payment_id'])
+                    else:
+                        _confirm_booking(booking, payment_id)
         elif event == 'payment.failed':
             if booking.status == 'payment_pending':
                 booking.status = 'cancelled'  # releases the held slot
