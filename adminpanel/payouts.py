@@ -62,10 +62,20 @@ def generate_payouts():
         for booking in payable.filter(date__range=(week, week_end)):
             vendor = booking.listing.vendor
             entry = totals.setdefault(vendor.id, [0, vendor.name or vendor.phone])
+            # PLATFORM promos are our marketing: the vendor is paid as if no
+            # discount existed (the platform funds it). Venue offers are
+            # vendor-funded — no top-up.
+            promo_topup = (
+                booking.discount_amount
+                if (booking.offer or {}).get('source') == 'platform'
+                else 0
+            )
             if booking.method == Booking.Method.VENUE:
-                entry[0] -= booking.fee  # vendor holds the cash; fee comes back
+                # Vendor collected the DISCOUNTED cash; we top up the platform
+                # promo and claw back our fee.
+                entry[0] += promo_topup - booking.fee
             else:
-                entry[0] += max(0, booking.amount - booking.fee)
+                entry[0] += max(0, booking.amount + promo_topup - booking.fee)
 
         for vendor_id, (net, name) in totals.items():
             if Payout.objects.filter(

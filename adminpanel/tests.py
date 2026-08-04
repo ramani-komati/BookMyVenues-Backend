@@ -228,6 +228,11 @@ class AdminWriteTests(APITestCase):
 
     # --- vendors ---
     def test_verify_kyc_and_suspend(self):
+        # Complete the seeded booking so the suspension guard can't 409 —
+        # otherwise this test flakes on the time of day it runs.
+        Booking.objects.filter(pk=self.booking.pk).update(
+            date=today_ist() - datetime.timedelta(days=1)
+        )
         kyc = self.client.patch(
             f'/api/admin/vendors/{self.vendor.id}', {'kyc': 'verified'}, format='json'
         )
@@ -545,7 +550,8 @@ class PublicBannersTests(APITestCase):
         banner = {
             'id': 1722400000000, 'title': 'Weekend turf offer',
             'text': 'On all box cricket turfs', 'type': 'percent',
-            'value': 15, 'from': '2026-08-01', 'to': '2026-08-15',
+            'value': 15, 'code': 'AUG15', 'minAmount': '500',
+            'maxDiscount': '200', 'from': '2026-08-01', 'to': '2026-08-15',
         }
         response = self.save_banners([banner])
         self.assertEqual(response.data['banners'], [banner])  # verbatim echo
@@ -922,6 +928,23 @@ class PayoutGenerationTests(APITestCase):
         payouts = self._boot()['payouts']
         self.assertEqual(len(payouts), 1)
         self.assertEqual(payouts[0]['grossNum'], 1200 + 600 - 20)
+
+    def test_platform_promo_topped_up_venue_offer_not(self):
+        # Platform promo: base 2000, discount 300 -> amount 1720 (with ₹20
+        # fee). Vendor is made whole: 1720 + 300 - 20 = 2000.
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_mon,
+            slots=['10:00 – 11:00'], amount=1720, fee=20, discount_amount=300,
+            offer={'code': 'AUG15', 'source': 'platform'},
+        )
+        # Venue offer, same numbers: vendor funds it -> 1720 - 20 = 1700.
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=self.last_tue,
+            slots=['12:00 – 13:00'], amount=1720, fee=20, discount_amount=300,
+            offer={'code': 'SAVE10', 'source': 'venue'},
+        )
+        payouts = self._boot()['payouts']
+        self.assertEqual(payouts[0]['grossNum'], 2000 + 1700)
 
     def test_upi_counts_as_online_paid_in_payouts(self):
         Booking.objects.create(

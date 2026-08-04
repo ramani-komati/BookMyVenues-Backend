@@ -929,6 +929,76 @@ class RatingTests(BookingTestBase):
         self.assertEqual(listing_row['rating'], 4.0)
 
 
+class PlatformPromoTests(BookingTestBase):
+    """Banner promo codes (source: 'platform') validated against active banners."""
+
+    def setUp(self):
+        super().setUp()
+        import datetime as dt
+        from adminpanel.models import Settings
+        today = today_ist()
+        settings_obj = Settings.load()
+        settings_obj.banners = [
+            {'id': 1, 'title': 'August Fest', 'text': '', 'type': 'percent',
+             'value': 15, 'code': 'AUG15', 'minAmount': '500',
+             'maxDiscount': '200',
+             'from': today.isoformat(), 'to': today.isoformat()},
+            {'id': 2, 'title': 'Old promo', 'text': '', 'type': 'flat',
+             'value': 100, 'code': 'GONE', 'minAmount': '', 'maxDiscount': '',
+             'from': '', 'to': (today - dt.timedelta(days=1)).isoformat()},
+        ]
+        settings_obj.save()
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, offer=None, **overrides):
+        body = {
+            'venueId': str(self.listing.id),
+            'date': TOMORROW,
+            'slots': ['19:00 – 21:00'],  # 2h x 600 = 1200 base
+            'addons': [],
+            'perSlot': 600,
+            'offer': offer,
+            **overrides,
+        }
+        return self.client.post('/api/users/me/bookings', body, format='json')
+
+    def test_platform_percent_promo_applied(self):
+        # 1200 - 15% (180, under the 200 cap) + 20 fee = 1040.
+        r = self.book(offer={'code': 'AUG15', 'source': 'platform'}, amount=1040)
+        self.assertEqual(r.status_code, 201)
+        booking = r.data['booking']
+        self.assertEqual(booking['discountAmount'], 180)
+        self.assertEqual(booking['offer']['source'], 'platform')
+        self.assertEqual(booking['offer']['code'], 'AUG15')
+
+    def test_maxDiscount_caps_platform_percent(self):
+        # 6h x 600 = 3600; 15% = 540 -> capped at 200; 3400 + 20 = 3420.
+        r = self.book(slots=['12:00 – 18:00'],
+                      offer={'code': 'AUG15', 'source': 'platform'}, amount=3420)
+        self.assertEqual(r.status_code, 201)
+        self.assertEqual(r.data['booking']['discountAmount'], 200)
+
+    def test_minAmount_enforced(self):
+        # 30 min -> base 300, below the ₹500 minimum.
+        r = self.book(slots=['19:00 – 19:30'],
+                      offer={'code': 'AUG15', 'source': 'platform'}, amount=300)
+        self.assertEqual(r.status_code, 400)
+
+    def test_expired_banner_rejected(self):
+        r = self.book(offer={'code': 'GONE', 'source': 'platform'}, amount=1120)
+        self.assertEqual(r.status_code, 400)
+
+    def test_unknown_platform_code_rejected(self):
+        r = self.book(offer={'code': 'NOPE', 'source': 'platform'}, amount=1220)
+        self.assertEqual(r.status_code, 400)
+
+    def test_platform_code_not_confused_with_venue_offers(self):
+        # AUG15 is a banner code, not a venue offer — without source: platform
+        # it must NOT match (venue catalogue is empty here).
+        r = self.book(offer={'code': 'AUG15'}, amount=1040)
+        self.assertEqual(r.status_code, 400)
+
+
 class PerUnitBookingTests(BookingTestBase):
     """P6 — a venue with several pitches/courts/screens (per-unit bookings)."""
 

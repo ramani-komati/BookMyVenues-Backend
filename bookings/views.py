@@ -183,17 +183,90 @@ def _addon_total(requested_addons):
     return addon_total, cleaned
 
 
+def _parse_iso_date(text):
+    try:
+        return datetime.date.fromisoformat(str(text or '').strip())
+    except ValueError:
+        return None  # unparseable/empty -> open-ended
+
+
+def _apply_platform_offer(base, offer_request):
+    """
+    A PLATFORM promo (source: "platform") validates against the ACTIVE admin
+    banners instead of the venue's offers: matching code, today inside the
+    from–to window, minAmount/maxDiscount guardrails. The vendor is made whole
+    at payout time — the platform funds these discounts.
+    """
+    code = str(offer_request.get('code') or '').strip().upper()
+    if not code:
+        raise SlotError('This promo code is not valid.')
+
+    try:
+        from adminpanel.models import Settings
+        banners = Settings.load().banners or []
+    except Exception:
+        banners = []
+
+    today = today_ist()
+    matched = None
+    for banner in banners:
+        if not isinstance(banner, dict):
+            continue
+        if str(banner.get('code') or '').strip().upper() != code:
+            continue
+        start = _parse_iso_date(banner.get('from'))
+        end = _parse_iso_date(banner.get('to'))
+        if start is not None and start > today:
+            continue
+        if end is not None and end < today:
+            continue
+        matched = banner
+        break
+    if matched is None:
+        raise SlotError('This promo code is not valid or has expired.')
+
+    min_amount = _to_int(matched.get('minAmount') or 0, 'minAmount')
+    if base < min_amount:
+        raise SlotError(f'This promo needs a minimum spend of ₹{min_amount}.')
+
+    offer_type = str(matched.get('type') or '').strip().lower()
+    value = _to_int(matched.get('value') or 0, 'promo value')
+    if offer_type == 'percent':
+        discount = round(base * value / 100)
+        cap = _to_int(matched.get('maxDiscount') or 0, 'maxDiscount')
+        if cap > 0:
+            discount = min(discount, cap)
+    else:  # flat
+        discount = min(value, base)
+    discount = min(discount, base)
+    if discount <= 0:
+        raise SlotError('This promo is not applicable to this booking.')
+
+    applied = {
+        'code': code,
+        'title': matched.get('title') or '',
+        'type': offer_type,
+        'value': value,
+        'source': 'platform',   # payout logic pays the vendor as if undiscounted
+    }
+    return discount, applied
+
+
 def _apply_offer(listing, base, offer_request):
     """
-    Validate the requested coupon against the venue's stored `detail.offers`
-    and return (discount, applied_offer) — discount in ₹, applied_offer a
-    {code,title,type,value} dict (or None when no offer was sent).
+    Validate the requested coupon and return (discount, applied_offer) —
+    discount in ₹, applied_offer a {code,title,type,value,source} dict (or
+    None when no offer was sent). source "platform" -> validated against the
+    active admin banners; anything else -> the venue's stored `detail.offers`.
 
     `base` = slots + add-ons (NEVER the fee). Raises SlotError (-> 400) when the
     offer is unknown / expired / below its minimum spend.
     """
     if not offer_request or not isinstance(offer_request, dict):
         return 0, None
+
+    if str(offer_request.get('source') or '').strip().lower() == 'platform':
+        return _apply_platform_offer(base, offer_request)
 
     code = str(offer_request.get('code') or '').strip().upper()
     catalog = (listing.record.get('detail') or {}).get('offers') or []
@@ -241,6 +314,7 @@ def _apply_offer(listing, base, offer_request):
         'title': matched.get('title') or '',
         'type': offer_type,
         'value': value,
+        'source': 'venue',   # vendor-funded — payout unchanged
     }
     return discount, applied
 
