@@ -8,6 +8,7 @@ from . import ratings, vendor_views, views
 urlpatterns = [
     # Vendor portal (contract 3.4, 3.7)
     path('vendors/me/dashboard', vendor_views.VendorDashboardView.as_view(), name='vendor-dashboard'),
+    path('vendors/me/ratings', ratings.VendorRatingsView.as_view(), name='vendor-ratings'),
     path('vendors/me/walkin-bookings', vendor_views.WalkInBookingView.as_view(), name='walkin-booking'),
     path(
         'venues/<uuid:listing_id>/availability',

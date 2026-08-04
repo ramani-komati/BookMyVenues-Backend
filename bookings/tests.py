@@ -702,12 +702,14 @@ class OfferBookingTests(BookingTestBase):
 
     def test_client_discount_amount_cross_checked(self):
         # SAVE10 on 1200 base -> our discount is 120. A client claiming 200
-        # (drift > ₹1) is rejected with the dedicated message.
+        # (drift > ₹1) is rejected with the structured body (silent retry).
         r = self.book(offer={'code': 'SAVE10'}, discountAmount=200, amount=1100)
         self.assertEqual(r.status_code, 400)
         self.assertEqual(
             r.data['message'], 'Offer amount mismatch — please retry the booking'
         )
+        self.assertEqual(r.data['code'], 'OFFER_MISMATCH')
+        self.assertEqual(r.data['discountAmount'], 120)  # server's recompute
 
     def test_client_discount_within_one_rupee_tolerated(self):
         r = self.book(offer={'code': 'SAVE10'}, discountAmount=119, amount=1100)
@@ -834,6 +836,86 @@ class RatingTests(BookingTestBase):
     def test_anonymous_401(self):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.rate().status_code, 401)
+
+    def test_dashboard_venues_carry_rating_even_when_paused(self):
+        # Item 1 of the consolidated round: the vendor sees the aggregate on
+        # their own dashboard regardless of venue status.
+        self.rate(stars=4)
+        Listing.objects.filter(pk=self.listing.pk).update(status='paused')
+        self.client.force_authenticate(user=self.vendor)
+        venues = self.client.get('/api/vendors/me/dashboard').data['venues']
+        row = next(v for v in venues if v['id'] == str(self.listing.id))
+        self.assertEqual(row['rating'], 4.0)
+        self.assertEqual(row['ratingCount'], 1)
+
+    def test_vendor_ratings_feed(self):
+        # Two ratings: one on the base (by 'Asha'), one on a sibling with a
+        # unit label (by a two-word name -> display-safe truncation).
+        self.rate(stars=4)
+        long_name = User.objects.create_user(
+            phone='9000000044', name='Ravi Kumar', email='rk@example.com',
+        )
+        sibling = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='gph-screen-2',
+            record={'name': 'Grand Palace Hall — Screen 2', 'price': 600,
+                    'detail': {'unitOf': str(self.listing.id)}},
+            name='Grand Palace Hall — Screen 2', category='hall',
+            locality='x', pincode='560001',
+        )
+        sib_booking = Booking.objects.create(
+            listing=sibling, user=long_name,
+            date=today_ist() - datetime.timedelta(days=2),
+            slots=['12:00 – 13:00'], amount=620, unit_label='Screen 2',
+        )
+        self.client.force_authenticate(user=long_name)
+        self.client.post(
+            f'/api/venues/{sibling.id}/ratings',
+            {'bookingId': sib_booking.id, 'stars': 5}, format='json',
+        )
+
+        self.client.force_authenticate(user=self.vendor)
+        data = self.client.get('/api/vendors/me/ratings').data
+        self.assertEqual(data['total'], 2)
+        newest = data['ratings'][0]  # newest first = the sibling rating
+        self.assertEqual(newest['stars'], 5)
+        self.assertEqual(newest['unitLabel'], 'Screen 2')
+        self.assertEqual(newest['customerName'], 'Ravi K.')  # never phone/email
+        self.assertEqual(newest['bookingDate'], sib_booking.date.isoformat())
+        base_row = data['ratings'][1]
+        self.assertEqual(base_row['customerName'], 'Asha')
+        self.assertIsNone(base_row['unitLabel'])
+
+        # Pagination honoured:
+        paged = self.client.get('/api/vendors/me/ratings?limit=1&offset=1').data
+        self.assertEqual(paged['total'], 2)
+        self.assertEqual(len(paged['ratings']), 1)
+        self.assertEqual(paged['ratings'][0]['stars'], 4)
+
+        # venueId filter covers the whole venue set (base id -> sibling incl.):
+        filtered = self.client.get(
+            f'/api/vendors/me/ratings?venueId={self.listing.id}'
+        ).data
+        self.assertEqual(filtered['total'], 2)
+
+    def test_vendor_ratings_feed_scoped_and_guarded(self):
+        self.rate(stars=4)
+        other_vendor = User.objects.create_user(
+            phone='9000000055', name='V2', email='v2b@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.client.force_authenticate(user=other_vendor)
+        self.assertEqual(  # someone else's ratings never leak
+            self.client.get('/api/vendors/me/ratings').data['total'], 0
+        )
+        self.assertEqual(  # foreign venueId -> 404
+            self.client.get(
+                f'/api/vendors/me/ratings?venueId={self.listing.id}'
+            ).status_code, 404
+        )
+        self.client.force_authenticate(user=self.customer)
+        self.assertEqual(  # customers 403
+            self.client.get('/api/vendors/me/ratings').status_code, 403
+        )
 
     def test_rating_surfaces_on_public_venue(self):
         self.rate(stars=4)

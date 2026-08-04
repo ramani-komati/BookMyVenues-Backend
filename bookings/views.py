@@ -431,9 +431,15 @@ class MyBookingsView(APIView):
             except (TypeError, ValueError):
                 client_discount = None
             if client_discount is not None and abs(client_discount - discount) > 1:
-                return _message(
-                    'Offer amount mismatch — please retry the booking',
-                    status.HTTP_400_BAD_REQUEST,
+                # Structured like AMOUNT_MISMATCH: the recomputed discount is a
+                # real field so the client can retry silently, never regex.
+                return Response(
+                    {
+                        'message': 'Offer amount mismatch — please retry the booking',
+                        'code': 'OFFER_MISMATCH',
+                        'discountAmount': discount,
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
         # SECURITY: the client's amount is only ACCEPTED, never trusted.

@@ -56,6 +56,81 @@ def _booking_completed(booking):
     return False
 
 
+def _display_name(user):
+    """Display-safe customer name: 'Ravi Kumar' -> 'Ravi K.'. Never the
+    phone/email; 'Customer' when no name is stored."""
+    name = (getattr(user, 'name', '') or '').strip()
+    if not name:
+        return 'Customer'
+    parts = name.split()
+    if len(parts) == 1:
+        return parts[0]
+    return f'{parts[0]} {parts[1][0].upper()}.'
+
+
+class VendorRatingsView(APIView):
+    """GET /api/vendors/me/ratings?limit=&offset=&venueId= — the individual
+    ratings behind the vendor's averages, newest first."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        from accounts.models import User
+        if request.user.role != User.Role.VENDOR:
+            return _message(
+                'Only vendor accounts can access this endpoint.',
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        queryset = (
+            Rating.objects.filter(listing__vendor=request.user)
+            .select_related('listing', 'user', 'booking')
+            .order_by('-created_at')
+        )
+
+        venue_id = str(request.query_params.get('venueId') or '').strip()
+        if venue_id:
+            target = None
+            try:
+                import uuid as uuid_mod
+                target = Listing.objects.filter(
+                    pk=uuid_mod.UUID(venue_id), vendor=request.user
+                ).first()
+            except ValueError:
+                pass
+            if target is None:
+                return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
+            queryset = queryset.filter(listing_id__in=venue_set_ids(target))
+
+        try:
+            limit = int(request.query_params.get('limit', 20))
+            offset = int(request.query_params.get('offset', 0))
+        except (TypeError, ValueError):
+            return _message('limit and offset must be numbers.',
+                            status.HTTP_400_BAD_REQUEST)
+        if not (1 <= limit <= 50) or offset < 0:
+            return _message('Invalid limit or offset.', status.HTTP_400_BAD_REQUEST)
+
+        total = queryset.count()
+        rows = queryset[offset:offset + limit]
+        return Response({
+            'ratings': [
+                {
+                    'id': str(rating.id),
+                    'venueId': str(rating.listing_id),
+                    'venueName': rating.listing.name or rating.booking.venue_name,
+                    'unitLabel': rating.booking.unit_label or None,
+                    'stars': rating.stars,
+                    'customerName': _display_name(rating.user),
+                    'bookingDate': rating.booking.date.isoformat(),
+                    'createdAt': rating.created_at.isoformat(),
+                }
+                for rating in rows
+            ],
+            'total': total,
+        })
+
+
 class RateVenueView(APIView):
     """POST /api/venues/<venueId>/ratings {bookingId, stars} -> aggregate."""
 
