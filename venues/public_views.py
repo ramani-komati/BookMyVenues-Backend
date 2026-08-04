@@ -66,13 +66,20 @@ class PublicVenueListView(APIView):
         try:
             limit = int(params.get('limit', DEFAULT_LIMIT))
             page = int(params.get('page', 1))
-        except ValueError:
-            return _message('page and limit must be numbers.', status.HTTP_400_BAD_REQUEST)
+            # offset is an alternative to page (0-based row start). It is
+            # HONOURED, never silently ignored — silent ignoring hides bugs.
+            offset = int(params['offset']) if 'offset' in params else None
+        except (ValueError, TypeError):
+            return _message(
+                'page, limit and offset must be numbers.', status.HTTP_400_BAD_REQUEST
+            )
 
         if not (1 <= limit <= MAX_LIMIT):
             return _message(f'limit must be between 1 and {MAX_LIMIT}.', status.HTTP_400_BAD_REQUEST)
         if page < 1:
             return _message('page must be 1 or higher.', status.HTTP_400_BAD_REQUEST)
+        if offset is not None and offset < 0:
+            return _message('offset must be 0 or higher.', status.HTTP_400_BAD_REQUEST)
 
         sort = params.get('sort', 'new')
         if sort not in SORTS:
@@ -96,8 +103,8 @@ class PublicVenueListView(APIView):
         queryset = queryset.order_by(SORTS[sort])
 
         total = queryset.count()
-        offset = (page - 1) * limit
-        rows = queryset[offset:offset + limit]
+        start = offset if offset is not None else (page - 1) * limit
+        rows = queryset[start:start + limit]
 
         return Response({'venues': [_summary(row) for row in rows], 'total': total})
 

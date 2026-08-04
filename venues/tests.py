@@ -548,6 +548,30 @@ class PublicBrowsingTests(ListingTestBase):
         response = self.client.get('/api/venues?limit=51')
         self.assertEqual(response.status_code, 400)
 
+    def test_offset_is_honoured(self):
+        # Second listing so paging has something to skip past.
+        from venues.models import Listing
+        import uuid as uuid_mod
+        Listing.objects.create(
+            id=uuid_mod.uuid4(), vendor=self.vendor, slug='second-hall',
+            record={'name': 'Second Hall', 'price': 500, 'detail': {}},
+            name='Second Hall', category='hall', locality='x', pincode='560001',
+            status='live',
+        )
+        self.clear_cache()
+        first = self.client.get('/api/venues?limit=1&offset=0').data
+        self.clear_cache()
+        second = self.client.get('/api/venues?limit=1&offset=1').data
+        self.assertEqual(first['total'], 2)
+        self.assertEqual(len(first['venues']), 1)
+        self.assertNotEqual(  # offset actually moved the window
+            first['venues'][0]['id'], second['venues'][0]['id']
+        )
+
+    def test_bad_offset_rejected(self):
+        self.assertEqual(self.client.get('/api/venues?offset=-1').status_code, 400)
+        self.assertEqual(self.client.get('/api/venues?offset=abc').status_code, 400)
+
     def test_bad_limit_rejected(self):
         response = self.client.get('/api/venues?limit=abc')
         self.assertEqual(response.status_code, 400)
