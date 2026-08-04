@@ -160,6 +160,11 @@ TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 # a voice call on some accounts).
 TWOFACTOR_SMS_TEMPLATE = os.environ.get('TWOFACTOR_SMS_TEMPLATE', 'OTP1')
 
+# Razorpay (payments). Test keys and live keys are a pure env-var swap.
+RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
+RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
+RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+
 # Supabase Storage (venue photo uploads).
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')

@@ -46,7 +46,7 @@ def generate_payouts():
 
     payable = (
         Booking.objects.filter(walk_in=False, date__lt=current_week)
-        .exclude(status__in=['refunded', 'cancelled'])
+        .exclude(status__in=['refunded', 'cancelled', 'payment_pending'])
         .exclude(listing__isnull=True)
         .select_related('listing__vendor')
     )

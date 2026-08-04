@@ -742,6 +742,145 @@ class OfferBookingTests(BookingTestBase):
         self.assertEqual(r.data['booking']['amount'], 1100)
 
 
+from django.test import override_settings
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key',
+    RAZORPAY_KEY_SECRET='test_key_secret',
+    RAZORPAY_WEBHOOK_SECRET='test_webhook_secret',
+)
+class PaymentFlowTests(BookingTestBase):
+    """Razorpay order -> verify / webhook -> confirm. Gateway HTTP mocked;
+    signatures are REAL HMACs computed with the test secrets."""
+
+    def order(self, **overrides):
+        from unittest.mock import MagicMock, patch
+        body = {
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': ['19:30 – 21:00'], 'addons': [], 'perSlot': 600,
+            'amount': 920,
+            **overrides,
+        }
+        fake = MagicMock(status_code=200)
+        fake.json.return_value = {'id': 'order_TEST123'}
+        with patch('bookings.razorpay_client.requests.post', return_value=fake):
+            return self.client.post('/api/payments/order', body, format='json')
+
+    def _sign(self, order_id, payment_id):
+        import hashlib, hmac
+        return hmac.new(
+            b'test_key_secret', f'{order_id}|{payment_id}'.encode(), hashlib.sha256
+        ).hexdigest()
+
+    def test_order_creates_pending_hold(self):
+        response = self.order()
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['orderId'], 'order_TEST123')
+        self.assertEqual(response.data['keyId'], 'rzp_test_key')
+        self.assertEqual(response.data['amount'], 92000)  # paise
+        booking = Booking.objects.get(pk=response.data['bookingId'])
+        self.assertEqual(booking.status, 'payment_pending')
+        # The hold blocks a direct booking of the same slot:
+        self.assertEqual(self.book().status_code, 409)
+        # ...but is invisible in the customer's bookings list:
+        mine = self.client.get('/api/users/me/bookings').data
+        self.assertEqual(mine['total'], 0)
+
+    def test_expired_hold_frees_the_slot(self):
+        from django.utils import timezone as dj_tz
+        response = self.order()
+        Booking.objects.filter(pk=response.data['bookingId']).update(
+            created_at=dj_tz.now() - datetime.timedelta(minutes=31)
+        )
+        self.assertEqual(self.book().status_code, 201)  # slot free again
+
+    def test_verify_confirms_with_valid_signature(self):
+        order = self.order().data
+        response = self.client.post('/api/payments/verify', {
+            'bookingId': order['bookingId'],
+            'razorpay_order_id': 'order_TEST123',
+            'razorpay_payment_id': 'pay_ABC',
+            'razorpay_signature': self._sign('order_TEST123', 'pay_ABC'),
+        }, format='json')
+        self.assertEqual(response.status_code, 200)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'confirmed')
+        self.assertEqual(booking.razorpay_payment_id, 'pay_ABC')
+
+    def test_verify_rejects_bad_signature(self):
+        order = self.order().data
+        response = self.client.post('/api/payments/verify', {
+            'bookingId': order['bookingId'],
+            'razorpay_order_id': 'order_TEST123',
+            'razorpay_payment_id': 'pay_ABC',
+            'razorpay_signature': 'forged',
+        }, format='json')
+        self.assertEqual(response.status_code, 400)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'payment_pending')  # unconfirmed
+
+    def _webhook(self, event, order_id='order_TEST123'):
+        import hashlib, hmac, json as json_mod
+        payload = json_mod.dumps({
+            'event': event,
+            'payload': {'payment': {'entity': {'id': 'pay_WH1', 'order_id': order_id}}},
+        })
+        signature = hmac.new(
+            b'test_webhook_secret', payload.encode(), hashlib.sha256
+        ).hexdigest()
+        return self.client.post(
+            '/api/payments/webhook', payload,
+            content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=signature,
+        )
+
+    def test_webhook_captured_confirms(self):
+        order = self.order().data
+        response = self._webhook('payment.captured')
+        self.assertEqual(response.status_code, 200)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'confirmed')
+
+    def test_webhook_failed_releases_the_hold(self):
+        self.order()
+        self._webhook('payment.failed')
+        self.assertEqual(self.book(slots=['19:30 – 21:00']).status_code, 201)
+
+    def test_webhook_bad_signature_rejected(self):
+        self.order()
+        response = self.client.post(
+            '/api/payments/webhook', '{"event":"payment.captured"}',
+            content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE='forged',
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_admin_refund_calls_gateway_and_stores_id(self):
+        from unittest.mock import MagicMock, patch
+        booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=TOMORROW,
+            slots=['10:00 – 11:00'], amount=620, fee=20,
+            razorpay_order_id='order_X', razorpay_payment_id='pay_X',
+        )
+        admin = User.objects.create_user(
+            phone='9000000098', name='Admin', email='ad2@example.com',
+            role=User.Role.ADMIN, password='AdminPass123',
+        )
+        self.client.force_authenticate(user=admin)
+        fake = MagicMock(status_code=200)
+        fake.json.return_value = {'id': 'rfnd_001'}
+        with patch('bookings.razorpay_client.requests.post', return_value=fake) as mock_post:
+            response = self.client.patch(
+                f'/api/admin/bookings/{booking.id}',
+                {'status': 'refunded', 'refundAmount': 300}, format='json',
+            )
+        self.assertEqual(response.status_code, 200)
+        booking.refresh_from_db()
+        self.assertEqual(booking.status, 'refunded')
+        self.assertEqual(booking.refund_id, 'rfnd_001')
+        self.assertIn('/payments/pay_X/refund', mock_post.call_args[0][0])
+        self.assertEqual(mock_post.call_args[1]['json'], {'amount': 30000})  # paise
+
+
 class RatingTests(BookingTestBase):
     """POST /api/venues/:venueId/ratings — one rating per completed booking."""
 

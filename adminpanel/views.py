@@ -358,6 +358,22 @@ class AdminBookingUpdateView(_AdminWriteView):
                     'Only online-paid bookings can be refunded.',
                     status.HTTP_400_BAD_REQUEST,
                 )
+            if value == 'refunded' and booking.razorpay_payment_id:
+                # Real gateway refund (partial when refundAmount is sent).
+                from bookings.razorpay_client import (
+                    RazorpayError, configured, refund_payment,
+                )
+                if configured():
+                    try:
+                        booking.refund_id = refund_payment(
+                            booking.razorpay_payment_id,
+                            _to_int(data.get('refundAmount'), 0) or None,
+                        )
+                    except RazorpayError:
+                        return detail(
+                            'Refund failed at the payment gateway.',
+                            status.HTTP_502_BAD_GATEWAY,
+                        )
             booking.status = value
         # Refund details from the panel (stored alongside the status change).
         if 'reason' in data:

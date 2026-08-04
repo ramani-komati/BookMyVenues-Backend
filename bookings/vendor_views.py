@@ -71,7 +71,9 @@ class VendorDashboardView(APIView):
         month_start = today - datetime.timedelta(days=29)   # rolling 30 days
         history_start = today - datetime.timedelta(days=59) # covers prev periods
 
-        base = Booking.objects.filter(listing__vendor=request.user)
+        base = Booking.objects.filter(listing__vendor=request.user).exclude(
+            status='payment_pending'   # unpaid holds are not revenue
+        )
 
         # One lightweight query feeds ALL the sums below.
         rows = list(

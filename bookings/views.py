@@ -83,13 +83,19 @@ def _vendor_paused(listing):
     return bool(record.get('paused') or detail.get('paused'))
 
 
+PENDING_HOLD_MINUTES = 30  # how long an unpaid Razorpay hold keeps the slot
+
+
 def _active_bookings(listing, date):
     """The rows that HOLD time: every booking except refunded/cancelled
-    (those free their slots). Availability and the overlap check both read
-    exactly this queryset so they can never disagree."""
+    (those free their slots) and expired payment holds (abandoned checkouts
+    free their slots after PENDING_HOLD_MINUTES). Availability and the overlap
+    check both read exactly this queryset so they can never disagree."""
+    from django.utils import timezone
+    cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
     return Booking.objects.filter(listing=listing, date=date).exclude(
         status__in=('refunded', 'cancelled')
-    )
+    ).exclude(status='payment_pending', created_at__lt=cutoff)
 
 
 def _booked_intervals(listing, date, sport=None, unit=None):
@@ -403,6 +409,129 @@ class AvailabilityView(APIView):
         return Response(_availability(listing, date))
 
 
+def validate_booking_request(body):
+    """
+    Full server-side validation + pricing for a customer booking request.
+    Shared by direct booking creation AND Razorpay order creation so the two
+    can never disagree. Returns (data_dict, None) on success or
+    (None, error_response) on failure.
+    """
+    # --- Resolve the venue -------------------------------------
+    listing = None
+    venue_id = body.get('venueId') or body.get('listingId')
+    if venue_id:
+        listing = Listing.objects.filter(
+            pk=str(venue_id), status=Listing.Status.LIVE
+        ).first()
+    elif body.get('venueName'):
+        matches = list(Listing.objects.filter(
+            name=str(body['venueName']), status=Listing.Status.LIVE
+        )[:2])
+        listing = matches[0] if len(matches) == 1 else None
+    if listing is None:
+        return None, _message('Venue not found.', status.HTTP_404_NOT_FOUND)
+
+    # Vendor-paused venue: visible, but not taking customer bookings.
+    if _vendor_paused(listing):
+        return None, _message(
+            'This venue is temporarily not accepting bookings',
+            status.HTTP_409_CONFLICT,
+        )
+
+    # --- Validate date, slots, unit & amount -------------------
+    try:
+        date = parse_date(body.get('date'))
+        intervals = parse_slots(body.get('slots'))
+        sport, unit, unit_label = _parse_unit(body)
+        rate = _unit_rate(listing, sport, unit)  # None -> listing price
+        amount, addons, applied_offer, discount, fee = compute_amount(
+            listing, intervals, body.get('addons'), rate=rate,
+            offer_request=body.get('offer'),
+        )
+        client_amount = _to_int(body.get('amount'), 'amount')
+        per_slot = _to_int(
+            body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'
+        )
+    except SlotError as error:
+        return None, _message(str(error), status.HTTP_400_BAD_REQUEST)
+
+    today = today_ist()
+    if date < today:
+        return None, _message('Cannot book a past date.', status.HTTP_400_BAD_REQUEST)
+    if date == today:
+        first_start = min(start for start, _ in intervals)
+        if first_start <= now_minutes_ist():
+            return None, _message(
+                'That time has already passed today.', status.HTTP_400_BAD_REQUEST
+            )
+
+    # Payment method — stored and echoed EXACTLY as received ('online'
+    # only when the client sends none).
+    method = str(body.get('method') or Booking.Method.ONLINE)
+    if method not in Booking.CUSTOMER_METHODS:
+        return None, _message(
+            'method must be one of: online, upi, card, netbanking, venue.',
+            status.HTTP_400_BAD_REQUEST,
+        )
+
+    # Cross-check the client's INFORMATIONAL discountAmount (money math
+    # always uses our recomputed value).
+    client_discount = body.get('discountAmount')
+    if client_discount not in (None, ''):
+        try:
+            client_discount = int(str(client_discount))
+        except (TypeError, ValueError):
+            client_discount = None
+        if client_discount is not None and abs(client_discount - discount) > 1:
+            return None, Response(
+                {
+                    'message': 'Offer amount mismatch — please retry the booking',
+                    'code': 'OFFER_MISMATCH',
+                    'discountAmount': discount,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+    # SECURITY: the client's amount is only ACCEPTED, never trusted.
+    if client_amount != amount:
+        return None, _amount_mismatch(amount)
+
+    return {
+        'listing': listing, 'date': date, 'intervals': intervals,
+        'sport': sport, 'unit': unit, 'unit_label': unit_label,
+        'addons': addons, 'applied_offer': applied_offer,
+        'discount': discount, 'fee': fee, 'amount': amount,
+        'per_slot': per_slot, 'method': method,
+    }, None
+
+
+def build_booking_fields(user, body, data):
+    """The Booking.objects.create kwargs shared by all creation paths."""
+    listing = data['listing']
+    return dict(
+        listing=listing,
+        user=user,
+        venue_name=listing.record.get('name') or listing.name,
+        category=listing.category,
+        location=str(listing.record.get('location') or ''),
+        image=str(listing.record.get('image') or ''),
+        customer_name=str(body.get('customer') or user.name),
+        phone=user.phone,
+        sport=data['sport'],
+        unit=data['unit'],
+        unit_label=data['unit_label'],
+        date=data['date'],
+        slots=[str(slot) for slot in body['slots']],
+        per_slot=data['per_slot'],
+        addons=data['addons'],
+        offer=data['applied_offer'],
+        discount_amount=data['discount'],
+        fee=data['fee'],
+        amount=data['amount'],
+        method=data['method'],
+    )
+
+
 class MyBookingsView(APIView):
     """
     GET  /api/users/me/bookings — my bookings (?status=upcoming|past)
@@ -412,7 +541,10 @@ class MyBookingsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        queryset = Booking.objects.filter(user=request.user)
+        # Unpaid Razorpay holds are checkout plumbing, not bookings.
+        queryset = Booking.objects.filter(user=request.user).exclude(
+            status='payment_pending'
+        )
 
         wanted = request.query_params.get('status')
         if wanted == 'upcoming':
@@ -440,85 +572,11 @@ class MyBookingsView(APIView):
     def post(self, request):
         body = request.data if isinstance(request.data, dict) else {}
 
-        # --- Resolve the venue -------------------------------------
-        listing = None
-        venue_id = body.get('venueId') or body.get('listingId')
-        if venue_id:
-            listing = Listing.objects.filter(
-                pk=str(venue_id), status=Listing.Status.LIVE
-            ).first()
-        elif body.get('venueName'):
-            matches = list(Listing.objects.filter(
-                name=str(body['venueName']), status=Listing.Status.LIVE
-            )[:2])
-            listing = matches[0] if len(matches) == 1 else None
-        if listing is None:
-            return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
-
-        # Vendor-paused venue: visible, but not taking customer bookings.
-        if _vendor_paused(listing):
-            return _message(
-                'This venue is temporarily not accepting bookings',
-                status.HTTP_409_CONFLICT,
-            )
-
-        # --- Validate date, slots, unit & amount -------------------
-        try:
-            date = parse_date(body.get('date'))
-            intervals = parse_slots(body.get('slots'))
-            sport, unit, unit_label = _parse_unit(body)
-            rate = _unit_rate(listing, sport, unit)  # None -> listing price
-            amount, addons, applied_offer, discount, fee = compute_amount(
-                listing, intervals, body.get('addons'), rate=rate,
-                offer_request=body.get('offer'),
-            )
-            client_amount = _to_int(body.get('amount'), 'amount')
-        except SlotError as error:
-            return _message(str(error), status.HTTP_400_BAD_REQUEST)
-
-        today = today_ist()
-        if date < today:
-            return _message('Cannot book a past date.', status.HTTP_400_BAD_REQUEST)
-        if date == today:
-            first_start = min(start for start, _ in intervals)
-            if first_start <= now_minutes_ist():
-                return _message('That time has already passed today.', status.HTTP_400_BAD_REQUEST)
-
-        # Payment method — stored and echoed EXACTLY as received ('online'
-        # only when the client sends none). The amount is the same for all;
-        # 'venue' just means the vendor collects it (incl. the platform fee,
-        # which payouts claw back).
-        method = str(body.get('method') or Booking.Method.ONLINE)
-        if method not in Booking.CUSTOMER_METHODS:
-            return _message(
-                'method must be one of: online, upi, card, netbanking, venue.',
-                status.HTTP_400_BAD_REQUEST,
-            )
-
-        # Cross-check the client's INFORMATIONAL discountAmount (money math
-        # always uses our recomputed value): a drift beyond ₹1 means a stale
-        # or tampered client trying to lock in a wrong price.
-        client_discount = body.get('discountAmount')
-        if client_discount not in (None, ''):
-            try:
-                client_discount = int(str(client_discount))
-            except (TypeError, ValueError):
-                client_discount = None
-            if client_discount is not None and abs(client_discount - discount) > 1:
-                # Structured like AMOUNT_MISMATCH: the recomputed discount is a
-                # real field so the client can retry silently, never regex.
-                return Response(
-                    {
-                        'message': 'Offer amount mismatch — please retry the booking',
-                        'code': 'OFFER_MISMATCH',
-                        'discountAmount': discount,
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-
-        # SECURITY: the client's amount is only ACCEPTED, never trusted.
-        if client_amount != amount:
-            return _amount_mismatch(amount)
+        data, error = validate_booking_request(body)
+        if error is not None:
+            return error
+        listing, date = data['listing'], data['date']
+        intervals, sport, unit = data['intervals'], data['sport'], data['unit']
 
         # --- The race-safe part ------------------------------------
         with transaction.atomic():
@@ -534,26 +592,7 @@ class MyBookingsView(APIView):
                 )
 
             booking = Booking.objects.create(
-                listing=listing,
-                user=request.user,
-                venue_name=listing.record.get('name') or listing.name,
-                category=listing.category,
-                location=str(listing.record.get('location') or ''),
-                image=str(listing.record.get('image') or ''),
-                customer_name=str(body.get('customer') or request.user.name),
-                phone=request.user.phone,
-                sport=sport,
-                unit=unit,
-                unit_label=unit_label,
-                date=date,
-                slots=[str(slot) for slot in body['slots']],
-                per_slot=_to_int(body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'),
-                addons=addons,
-                offer=applied_offer,
-                discount_amount=discount,
-                fee=fee,   # frozen at booking time — payouts deduct THIS
-                amount=amount,
-                method=method,
+                **build_booking_fields(request.user, body, data)
             )
 
         # Booking makes you a customer, whatever your role (admin Users list).

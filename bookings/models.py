@@ -79,9 +79,14 @@ class Booking(models.Model):
 
     method = models.CharField(max_length=10, choices=Method.choices, default=Method.ONLINE)
     walk_in = models.BooleanField(default=False)
-    # Lifecycle state for the admin panel (P-admin Phase 2). 'completed' is
+    # Lifecycle state. 'payment_pending' = created for a Razorpay order,
+    # holds the slot for PENDING_HOLD_MINUTES until paid; 'completed' is
     # derived from the date; an admin can set 'refunded' etc.
     status = models.CharField(max_length=20, default='confirmed')
+    # Razorpay linkage (empty for pay-at-venue / walk-ins / legacy bookings).
+    razorpay_order_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
+    razorpay_payment_id = models.CharField(max_length=64, blank=True, default='')
+    refund_id = models.CharField(max_length=64, blank=True, default='')
     # Set by the admin Refunds panel when issuing a refund.
     refund_reason = models.CharField(max_length=200, blank=True, default='')
     refund_amount = models.PositiveIntegerField(null=True, blank=True)
