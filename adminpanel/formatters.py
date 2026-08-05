@@ -10,10 +10,12 @@ returns them empty; settings is a sensible default (the real ₹20 fee).
 Money convention: `*Num` fields are RAW ints; `price`, `payout`, `slotsAmt`
 etc. are display strings shown as-is.
 """
+from collections import defaultdict
+
 from django.utils import timezone
 
 from accounts.models import User
-from bookings.models import Booking
+from bookings.models import Booking, Rating
 from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 from venues.completion import compute_completion
 from venues.models import Listing, VenueDraft
@@ -21,6 +23,65 @@ from venues.models import Listing, VenueDraft
 from .models import AuditEntry, Payout, Review, Settings
 
 AUDIT_LIMIT = 100
+
+
+class BootstrapContext:
+    """Precomputed lookups for the bootstrap read.
+
+    Every row builder used to query per row (ratings, bookings, drafts,
+    siblings) — 58 queries for 7 venues, and growing linearly with the
+    catalogue. This loads each table ONCE and groups in Python, so bootstrap
+    is a fixed handful of queries no matter how big the platform gets.
+    Single-row builders (used by the write endpoints) still work with
+    ctx=None and fall back to their original per-row queries.
+    """
+
+    def __init__(self):
+        self.listings = list(Listing.objects.select_related('vendor').all())
+
+        # Unit siblings fold into their base venue (same rule as ratings).
+        self.base_of = {}
+        for listing in self.listings:
+            unit_of = str(
+                ((listing.record or {}).get('detail') or {}).get('unitOf') or ''
+            ).strip()
+            self.base_of[str(listing.id)] = unit_of or str(listing.id)
+
+        self.listings_by_vendor = defaultdict(list)
+        for listing in self.listings:
+            self.listings_by_vendor[listing.vendor_id].append(listing)
+
+        self.bookings_by_listing = defaultdict(list)
+        self.bookings_by_user = defaultdict(list)
+        self.bookings = list(Booking.objects.all())
+        for booking in self.bookings:
+            if booking.listing_id:
+                self.bookings_by_listing[str(booking.listing_id)].append(booking)
+            if booking.user_id:
+                self.bookings_by_user[booking.user_id].append(booking)
+
+        # Ratings aggregated per venue SET (base id -> (average, count)).
+        totals = defaultdict(lambda: [0, 0])
+        for listing_id, stars in Rating.objects.values_list('listing_id', 'stars'):
+            entry = totals[self.base_of.get(str(listing_id), str(listing_id))]
+            entry[0] += stars
+            entry[1] += 1
+        self.rating_by_base = {
+            base: (round(total / count, 4), count)
+            for base, (total, count) in totals.items()
+        }
+
+        self.drafts = {str(draft.id): draft for draft in VenueDraft.objects.all()}
+
+    def rating_for(self, listing):
+        base = self.base_of.get(str(listing.id), str(listing.id))
+        return self.rating_by_base.get(base, (None, 0))
+
+    def bookings_for(self, listing):
+        return self.bookings_by_listing.get(str(listing.id), [])
+
+    def draft_for(self, listing_id):
+        return self.drafts.get(str(listing_id))
 
 
 def _int(value):
@@ -55,21 +116,24 @@ def _unit_of(listing):
     return str(((listing.record or {}).get('detail') or {}).get('unitOf') or '').strip()
 
 
-def _draft_location(listing_id):
+def _draft_location(listing_id, ctx=None):
     """The wizard's location bucket for this id ({} when no draft exists) —
     the fallback source for district/city on rows published before the
     frontend started sending them flat on the record."""
-    draft = VenueDraft.objects.filter(pk=listing_id).first()
+    draft = (
+        ctx.draft_for(listing_id) if ctx is not None
+        else VenueDraft.objects.filter(pk=listing_id).first()
+    )
     return ((draft.data or {}).get('location') or {}) if draft else {}
 
 
-def _district_and_city(listing):
+def _district_and_city(listing, ctx=None):
     record = listing.record or {}
     detail = record.get('detail') or {}
     district = str(record.get('district') or detail.get('district') or '').strip()
     city = str(record.get('city') or detail.get('city') or '').strip()
     if not district or not city:
-        location = _draft_location(listing.pk)
+        location = _draft_location(listing.pk, ctx)
         district = district or str(location.get('district') or '').strip()
         city = city or str(
             location.get('city') or location.get('district') or ''
@@ -85,14 +149,17 @@ def _venue_status(listing):
     return 'draft'
 
 
-def venue_row(listing):
-    from bookings.ratings import venue_rating
-
+def venue_row(listing, ctx=None):
     record = listing.record or {}
     detail = record.get('detail') or {}
-    bookings = list(listing.bookings.all())
-    district, city = _district_and_city(listing)
-    average, _count = venue_rating(listing)
+    if ctx is not None:
+        bookings = ctx.bookings_for(listing)
+        average, _count = ctx.rating_for(listing)
+    else:
+        from bookings.ratings import venue_rating
+        bookings = list(listing.bookings.all())
+        average, _count = venue_rating(listing)
+    district, city = _district_and_city(listing, ctx)
     return {
         'id': str(listing.id),
         'name': listing.name or record.get('name') or '',
@@ -116,21 +183,23 @@ def venue_row(listing):
     }
 
 
-def format_venues():
+def format_venues(ctx):
     """All REAL venues — unit siblings (— Pitch 2 etc.) are excluded so the
     admin list and its counts match the actual number of venues."""
-    return [
-        venue_row(l)
-        for l in Listing.objects.select_related('vendor').all()
-        if not _unit_of(l)
-    ]
+    return [venue_row(l, ctx) for l in ctx.listings if not _unit_of(l)]
 
 
 # --- Vendors -----------------------------------------------------
 
-def vendor_row(vendor):
-    listings = list(vendor.listings.all())
-    earnings = sum(b.amount for listing in listings for b in listing.bookings.all())
+def vendor_row(vendor, ctx=None):
+    if ctx is not None:
+        listings = ctx.listings_by_vendor.get(vendor.id, [])
+        earnings = sum(
+            b.amount for listing in listings for b in ctx.bookings_for(listing)
+        )
+    else:
+        listings = list(vendor.listings.all())
+        earnings = sum(b.amount for listing in listings for b in listing.bookings.all())
     return {
         'id': vendor.id,
         'name': vendor.name or '',
@@ -145,14 +214,17 @@ def vendor_row(vendor):
     }
 
 
-def format_vendors():
-    return [vendor_row(v) for v in User.objects.filter(role=User.Role.VENDOR)]
+def format_vendors(ctx):
+    return [vendor_row(v, ctx) for v in User.objects.filter(role=User.Role.VENDOR)]
 
 
 # --- Users -------------------------------------------------------
 
-def user_row(user):
-    bookings = list(user.bookings.all())
+def user_row(user, ctx=None):
+    bookings = (
+        ctx.bookings_by_user.get(user.id, []) if ctx is not None
+        else list(user.bookings.all())
+    )
     return {
         'id': user.id,
         'name': user.name or '',
@@ -165,12 +237,12 @@ def user_row(user):
     }
 
 
-def format_users():
+def format_users(ctx):
     """ALL customer identities — including vendors/admins who also book or
     signed in through the customer app (customer identity ≠ role)."""
     from django.db.models import Q
     return [
-        user_row(u)
+        user_row(u, ctx)
         for u in User.objects.filter(Q(is_customer=True) | Q(role=User.Role.PUBLIC))
     ]
 
@@ -218,9 +290,9 @@ def booking_row(booking, today=None):
     }
 
 
-def format_bookings():
+def format_bookings(ctx):
     today = today_ist()
-    return [booking_row(b, today) for b in Booking.objects.all()]
+    return [booking_row(b, today) for b in ctx.bookings]
 
 
 # --- Approvals (keyed by LISTING id) -----------------------------
@@ -235,13 +307,16 @@ _APPROVAL_STATUS = {
 }
 
 
-def approval_row(listing, now=None):
+def approval_row(listing, now=None, ctx=None):
     now = now or timezone.now()
     record = listing.record or {}
     detail = record.get('detail') or {}
-    district, city = _district_and_city(listing)
+    district, city = _district_and_city(listing, ctx)
     # The draft (same id) still holds the payout bucket + wizard completion.
-    draft = VenueDraft.objects.filter(pk=listing.pk).first()
+    draft = (
+        ctx.draft_for(listing.pk) if ctx is not None
+        else VenueDraft.objects.filter(pk=listing.pk).first()
+    )
     payout_mask = ''
     completion = 100
     if draft is not None:
@@ -277,20 +352,20 @@ def approval_row(listing, now=None):
     }
 
 
-def format_approvals():
+def format_approvals(ctx):
     """Base listings needing (or having gone through) admin review. Unit
     siblings never appear — approving the base cascades to its family."""
     now = timezone.now()
     rows = []
     needs_review = {Listing.Status.PENDING, Listing.Status.CHANGES, Listing.Status.REJECTED}
-    for listing in Listing.objects.select_related('vendor').all():
+    for listing in ctx.listings:
         if _unit_of(listing):
             continue
         has_history = bool(
             listing.review_timeline or listing.review_notes or listing.review_checks
         )
         if listing.status in needs_review or has_history:
-            rows.append(approval_row(listing, now))
+            rows.append(approval_row(listing, now, ctx))
     return rows
 
 
@@ -349,12 +424,13 @@ def settings_row(settings):
 
 
 def build_bootstrap():
+    ctx = BootstrapContext()   # one pass over the data, then pure Python
     return {
-        'approvals': format_approvals(),
-        'venues': format_venues(),
-        'vendors': format_vendors(),
-        'users': format_users(),
-        'bookings': format_bookings(),
+        'approvals': format_approvals(ctx),
+        'venues': format_venues(ctx),
+        'vendors': format_vendors(ctx),
+        'users': format_users(ctx),
+        'bookings': format_bookings(ctx),
         'payouts': [payout_row(p) for p in Payout.objects.all()],
         'reviews': [
             review_row(r) for r in Review.objects.filter(status=Review.Status.FLAGGED)

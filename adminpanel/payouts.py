@@ -44,56 +44,66 @@ def generate_payouts():
     today = today_ist()
     current_week = _week_start(today)
 
-    payable = (
+    # THREE queries total, regardless of how many weeks of history exist —
+    # everything else is grouped in Python. (This used to run one query per
+    # week per vendor, so it grew slower every week, forever.)
+    payable = list(
         Booking.objects.filter(walk_in=False, date__lt=current_week)
         .exclude(status__in=['refunded', 'cancelled', 'payment_pending'])
         .exclude(listing__isnull=True)
         .select_related('listing__vendor')
     )
-    first = payable.order_by('date').first()
-    if first is None:
+    if not payable:
         return
 
-    week = _week_start(first.date)
-    carry = {}  # vendor id -> negative balance carried into the next week
-    while week < current_week:
-        week_end = week + datetime.timedelta(days=6)
-        totals = {}  # vendor user -> [net, name]
-        for booking in payable.filter(date__range=(week, week_end)):
-            vendor = booking.listing.vendor
-            entry = totals.setdefault(vendor.id, [0, vendor.name or vendor.phone])
-            # PLATFORM promos are our marketing: the vendor is paid as if no
-            # discount existed (the platform funds it). Venue offers are
-            # vendor-funded — no top-up.
-            promo_topup = (
-                booking.discount_amount
-                if (booking.offer or {}).get('source') == 'platform'
-                else 0
-            )
-            if booking.method == Booking.Method.VENUE:
-                # Vendor collected the DISCOUNTED cash; we top up the platform
-                # promo and claw back our fee.
-                entry[0] += promo_topup - booking.fee
-            else:
-                entry[0] += max(0, booking.amount + promo_topup - booking.fee)
+    # (week, vendor_id) -> [net, display name]
+    weekly = {}
+    for booking in payable:
+        vendor = booking.listing.vendor
+        entry = weekly.setdefault(
+            (_week_start(booking.date), vendor.id), [0, vendor.name or vendor.phone]
+        )
+        # PLATFORM promos are our marketing: the vendor is paid as if no
+        # discount existed (the platform funds it). Venue offers are
+        # vendor-funded — no top-up.
+        promo_topup = (
+            booking.discount_amount
+            if (booking.offer or {}).get('source') == 'platform'
+            else 0
+        )
+        if booking.method == Booking.Method.VENUE:
+            # Vendor collected the DISCOUNTED cash; we top up the platform
+            # promo and claw back our fee.
+            entry[0] += promo_topup - booking.fee
+        else:
+            entry[0] += max(0, booking.amount + promo_topup - booking.fee)
 
-        for vendor_id, (net, name) in totals.items():
-            if Payout.objects.filter(
-                vendor_user_id=vendor_id, period_start=week
-            ).exists():
-                continue  # already settled — never touch, never re-carry
-            total = net + carry.get(vendor_id, 0)
-            if total <= 0:
-                carry[vendor_id] = total  # debt rolls into the next week
-                continue
-            Payout.objects.create(
-                vendor_user_id=vendor_id,
-                vendor=name,
-                period=_period_label(week, week_end),
-                period_start=week,
-                period_end=week_end,
-                gross=total,
-                status=Payout.Status.PENDING,
-            )
-            carry[vendor_id] = 0
-        week += datetime.timedelta(days=7)
+    settled = {
+        (row[1], row[0])  # (period_start, vendor_id) -> keyed as (week, vendor)
+        for row in Payout.objects.values_list('vendor_user_id', 'period_start')
+    }
+
+    carry = {}     # vendor id -> negative balance carried into the next week
+    new_rows = []
+    for week, vendor_id in sorted(weekly, key=lambda key: (key[0], key[1])):
+        net, name = weekly[(week, vendor_id)]
+        if (week, vendor_id) in settled:
+            continue  # already settled — never touch, never re-carry
+        total = net + carry.get(vendor_id, 0)
+        if total <= 0:
+            carry[vendor_id] = total  # debt rolls into the next week
+            continue
+        week_end = week + datetime.timedelta(days=6)
+        new_rows.append(Payout(
+            vendor_user_id=vendor_id,
+            vendor=name,
+            period=_period_label(week, week_end),
+            period_start=week,
+            period_end=week_end,
+            gross=total,
+            status=Payout.Status.PENDING,
+        ))
+        carry[vendor_id] = 0
+
+    if new_rows:
+        Payout.objects.bulk_create(new_rows)
