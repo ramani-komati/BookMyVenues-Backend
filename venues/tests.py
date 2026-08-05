@@ -613,6 +613,22 @@ class PublicBrowsingTests(ListingTestBase):
         response = self.client.get('/api/config')
         self.assertEqual(response.data['newBadgeDays'], 15)
 
+    def test_config_reports_payment_configuration(self):
+        from django.test import override_settings
+        with override_settings(RAZORPAY_KEY_ID='', RAZORPAY_KEY_SECRET=''):
+            off = self.client.get('/api/config').data
+        self.assertFalse(off['paymentsEnabled'])
+        self.assertEqual(off['paymentsMode'], '')
+
+        self.clear_cache()
+        with override_settings(
+            RAZORPAY_KEY_ID='rzp_test_abc', RAZORPAY_KEY_SECRET='s3cret'
+        ):
+            on = self.client.get('/api/config').data
+        self.assertTrue(on['paymentsEnabled'])
+        self.assertEqual(on['paymentsMode'], 'test')      # test vs live visible
+        self.assertEqual(on['razorpayKeyId'], 'rzp_test_abc')  # public by design
+
     def test_bad_limit_rejected(self):
         response = self.client.get('/api/venues?limit=abc')
         self.assertEqual(response.status_code, 400)

@@ -69,11 +69,24 @@ class PublicConfigView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from django.conf import settings as django_settings
+
+        from bookings.razorpay_client import configured as payments_configured
         from venues.public_views import NEW_BADGE_DAYS
 
         settings_obj = Settings.load()
+        # razorpayKeyId is PUBLIC by design (it goes into the checkout widget);
+        # the secrets never leave the server. `paymentsMode` lets the frontend
+        # tell test keys from live ones without guessing.
+        key_id = django_settings.RAZORPAY_KEY_ID
         return Response({
             'fee': settings_obj.effective_fee(),
             'feeDate': settings_obj.fee_date,
             'newBadgeDays': NEW_BADGE_DAYS,
+            'paymentsEnabled': payments_configured(),
+            'razorpayKeyId': key_id,
+            'paymentsMode': (
+                'test' if key_id.startswith('rzp_test') else
+                'live' if key_id.startswith('rzp_live') else ''
+            ),
         })
