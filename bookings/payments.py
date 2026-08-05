@@ -13,6 +13,7 @@ PENDING_HOLD_MINUTES (see _active_bookings) so abandoned checkouts free their
 slots automatically.
 """
 import json
+import logging
 
 from django.conf import settings as django_settings
 from django.db import transaction
@@ -28,6 +29,7 @@ from .models import Booking
 from .razorpay_client import (
     RazorpayError,
     create_order,
+    refund_payment,
     verify_payment_signature,
     verify_webhook_signature,
 )
@@ -39,6 +41,8 @@ from .views import (
     build_booking_fields,
     validate_booking_request,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _conflicts_excluding_self(booking):
@@ -171,6 +175,28 @@ class PaymentVerifyView(APIView):
         return Response({'booking': booking.as_record()})
 
 
+def _auto_refund(booking, payment_id):
+    """Money captured for a booking the customer already cancelled: refund it
+    at the gateway and record it. The booking stays cancelled — never revived.
+    A gateway failure leaves status 'refund_pending' so the admin Refunds
+    panel picks it up (money is never silently kept)."""
+    booking.razorpay_payment_id = payment_id or booking.razorpay_payment_id
+    try:
+        booking.refund_id = refund_payment(booking.razorpay_payment_id)
+        booking.status = 'refunded'
+        booking.refund_reason = booking.refund_reason or 'Checkout abandoned — auto-refunded'
+        booking.refund_amount = booking.amount
+    except RazorpayError:
+        logger.exception(
+            'Auto-refund FAILED for cancelled booking %s (payment %s) — '
+            'queued for manual refund', booking.id, booking.razorpay_payment_id,
+        )
+        booking.status = 'refund_pending'
+    booking.save(update_fields=[
+        'status', 'razorpay_payment_id', 'refund_id', 'refund_reason', 'refund_amount',
+    ])
+
+
 class RazorpayWebhookView(APIView):
     """POST /api/payments/webhook — signature-verified source of truth."""
 
@@ -218,7 +244,13 @@ class RazorpayWebhookView(APIView):
                 if booking.listing_id:
                     Listing.objects.select_for_update().get(pk=booking.listing_id)
                 booking.refresh_from_db()
-                if booking.status == 'payment_pending':
+                if booking.status in ('cancelled', 'refunded'):
+                    # The customer abandoned/cancelled the checkout but the
+                    # payment landed anyway (UPI-collect: approved in the UPI
+                    # app after closing the widget). NEVER resurrect the
+                    # booking — refund the capture instead.
+                    _auto_refund(booking, payment_id)
+                elif booking.status == 'payment_pending':
                     if booking.listing_id and _conflicts_excluding_self(booking):
                         # Late capture after the hold expired and the slot was
                         # re-sold — same rule as verify: queue for refund.

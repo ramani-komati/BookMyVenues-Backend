@@ -881,6 +881,54 @@ class PaymentFlowTests(BookingTestBase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_customer_can_cancel_unpaid_hold_and_slot_frees(self):
+        # Frontend closes the Razorpay widget -> DELETE the pending booking.
+        order = self.order().data
+        response = self.client.delete(f"/api/users/me/bookings/{order['bookingId']}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['cancelled'], True)
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'cancelled')  # row KEPT for late webhooks
+        self.assertEqual(self.book().status_code, 201)  # slot free immediately
+
+    def test_capture_after_cancel_auto_refunds_and_never_revives(self):
+        # UPI-collect edge: customer closes the widget, then approves in their
+        # UPI app -> money captured for a cancelled booking.
+        from unittest.mock import MagicMock, patch
+        order = self.order().data
+        self.client.delete(f"/api/users/me/bookings/{order['bookingId']}")
+
+        refund_ok = MagicMock(status_code=200)
+        refund_ok.json.return_value = {'id': 'rfnd_AUTO'}
+        no_existing = MagicMock(status_code=200)
+        no_existing.json.return_value = {'items': []}
+        with patch('bookings.razorpay_client.requests.post', return_value=refund_ok), \
+             patch('bookings.razorpay_client.requests.get', return_value=no_existing):
+            response = self._webhook('payment.captured')
+        self.assertEqual(response.status_code, 200)
+
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.status, 'refunded')      # NOT resurrected
+        self.assertEqual(booking.refund_id, 'rfnd_AUTO')  # money returned
+        self.assertEqual(booking.refund_amount, booking.amount)
+
+    def test_auto_refund_failure_queues_for_manual_refund(self):
+        from unittest.mock import MagicMock, patch
+        order = self.order().data
+        self.client.delete(f"/api/users/me/bookings/{order['bookingId']}")
+
+        broken = MagicMock(status_code=500)
+        no_existing = MagicMock(status_code=200)
+        no_existing.json.return_value = {'items': []}
+        with patch('bookings.razorpay_client.requests.post', return_value=broken), \
+             patch('bookings.razorpay_client.requests.get', return_value=no_existing):
+            self._webhook('payment.captured')
+
+        booking = Booking.objects.get(pk=order['bookingId'])
+        # Money is never silently kept — the admin Refunds panel picks it up.
+        self.assertEqual(booking.status, 'refund_pending')
+        self.assertEqual(booking.razorpay_payment_id, 'pay_WH1')
+
     def test_replayed_signature_cannot_revive_refunded_booking(self):
         # CRITICAL fix: the customer holds a valid signature from their own
         # checkout — replaying it after a refund must NOT re-confirm.

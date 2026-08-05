@@ -666,5 +666,13 @@ class CancelBookingView(APIView):
         if booking.date < today or ended_today:
             return _message('This booking is already completed.', status.HTTP_400_BAD_REQUEST)
 
-        booking.delete()  # the freed slots reappear in availability instantly
+        if booking.razorpay_order_id:
+            # Gateway-linked (paid OR unpaid soft-hold): keep the row so a late
+            # payment.captured webhook can still find it and auto-refund —
+            # deleting it would strand the customer's money. status 'cancelled'
+            # frees the slots instantly (excluded from _active_bookings).
+            booking.status = 'cancelled'
+            booking.save(update_fields=['status'])
+        else:
+            booking.delete()  # legacy/no-gateway — freed slots reappear instantly
         return Response({'cancelled': True, 'id': booking_id})
