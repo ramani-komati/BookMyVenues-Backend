@@ -23,6 +23,8 @@ ADMIN_PASSWORD = 'StrongPass123'
 
 class AdminAuthTests(APITestCase):
     def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # throttle counters live in the cache — isolate tests
         self.admin = User.objects.create_user(
             phone='9990000001', name='Anita', email=ADMIN_EMAIL,
             role=User.Role.ADMIN, password=ADMIN_PASSWORD,
@@ -55,6 +57,13 @@ class AdminAuthTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, {'otpRequired': True})
         self.assertIn('9990000001', self.sent)
+
+    def test_login_is_rate_limited(self):
+        # The admin URL is discoverable, so password guessing must be capped.
+        from django.core.cache import cache
+        cache.clear()
+        codes = [self.login(password='wrong').status_code for _ in range(12)]
+        self.assertIn(429, codes)  # throttled before 12 guesses land
 
     def test_wrong_password_rejected(self):
         response = self.login(password='nope')

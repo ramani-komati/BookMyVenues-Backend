@@ -15,6 +15,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.models import PhoneOTP, User
@@ -75,6 +76,11 @@ class AdminLoginView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    # The admin URL is public (DNS and certificate-transparency logs make any
+    # subdomain discoverable), so the login itself must resist brute force —
+    # obscurity is not a control.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request):
         admin = _admin_by_email(request.data.get('email'))
@@ -111,6 +117,8 @@ class AdminVerifyOtpView(APIView):
 
     authentication_classes = []
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'auth'
 
     def post(self, request):
         admin = _admin_by_email(request.data.get('email'))
