@@ -86,15 +86,22 @@ def _vendor_paused(listing):
 PENDING_HOLD_MINUTES = 30  # how long an unpaid Razorpay hold keeps the slot
 
 
+def exclude_dead(queryset):
+    """Drop rows that are not real bookings any more — cancelled (incl.
+    abandoned checkouts) and refunded. Shared by availability and the vendor
+    dashboard so the slot calendar and the vendor's numbers always agree."""
+    return queryset.exclude(status__in=Booking.DEAD_STATUSES)
+
+
 def _active_bookings(listing, date):
-    """The rows that HOLD time: every booking except refunded/cancelled
-    (those free their slots) and expired payment holds (abandoned checkouts
-    free their slots after PENDING_HOLD_MINUTES). Availability and the overlap
-    check both read exactly this queryset so they can never disagree."""
+    """The rows that HOLD time: everything except dead rows and EXPIRED
+    payment holds (a fresh hold still blocks the slot; an abandoned one frees
+    it after PENDING_HOLD_MINUTES). Availability and the overlap check both
+    read exactly this queryset so they can never disagree."""
     from django.utils import timezone
     cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
-    return Booking.objects.filter(listing=listing, date=date).exclude(
-        status__in=('refunded', 'cancelled')
+    return exclude_dead(
+        Booking.objects.filter(listing=listing, date=date)
     ).exclude(status='payment_pending', created_at__lt=cutoff)
 
 

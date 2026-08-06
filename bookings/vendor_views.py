@@ -31,6 +31,7 @@ from .views import (
     _message,
     _parse_unit,
     _to_int,
+    exclude_dead,
 )
 
 TODAY_BOOKINGS_LIMIT = 8
@@ -71,9 +72,13 @@ class VendorDashboardView(APIView):
         month_start = today - datetime.timedelta(days=29)   # rolling 30 days
         history_start = today - datetime.timedelta(days=59) # covers prev periods
 
-        base = Booking.objects.filter(listing__vendor=request.user).exclude(
-            status='payment_pending'   # unpaid holds are not revenue
-        )
+        # Same exclusion the availability endpoint applies when it frees a
+        # slot (cancelled/abandoned + refunded), plus unpaid holds — a hold is
+        # not a booking until it is paid. Keeps stats, the week chart,
+        # earnings and the booking lists consistent with the slot calendar.
+        base = exclude_dead(
+            Booking.objects.filter(listing__vendor=request.user)
+        ).exclude(status='payment_pending')
 
         # One lightweight query feeds ALL the sums below.
         rows = list(

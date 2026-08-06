@@ -100,10 +100,33 @@ class Booking(models.Model):
             models.Index(fields=['user', 'date']),
         ]
 
+    # Rows that neither hold a slot nor count as revenue. Availability and
+    # the vendor dashboard both exclude these, so they can never disagree
+    # about whether a booking "exists".
+    DEAD_STATUSES = ('cancelled', 'refunded')
+
+    @property
+    def display_status(self):
+        """Stored status, except that 'confirmed' becomes 'completed' once the
+        last slot has ended (IST) — the same rule the admin panel uses."""
+        from .slots import now_minutes_ist, slots_end_minute, today_ist
+
+        if self.status and self.status != 'confirmed':
+            return self.status
+        today = today_ist()
+        if self.date < today:
+            return 'completed'
+        if self.date == today:
+            end = slots_end_minute(self.slots)
+            if end and end <= now_minutes_ist():
+                return 'completed'
+        return 'confirmed'
+
     def as_record(self):
         """The camelCase booking record shape the frontend expects."""
         return {
             'id': self.id,
+            'status': self.display_status,
             'phone': self.phone or None,
             'customer': self.customer_name,
             'venueName': self.venue_name,

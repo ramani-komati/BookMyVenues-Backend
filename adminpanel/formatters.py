@@ -249,19 +249,12 @@ def format_users(ctx):
 
 # --- Bookings ----------------------------------------------------
 
-def _booking_status(booking, today):
+def _booking_status(booking, today=None):
     """Explicit admin states (refunded etc.) win; otherwise a booking is
     'completed' once its LAST SLOT HAS ENDED (IST) — time-based, not just
-    date-based, so a 06:00–08:00 booking flips the same afternoon."""
-    if booking.status and booking.status != 'confirmed':
-        return booking.status
-    if booking.date < today:
-        return 'completed'
-    if booking.date == today:
-        end = slots_end_minute(booking.slots)
-        if end and end <= now_minutes_ist():
-            return 'completed'
-    return 'confirmed'
+    date-based, so a 06:00–08:00 booking flips the same afternoon. One
+    definition, shared with the customer/vendor record via the model."""
+    return booking.display_status
 
 
 def booking_row(booking, today=None):

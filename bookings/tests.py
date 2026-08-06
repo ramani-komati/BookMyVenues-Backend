@@ -881,6 +881,36 @@ class PaymentFlowTests(BookingTestBase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_dashboard_excludes_abandoned_and_refunded(self):
+        # An abandoned checkout must not appear as a booking, nor count in
+        # the vendor's stats/earnings — mirroring the availability filter.
+        order = self.order().data
+        self.client.delete(f"/api/users/me/bookings/{order['bookingId']}")   # -> cancelled
+        Booking.objects.create(   # a refunded one too
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['10:00 – 11:00'], amount=5000, fee=20, status='refunded',
+            venue_name='Grand Palace Hall',
+        )
+        paid = Booking.objects.create(  # the only real one
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['12:00 – 13:00'], amount=620, fee=20,
+            venue_name='Grand Palace Hall',
+        )
+
+        self.client.force_authenticate(user=self.vendor)
+        data = self.client.get('/api/vendors/me/dashboard').data
+        ids = {b['id'] for b in data['allBookings']}
+        self.assertEqual(ids, {paid.id})                      # lists clean
+        self.assertEqual(data['stats']['today']['value'], 620)  # earnings clean
+        self.assertEqual(data['earnings']['total']['today'], 620)
+        self.assertEqual(data['stats']['slotsToday']['value'], 1)
+
+    def test_booking_records_expose_status(self):
+        order = self.order().data
+        self.client.delete(f"/api/users/me/bookings/{order['bookingId']}")
+        booking = Booking.objects.get(pk=order['bookingId'])
+        self.assertEqual(booking.as_record()['status'], 'cancelled')
+
     def test_customer_can_cancel_unpaid_hold_and_slot_frees(self):
         # Frontend closes the Razorpay widget -> DELETE the pending booking.
         order = self.order().data

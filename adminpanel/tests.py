@@ -1108,8 +1108,9 @@ class PayoutGenerationTests(APITestCase):
             listing=self.listing, user=self.customer, date=today_ist(),
             slots=['06:00 – 08:00'], amount=620,
         )
-        # 07:00 IST -> still running; 09:00 IST -> completed.
-        with patch('adminpanel.formatters.now_minutes_ist', return_value=7 * 60):
+        # 07:00 IST -> still running; 09:00 IST -> completed. (The rule lives
+        # on the model now, shared by the admin, vendor and customer records.)
+        with patch('bookings.slots.now_minutes_ist', return_value=7 * 60):
             self.assertEqual(self._boot()['bookings'][0]['status'], 'confirmed')
-        with patch('adminpanel.formatters.now_minutes_ist', return_value=9 * 60):
+        with patch('bookings.slots.now_minutes_ist', return_value=9 * 60):
             self.assertEqual(self._boot()['bookings'][0]['status'], 'completed')
