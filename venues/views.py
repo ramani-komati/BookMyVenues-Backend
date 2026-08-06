@@ -355,48 +355,92 @@ class VendorListingPublishView(APIView):
         return Response({'listing': listing.record}, status=status.HTTP_201_CREATED)
 
 
-class VendorListingDeleteView(APIView):
+class VendorListingDeletionRequestView(APIView):
     """
-    DELETE /api/vendors/me/listings/<id> — vendor removes a venue
-    (contract 3.6). Blocked while upcoming bookings exist (409) so
-    customers are never left with a reservation at a vanished venue.
+    POST   /api/vendors/me/listings/<id>/deletion-request — ask an admin to
+           delete this venue. The venue stays LIVE and bookable meanwhile.
+    DELETE /api/vendors/me/listings/<id>/deletion-request — change your mind.
+
+    Owner-only. Upcoming bookings do NOT block the request — that guard sits
+    at approval time, where the destructive action actually happens (and the
+    bookings may well have completed by then).
     """
 
     permission_classes = [IsVendor]
+
+    def post(self, request, listing_id):
+        listing = request.user.listings.filter(pk=listing_id).first()
+        if listing is None:
+            return _message('Listing not found.', status.HTTP_404_NOT_FOUND)
+        if listing.status == Listing.Status.DELETED:
+            return _message('This venue is already deleted.', status.HTTP_409_CONFLICT)
+
+        if listing.deletion_requested_at is None:
+            listing.deletion_requested_at = timezone.now()
+            listing.save(update_fields=['deletion_requested_at'])
+            logger.info(
+                'Vendor %s (%s) requested deletion of %s (%s)',
+                request.user.name, request.user.phone, listing.name, listing_id,
+            )
+        return Response({'requested': True, 'id': str(listing_id)})
 
     def delete(self, request, listing_id):
         listing = request.user.listings.filter(pk=listing_id).first()
         if listing is None:
             return _message('Listing not found.', status.HTTP_404_NOT_FOUND)
+        if listing.deletion_requested_at is not None:
+            listing.deletion_requested_at = None
+            listing.save(update_fields=['deletion_requested_at'])
+        return Response({'requested': False, 'id': str(listing_id)})
 
-        # Import here to avoid a circular import at module load time.
-        from bookings.models import Booking
-        from bookings.slots import today_ist
 
-        if Booking.objects.filter(listing=listing, date__gte=today_ist()).exists():
-            return _message(
-                'This venue has upcoming bookings. They must be cancelled '
-                'before the venue can be deleted.',
-                status.HTTP_409_CONFLICT,
-            )
+class VendorListingDeleteView(APIView):
+    """
+    DELETE /api/vendors/me/listings/<id> — CLOSED. Deleting a venue now
+    requires admin approval, so a vendor cannot remove one directly; the
+    gate would be bypassable if this stayed open.
+    """
 
-        logger.info(
-            'Vendor %s (%s) deleted listing %s (%s)',
-            request.user.name, request.user.phone, listing.name, listing_id,
+    permission_classes = [IsVendor]
+
+    def delete(self, request, listing_id):
+        return _message(
+            'Deleting a venue now needs admin approval. '
+            'Request it at /vendors/me/listings/<id>/deletion-request.',
+            status.HTTP_403_FORBIDDEN,
         )
-        # SOFT delete: the row stays so the admin registry keeps the venue's
-        # history (bookings and revenue remain attached instead of being
-        # orphaned). It disappears from the public catalogue and the vendor's
-        # own dashboard exactly as before.
-        now = timezone.now()
-        listing.status = Listing.Status.DELETED
-        listing.deleted_at = now
-        listing.save(update_fields=['status', 'deleted_at'])
-        # Deleting a base venue removes its pitch/screen family too.
-        Listing.objects.filter(record__detail__unitOf=str(listing.pk)).update(
-            status=Listing.Status.DELETED, deleted_at=now,
-        )
-        return Response({'deleted': True, 'id': str(listing_id)})
+
+
+def has_upcoming_bookings(listing):
+    """True while a customer still holds a reservation here — deleting then
+    would strand them."""
+    from bookings.models import Booking          # circular import at load time
+    from bookings.slots import today_ist
+    from bookings.views import exclude_dead
+
+    return exclude_dead(
+        Booking.objects.filter(listing=listing, date__gte=today_ist())
+    ).exists()
+
+
+def soft_delete_listing(listing):
+    """
+    SOFT delete: the row stays so the admin registry keeps the venue's history
+    (bookings and revenue remain attached instead of being orphaned), while it
+    disappears from the public catalogue and the vendor's dashboard. Deleting
+    a base venue removes its pitch/screen family too.
+
+    Shared by the admin approval path so a deletion always behaves identically
+    however it was triggered.
+    """
+    now = timezone.now()
+    listing.status = Listing.Status.DELETED
+    listing.deleted_at = now
+    listing.deletion_requested_at = None      # the request is now resolved
+    listing.save(update_fields=['status', 'deleted_at', 'deletion_requested_at'])
+    Listing.objects.filter(record__detail__unitOf=str(listing.pk)).update(
+        status=Listing.Status.DELETED, deleted_at=now,
+    )
 
 
 class DraftPhotoUploadView(APIView):

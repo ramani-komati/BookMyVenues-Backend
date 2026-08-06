@@ -376,6 +376,10 @@ class Listing(models.Model):
     # Admin can spotlight a venue on the home page (P-admin Phase 2).
     featured = models.BooleanField(default=False)
     deleted_at = models.DateTimeField(null=True, blank=True)
+    # The vendor has ASKED for deletion; an admin decides. Deliberately NOT a
+    # `status` value: the venue must stay live and bookable while it waits, and
+    # rejecting the request has to restore whatever status it already had.
+    deletion_requested_at = models.DateTimeField(null=True, blank=True)
 
     # Admin approval review state (checklist / notes / timeline live on the
     # LISTING now — approvals are keyed by listing id since the frontend

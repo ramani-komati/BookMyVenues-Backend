@@ -484,13 +484,18 @@ class SoftDeleteTests(APITestCase):
         )
 
     def delete_it(self):
+        """The full flow now: the vendor requests, an admin approves."""
         self.client.force_authenticate(user=self.vendor)
-        return self.client.delete(f'/api/vendors/me/listings/{self.base.id}')
+        self.client.post(f'/api/vendors/me/listings/{self.base.id}/deletion-request')
+        self.client.force_authenticate(user=self.admin)
+        return self.client.patch(
+            f'/api/admin/venues/{self.base.id}', {'status': 'deleted'}, format='json'
+        )
 
     def test_delete_soft_deletes_family_and_keeps_history(self):
         response = self.delete_it()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data, {'deleted': True, 'id': str(self.base.id)})
+        self.assertEqual(response.data['status'], 'deleted')
 
         self.base.refresh_from_db()
         self.sibling.refresh_from_db()
@@ -542,6 +547,127 @@ class SoftDeleteTests(APITestCase):
         )
         self.assertEqual(response.status_code, 409)
         self.assertIn('detail', response.data)
+
+
+class DeletionApprovalTests(APITestCase):
+    """Vendor requests deletion -> admin approves or rejects."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.admin = User.objects.create_user(
+            phone='9660000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9660000002', name='Ravi', email='dr@x.in', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(
+            phone='9660000003', name='Asha', email='drc@x.in',
+        )
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='dr-hall',
+            record={'name': 'DR Hall', 'price': 500, 'detail': {}},
+            name='DR Hall', category='hall', locality='x', pincode='560001',
+            status='live',
+        )
+        self.sibling = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='dr-hall-2',
+            record={'name': 'DR Hall — Hall 2', 'price': 500,
+                    'detail': {'unitOf': str(self.listing.id)}},
+            name='DR Hall — Hall 2', category='hall', locality='x',
+            pincode='560001', status='live',
+        )
+
+    def request_deletion(self):
+        self.client.force_authenticate(user=self.vendor)
+        return self.client.post(
+            f'/api/vendors/me/listings/{self.listing.id}/deletion-request'
+        )
+
+    def test_vendor_cannot_delete_directly_any_more(self):
+        self.client.force_authenticate(user=self.vendor)
+        response = self.client.delete(f'/api/vendors/me/listings/{self.listing.id}')
+        self.assertEqual(response.status_code, 403)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'live')   # gate not bypassable
+
+    def test_request_keeps_the_venue_live_and_bookable(self):
+        response = self.request_deletion()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'requested': True, 'id': str(self.listing.id)})
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'live')          # still live
+        self.assertIsNotNone(self.listing.deletion_requested_at)
+
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/venues').data['total'], 2)  # bookable
+
+    def test_request_is_idempotent_and_cancellable(self):
+        first = self.request_deletion().data
+        again = self.request_deletion().data
+        self.assertEqual(first, again)
+
+        cancelled = self.client.delete(
+            f'/api/vendors/me/listings/{self.listing.id}/deletion-request'
+        )
+        self.assertEqual(cancelled.data, {'requested': False, 'id': str(self.listing.id)})
+        self.listing.refresh_from_db()
+        self.assertIsNone(self.listing.deletion_requested_at)
+
+    def test_admin_sees_it_as_deletion_requested(self):
+        self.request_deletion()
+        self.client.force_authenticate(user=self.admin)
+        venues = self.client.get('/api/admin/bootstrap').data['venues']
+        row = next(v for v in venues if v['id'] == str(self.listing.id))
+        self.assertEqual(row['status'], 'deletion_requested')
+        self.assertIsNotNone(row['deletionRequestedAt'])
+
+    def test_approve_deletes_with_sibling_cascade(self):
+        self.request_deletion()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'status': 'deleted'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.listing.refresh_from_db(); self.sibling.refresh_from_db()
+        self.assertEqual(self.listing.status, 'deleted')
+        self.assertEqual(self.sibling.status, 'deleted')       # family too
+        self.assertIsNone(self.listing.deletion_requested_at)  # resolved
+
+    def test_approve_blocked_by_upcoming_bookings(self):
+        Booking.objects.create(
+            listing=self.listing, user=self.customer,
+            date=today_ist() + datetime.timedelta(days=3),
+            slots=['10:00 – 11:00'], amount=620, fee=20,
+        )
+        self.request_deletion()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'status': 'deleted'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 409)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'live')
+
+    def test_reject_restores_the_previous_status(self):
+        # A PAUSED venue that requested deletion must stay paused on reject,
+        # not be silently promoted to live.
+        Listing.objects.filter(pk=self.listing.pk).update(status='paused')
+        self.request_deletion()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.patch(
+            f'/api/admin/venues/{self.listing.id}', {'status': 'live'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200)
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'paused')        # preserved
+        self.assertIsNone(self.listing.deletion_requested_at)
 
 
 class VendorAdminDualRoleTests(APITestCase):

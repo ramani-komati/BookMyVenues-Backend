@@ -142,6 +142,11 @@ def _district_and_city(listing, ctx=None):
 
 
 def _venue_status(listing):
+    # A pending deletion request is reported to the ADMIN as its own status,
+    # while the venue's real status stays live/paused so customers can still
+    # book it until a decision is made.
+    if listing.deletion_requested_at and listing.status != Listing.Status.DELETED:
+        return 'deletion_requested'
     if listing.status == Listing.Status.LIVE:
         return 'live'
     if listing.status == Listing.Status.PAUSED:
@@ -180,6 +185,10 @@ def venue_row(listing, ctx=None):
         'hours': '06:00 – 24:00',
         'addedOn': listing.created_at.strftime('%b %Y'),
         'deletedAt': listing.deleted_at.isoformat() if listing.deleted_at else None,
+        'deletionRequestedAt': (
+            listing.deletion_requested_at.isoformat()
+            if listing.deletion_requested_at else None
+        ),
         'revenueNum': sum(b.amount for b in bookings),
         'amenities': detail.get('amenities') or [],
         'photo': record.get('image') or '',

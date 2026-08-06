@@ -18,6 +18,11 @@ urlpatterns = [
         views.VendorListingDeleteView.as_view(),
         name='listing-delete',
     ),
+    path(
+        'vendors/me/listings/<uuid:listing_id>/deletion-request',
+        views.VendorListingDeletionRequestView.as_view(),
+        name='listing-deletion-request',
+    ),
     path('venues/drafts', views.DraftCreateView.as_view(), name='draft-create'),
     path('venues/drafts/<uuid:draft_id>', views.DraftDetailView.as_view(), name='draft-detail'),
     path(

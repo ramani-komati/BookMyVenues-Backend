@@ -571,16 +571,38 @@ class VendorDashboardTests(BookingTestBase):
 
 
 class DeleteListingTests(BookingTestBase):
-    def delete_listing(self, listing_id=None):
+    def request_deletion(self, listing_id=None):
         self.client.force_authenticate(user=self.vendor)
-        return self.client.delete(
+        return self.client.post(
             f'/api/vendors/me/listings/{listing_id or self.listing.id}'
+            '/deletion-request'
         )
+
+    def delete_listing(self, listing_id=None):
+        """Vendor requests, admin approves — deletion needs approval now."""
+        self.request_deletion(listing_id)
+        admin = User.objects.filter(role=User.Role.ADMIN).first() or (
+            User.objects.create_user(
+                phone='9000000091', name='Adm', email='admdel@example.com',
+                role=User.Role.ADMIN, password='AdminPass123',
+            )
+        )
+        self.client.force_authenticate(user=admin)
+        return self.client.patch(
+            f'/api/admin/venues/{listing_id or self.listing.id}',
+            {'status': 'deleted'}, format='json',
+        )
+
+    def test_vendor_cannot_delete_without_approval(self):
+        self.client.force_authenticate(user=self.vendor)
+        response = self.client.delete(f'/api/vendors/me/listings/{self.listing.id}')
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(Listing.objects.get(pk=self.listing.id).status, 'live')
 
     def test_delete_without_bookings(self):
         response = self.delete_listing()
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data['deleted'], True)
+        self.assertEqual(response.data['status'], 'deleted')
         # SOFT delete: the row survives for the admin registry, but the venue
         # is gone from the public catalogue.
         self.listing.refresh_from_db()
@@ -615,7 +637,9 @@ class DeleteListingTests(BookingTestBase):
             role=User.Role.VENDOR,
         )
         self.client.force_authenticate(user=other_vendor)
-        response = self.client.delete(f'/api/vendors/me/listings/{self.listing.id}')
+        response = self.client.post(
+            f'/api/vendors/me/listings/{self.listing.id}/deletion-request'
+        )
         self.assertEqual(response.status_code, 404)
 
 

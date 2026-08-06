@@ -271,14 +271,42 @@ class AdminVenueUpdateView(_AdminWriteView):
             return detail('Venue not found.', status.HTTP_404_NOT_FOUND)
         if listing.status == Listing.Status.DELETED:
             return detail(
-                'This venue was deleted by its vendor and can no longer be changed.',
+                'This venue is already deleted and can no longer be changed.',
                 status.HTTP_409_CONFLICT,
             )
         data = self._body(request)
         previous, was_featured = listing.status, listing.featured
+        was_requested = listing.deletion_requested_at is not None
 
         if 'status' in data:
             value = str(data['status'])
+            if value == 'deleted':
+                # APPROVE a vendor's deletion request — the real delete.
+                from venues.views import has_upcoming_bookings, soft_delete_listing
+                if has_upcoming_bookings(listing):
+                    return detail(
+                        'This venue has upcoming bookings. They must be '
+                        'cancelled or refunded before it can be deleted.',
+                        status.HTTP_409_CONFLICT,
+                    )
+                soft_delete_listing(listing)
+                record_audit(
+                    request, 'Approved venue deletion', listing.name,
+                    _transition(previous, 'deleted'),
+                    target_id=str(listing.pk), reason=data.get('reason'),
+                )
+                return Response(venue_row(listing))
+            if value == 'live' and was_requested:
+                # REJECT the request: keep whatever status it already had
+                # (live or paused) and just clear the pending flag.
+                listing.deletion_requested_at = None
+                listing.save(update_fields=['deletion_requested_at'])
+                record_audit(
+                    request, 'Rejected venue deletion', listing.name,
+                    f'stays {listing.status}', target_id=str(listing.pk),
+                    reason=data.get('reason'),
+                )
+                return Response(venue_row(listing))
             if value == 'live':
                 listing.status = Listing.Status.LIVE
             elif value == 'paused':
