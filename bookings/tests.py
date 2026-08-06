@@ -513,6 +513,61 @@ class VendorDashboardTests(BookingTestBase):
         response = self.client.get('/api/vendors/me/dashboard')
         self.assertEqual(response.status_code, 403)
 
+    def test_stats_total_is_all_time_net_earnings(self):
+        old = today_ist() - datetime.timedelta(days=200)   # outside every window
+        # Online: 1220 paid, ₹20 fee -> 1200 net
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=old,
+            slots=['10:00 – 11:00'], amount=1220, fee=20,
+        )
+        # Pay-at-venue: same formula -> 600 net
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=old,
+            slots=['12:00 – 13:00'], amount=620, fee=20,
+            method=Booking.Method.VENUE,
+        )
+        # Walk-in: no fee -> full 800
+        Booking.objects.create(
+            listing=self.listing, user=None, date=old,
+            slots=['14:00 – 15:00'], amount=800, fee=0,
+            method=Booking.Method.WALK_IN, walk_in=True,
+        )
+        # Platform promo: vendor made whole -> (900 + 100) - 20 = 980
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=old,
+            slots=['16:00 – 17:00'], amount=900, fee=20, discount_amount=100,
+            offer={'code': 'AUG15', 'source': 'platform'},
+        )
+        # Venue-funded offer: NOT topped up -> 900 - 20 = 880
+        Booking.objects.create(
+            listing=self.listing, user=self.customer, date=old,
+            slots=['18:00 – 19:00'], amount=900, fee=20, discount_amount=100,
+            offer={'code': 'SAVE10', 'source': 'venue'},
+        )
+        # Excluded entirely:
+        for dead in ('cancelled', 'refunded', 'refund_pending', 'payment_pending'):
+            Booking.objects.create(
+                listing=self.listing, user=self.customer, date=old,
+                slots=['20:00 – 21:00'], amount=5000, fee=20, status=dead,
+            )
+
+        total = self.get_dashboard().data['stats']['total']
+        self.assertEqual(total['count'], 5)                       # dead ones dropped
+        self.assertEqual(total['online'], 1200 + 600 + 980 + 880)
+        self.assertEqual(total['walkIn'], 800)
+        self.assertEqual(total['value'], 1200 + 600 + 800 + 980 + 880)
+
+    def test_all_bookings_is_not_capped(self):
+        for index in range(25):
+            Booking.objects.create(
+                listing=self.listing, user=self.customer,
+                date=today_ist() - datetime.timedelta(days=index + 1),
+                slots=['10:00 – 11:00'], amount=620, fee=20,
+            )
+        data = self.get_dashboard().data
+        self.assertEqual(len(data['allBookings']), 25)   # complete, no cap
+        self.assertEqual(data['stats']['total']['count'], 25)
+
 
 class DeleteListingTests(BookingTestBase):
     def delete_listing(self, listing_id=None):

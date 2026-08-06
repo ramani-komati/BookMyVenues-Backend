@@ -62,6 +62,45 @@ def _trend(current, previous):
     return round((current - previous) / previous * 100)
 
 
+def _all_time_earnings(base):
+    """
+    {value, online, walkIn, count} — what the vendor has actually EARNED over
+    all time, using the same per-booking rules as the payout math:
+
+      net = amount + platform-promo top-up − the booking's frozen fee
+
+    Every channel uses that one formula: an online customer pays `amount` and
+    we keep `fee`; a pay-at-venue customer hands the vendor `amount` in cash
+    and the vendor owes us `fee`; a walk-in carries fee=0, so it is the full
+    amount. Platform promos are OUR marketing, so the vendor is made whole
+    (+ discountAmount) — venue-funded offers are not.
+
+    NOTE: this is EARNINGS, not the payout transfer. A pay-at-venue booking
+    earns amount − fee but transfers −fee, because the vendor already holds
+    the cash (see adminpanel/payouts.py).
+
+    Excludes cancelled / refunded / refund_pending / payment_pending — money
+    that was never kept.
+    """
+    value = online = walk_in_total = count = 0
+    rows = base.exclude(status='refund_pending').values(
+        'amount', 'fee', 'discount_amount', 'offer', 'walk_in', 'method',
+    )
+    for row in rows:
+        promo = (
+            row['discount_amount']
+            if (row['offer'] or {}).get('source') == 'platform' else 0
+        )
+        net = max(0, row['amount'] + promo - row['fee'])
+        value += net
+        count += 1
+        if row['walk_in'] or row['method'] == Booking.Method.WALK_IN:
+            walk_in_total += net
+        else:
+            online += net
+    return {'value': value, 'online': online, 'walkIn': walk_in_total, 'count': count}
+
+
 class VendorDashboardView(APIView):
     """GET /api/vendors/me/dashboard — everything the dashboard shows."""
 
@@ -119,6 +158,10 @@ class VendorDashboardView(APIView):
                     _sum_range(rows, prev_month_start, month_start - datetime.timedelta(days=1)),
                 ),
             },
+            # All-time NET earnings (payout math). today/week/month above are
+            # GROSS amounts booked in that window — different question, so the
+            # numbers deliberately differ.
+            'total': _all_time_earnings(base),
         }
 
         earnings = {}
