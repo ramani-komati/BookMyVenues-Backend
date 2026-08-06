@@ -34,16 +34,35 @@ def generate_code() -> str:
     return f'{secrets.randbelow(1_000_000):06d}'
 
 
+def _fast2sms_params(phone: str, code: str) -> dict:
+    """
+    Fast2SMS route parameters.
+
+    'q' (quick) is the default: it works on any recharged account and we
+    compose the message ourselves. 'otp' is Fast2SMS's dedicated OTP route —
+    cleaner, but it requires website verification on their dashboard. Switch
+    with FAST2SMS_ROUTE once that verification is done; no code change.
+    """
+    if settings.FAST2SMS_ROUTE == 'otp':
+        return {'route': 'otp', 'variables_values': code, 'numbers': phone}
+    return {
+        'route': 'q',
+        'message': (
+            f'{code} is your BookMyVenues verification code. '
+            'It expires in 5 minutes. Do not share it with anyone.'
+        ),
+        'language': 'english',
+        'flash': '0',
+        'numbers': phone,
+    }
+
+
 def _send_via_fast2sms(phone: str, code: str) -> None:
-    """Fast2SMS OTP route — delivers 'Your OTP: <code>' as a real SMS."""
+    """Send the code as a real SMS through Fast2SMS."""
     try:
         response = requests.get(
             FAST2SMS_URL,
-            params={
-                'route': 'otp',
-                'variables_values': code,
-                'numbers': phone,
-            },
+            params=_fast2sms_params(phone, code),
             headers={'authorization': settings.FAST2SMS_API_KEY},
             timeout=SMS_TIMEOUT,
         )

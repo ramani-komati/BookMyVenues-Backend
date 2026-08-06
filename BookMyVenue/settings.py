@@ -160,6 +160,9 @@ SIMPLE_JWT = {
 # 2Factor. With neither set, the OTP endpoints return an error — we never
 # print codes to the console.
 FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '')
+# 'q' (quick) works on any recharged account; 'otp' is Fast2SMS's dedicated
+# OTP route and needs website verification on their dashboard first.
+FAST2SMS_ROUTE = os.environ.get('FAST2SMS_ROUTE', 'q')
 
 TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 # SMS template name — forces SMS delivery (omitting it can trigger

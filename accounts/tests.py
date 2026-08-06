@@ -348,7 +348,23 @@ class SmsProviderTests(APITestCase):
         kwargs = mock_get.call_args[1]
         self.assertEqual(kwargs['headers']['authorization'], 'fast-key')
         self.assertEqual(kwargs['params']['numbers'], '9876543210')
-        self.assertEqual(kwargs['params']['route'], 'otp')
+        # Default route is 'q' — Fast2SMS's dedicated OTP route needs website
+        # verification, so we compose the message ourselves.
+        self.assertEqual(kwargs['params']['route'], 'q')
+        self.assertIn('123456', kwargs['params']['message'])
+
+    def test_otp_route_used_when_configured(self):
+        from django.test import override_settings
+
+        from accounts.otp import send_otp_sms
+        with override_settings(FAST2SMS_API_KEY='fast-key', FAST2SMS_ROUTE='otp'):
+            with patch(
+                'accounts.otp.requests.get', return_value=self._ok({'return': True})
+            ) as mock_get:
+                send_otp_sms('9876543210', '123456')
+        params = mock_get.call_args[1]['params']
+        self.assertEqual(params['route'], 'otp')
+        self.assertEqual(params['variables_values'], '123456')
 
     def test_falls_back_to_2factor_without_fast2sms(self):
         from django.test import override_settings
