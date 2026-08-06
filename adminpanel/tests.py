@@ -390,6 +390,66 @@ class AdminPhase3Tests(APITestCase):
         self.assertEqual(entry.target_id, str(vendor.id))  # id kept separately
 
 
+class VendorAdminDualRoleTests(APITestCase):
+    """A platform admin who ALSO runs venues (is_vendor flag) — promoting a
+    vendor to admin must never revoke their own vendor portal."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        # An admin who is also a vendor (the co-builder case).
+        self.both = User.objects.create_user(
+            phone='9880000001', name='Aravind', email='both@x.in',
+            role=User.Role.ADMIN, is_vendor=True, password=ADMIN_PASSWORD,
+        )
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.both, slug='dual-hall',
+            record={'name': 'Dual Hall', 'price': 500, 'detail': {}},
+            name='Dual Hall', category='hall', locality='x', pincode='560001',
+            status='live',
+        )
+
+    def test_vendor_portal_still_works_for_an_admin(self):
+        self.client.force_authenticate(user=self.both)
+        self.assertEqual(
+            self.client.get('/api/vendors/me/dashboard').status_code, 200
+        )
+        self.assertEqual(
+            self.client.get('/api/vendors/me/ratings').status_code, 200
+        )
+        self.assertEqual(
+            self.client.post('/api/venues/drafts', {}, format='json').status_code, 201
+        )
+
+    def test_admin_powers_still_work(self):
+        self.client.force_authenticate(user=self.both)
+        self.assertEqual(self.client.get('/api/admin/bootstrap').status_code, 200)
+
+    def test_appears_in_admin_vendors_list(self):
+        self.client.force_authenticate(user=self.both)
+        vendors = self.client.get('/api/admin/bootstrap').data['vendors']
+        self.assertIn('9880000001', {v['phone'] for v in vendors})
+
+    def test_plain_admin_has_no_vendor_access(self):
+        # Only the explicit flag grants it — admin alone never does.
+        plain = User.objects.create_user(
+            phone='9880000002', name='PlainAdmin', email='plain@x.in',
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.client.force_authenticate(user=plain)
+        self.assertEqual(
+            self.client.get('/api/vendors/me/dashboard').status_code, 403
+        )
+
+    def test_plain_vendor_has_no_admin_access(self):
+        vendor = User.objects.create_user(
+            phone='9880000003', name='JustVendor', email='jv@x.in',
+            role=User.Role.VENDOR,
+        )
+        self.client.force_authenticate(user=vendor)
+        self.assertEqual(self.client.get('/api/admin/bootstrap').status_code, 403)
+
+
 class ConsolidatedRoundTests(APITestCase):
     """New items from the consolidated backlog: refunds free slots + carry
     reason/amount, suspension cascade, walk-in live-only, payout carry-forward,

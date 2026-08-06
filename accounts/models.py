@@ -87,6 +87,17 @@ class User(AbstractBaseUser, PermissionsMixin):
     # registration. The admin panel's Users list = is_customer=True.
     is_customer = models.BooleanField(default=False)
 
+    # Vendor identity, likewise independent of `role`. Set on vendor
+    # registration. It exists so a platform ADMIN can ALSO run venues (the
+    # single `role` column can't express both) — without it, promoting a
+    # vendor to admin would silently revoke their own vendor portal.
+    is_vendor = models.BooleanField(default=False)
+
+    @property
+    def has_vendor_access(self):
+        """True for anyone who may use the vendor portal."""
+        return self.role == self.Role.VENDOR or self.is_vendor
+
     # Standard Django flags:
     is_active = models.BooleanField(default=True)   # False = account disabled
     is_staff = models.BooleanField(default=False)   # True = may open /admin/
@@ -101,6 +112,12 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     def __str__(self):
         return f'{self.name} ({self.phone})'
+
+
+def vendor_accounts_q():
+    """Q filter matching every account with vendor access (role or flag)."""
+    from django.db.models import Q
+    return Q(role=User.Role.VENDOR) | Q(is_vendor=True)
 
 
 class PhoneOTP(models.Model):

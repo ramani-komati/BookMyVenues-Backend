@@ -22,7 +22,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from .models import PhoneOTP, User
+from .models import PhoneOTP, User, vendor_accounts_q
 from .otp import OTPSendError, generate_code, send_otp_sms
 from .serializers import (
     OTPRequestSerializer,
@@ -125,7 +125,7 @@ class VendorProfileUpdateView(APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request):
-        if request.user.role != User.Role.VENDOR:
+        if not request.user.has_vendor_access:
             return _message(
                 'Only vendor accounts can access this endpoint.',
                 status.HTTP_403_FORBIDDEN,
@@ -304,7 +304,7 @@ class VendorOTPVerifyView(APIView):
         if error:
             return error
 
-        vendor = User.objects.filter(phone=phone, role=User.Role.VENDOR).first()
+        vendor = User.objects.filter(vendor_accounts_q(), phone=phone).first()
 
         if vendor is not None:
             otp.used = True
@@ -363,7 +363,7 @@ class VendorRegisterView(APIView):
                 status.HTTP_403_FORBIDDEN,
             )
 
-        if User.objects.filter(phone=phone, role=User.Role.VENDOR).exists():
+        if User.objects.filter(vendor_accounts_q(), phone=phone).exists():
             return _message('Phone already registered as a vendor.', status.HTTP_409_CONFLICT)
 
         if email and User.objects.filter(email=email).exclude(phone=phone).exists():
@@ -372,14 +372,18 @@ class VendorRegisterView(APIView):
         existing = User.objects.filter(phone=phone).first()
         if existing is not None:
             # Phone already has a customer account — upgrade it to vendor.
-            existing.role = User.Role.VENDOR
+            # Never demote an ADMIN to VENDOR — the flag carries vendor access.
+            if existing.role != User.Role.ADMIN:
+                existing.role = User.Role.VENDOR
+            existing.is_vendor = True
             existing.name = name
             existing.email = email
-            existing.save(update_fields=['role', 'name', 'email'])
+            existing.save(update_fields=['role', 'is_vendor', 'name', 'email'])
             vendor = existing
         else:
             vendor = User.objects.create_user(
-                phone=phone, name=name, email=email, role=User.Role.VENDOR,
+                phone=phone, name=name, email=email,
+                role=User.Role.VENDOR, is_vendor=True,
             )
 
         otp.used = True

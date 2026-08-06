@@ -18,7 +18,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
-from accounts.models import PhoneOTP, User
+from accounts.models import PhoneOTP, User, vendor_accounts_q
 from accounts.otp import OTPSendError, generate_code, send_otp_sms
 from bookings.models import Booking
 from venues.models import Listing, VenueDraft
@@ -289,7 +289,7 @@ class AdminVendorUpdateView(_AdminWriteView):
     Reactivating does NOT auto-relist: venues stay paused for manual review."""
 
     def patch(self, request, vendor_id):
-        vendor = User.objects.filter(pk=vendor_id, role=User.Role.VENDOR).first()
+        vendor = User.objects.filter(vendor_accounts_q(), pk=vendor_id).first()
         if vendor is None:
             return detail('Vendor not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)

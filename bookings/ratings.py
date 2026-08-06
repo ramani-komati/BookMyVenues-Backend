@@ -75,8 +75,7 @@ class VendorRatingsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        from accounts.models import User
-        if request.user.role != User.Role.VENDOR:
+        if not request.user.has_vendor_access:
             return _message(
                 'Only vendor accounts can access this endpoint.',
                 status.HTTP_403_FORBIDDEN,

@@ -14,7 +14,7 @@ from collections import defaultdict
 
 from django.utils import timezone
 
-from accounts.models import User
+from accounts.models import User, vendor_accounts_q
 from bookings.models import Booking, Rating
 from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 from venues.completion import compute_completion
@@ -215,7 +215,7 @@ def vendor_row(vendor, ctx=None):
 
 
 def format_vendors(ctx):
-    return [vendor_row(v, ctx) for v in User.objects.filter(role=User.Role.VENDOR)]
+    return [vendor_row(v, ctx) for v in User.objects.filter(vendor_accounts_q())]
 
 
 # --- Users -------------------------------------------------------
