@@ -401,8 +401,12 @@ def review_row(review):
 
 
 def audit_row(entry):
+    # The timestamp ALWAYS comes from the server clock — a client-sent time
+    # gave us rows frozen at the literal "Just now", and client clocks and
+    # timezones can't be trusted in an audit trail.
     return {
-        'time': entry.time or entry.created_at.strftime('%d %b, %H:%M'),
+        'time': entry.created_at.strftime('%d %b, %H:%M'),
+        'createdAt': entry.created_at.isoformat(),
         'admin': entry.admin,
         'action': entry.action,
         'target': entry.target,       # entity NAME (readable even after deletion)

@@ -51,10 +51,23 @@ def _to_int(value, default=0):
         return default
 
 
-def record_audit(request, action, target, change='', target_id=''):
-    """Write a server-side audit row. `target` is the entity's NAME (stays
-    readable even if the entity is later deleted); `target_id` its raw id."""
+def _transition(before, after):
+    """'pending → live' — computed from what the DB actually held, not from
+    whatever the client believed the previous state was."""
+    return f'{before} → {after}' if before != after else str(after)
+
+
+def record_audit(request, action, target, change='', target_id='', reason=None):
+    """Write THE audit row for an admin action — the server is the sole
+    logger, so an action can never happen without being recorded (a
+    client-sent entry would go missing whenever its fire-and-forget POST
+    failed). `target` is the entity's NAME (stays readable even if the
+    entity is later deleted); `target_id` its raw id. The timestamp always
+    comes from the server clock (created_at)."""
     admin = getattr(request.user, 'name', '') or getattr(request.user, 'phone', '')
+    reason = str(reason or '').strip()
+    if reason:
+        change = f'{change} · reason: {reason}' if change else f'reason: {reason}'
     AuditEntry.objects.create(
         admin=admin, action=action, target=str(target),
         target_id=str(target_id), change=str(change),
@@ -205,6 +218,7 @@ class AdminApprovalUpdateView(_AdminWriteView):
         if listing is None:
             return detail('Approval not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
+        previous = listing.status
 
         if 'status' in data:
             value = str(data['status'])
@@ -223,7 +237,24 @@ class AdminApprovalUpdateView(_AdminWriteView):
             listing.review_timeline = data['timeline']
 
         listing.save()
-        record_audit(request, 'Approval update', listing.name, listing.status, target_id=str(listing.pk))
+        if listing.status != previous:
+            actions = {
+                Listing.Status.LIVE: 'Approved venue',
+                Listing.Status.REJECTED: 'Rejected venue',
+                Listing.Status.CHANGES: 'Requested changes',
+                Listing.Status.PENDING: 'Reopened approval',
+            }
+            record_audit(
+                request, actions.get(listing.status, 'Updated approval'),
+                listing.name, _transition(previous, listing.status),
+                target_id=str(listing.pk), reason=data.get('reason'),
+            )
+        elif 'checks' in data or 'notes' in data:
+            record_audit(
+                request, 'Updated review notes' if 'notes' in data
+                else 'Updated review checklist',
+                listing.name, '', target_id=str(listing.pk),
+            )
         return Response(approval_row(listing))
 
 
@@ -239,6 +270,7 @@ class AdminVenueUpdateView(_AdminWriteView):
         if listing is None:
             return detail('Venue not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
+        previous, was_featured = listing.status, listing.featured
 
         if 'status' in data:
             value = str(data['status'])
@@ -256,8 +288,22 @@ class AdminVenueUpdateView(_AdminWriteView):
             listing.featured = bool(data['featured'])
 
         listing.save()
-        change = f"{listing.status}{' · featured' if listing.featured else ''}"
-        record_audit(request, 'Venue update', listing.name, change, target_id=str(listing.pk))
+        if listing.status != previous:
+            record_audit(
+                request,
+                'Paused venue' if listing.status == Listing.Status.PAUSED
+                else 'Unpaused venue',
+                listing.name, _transition(previous, listing.status),
+                target_id=str(listing.pk), reason=data.get('reason'),
+            )
+        if listing.featured != was_featured:
+            record_audit(
+                request,
+                'Featured venue' if listing.featured else 'Unfeatured venue',
+                listing.name,
+                f"homepage feature: {'on' if listing.featured else 'off'}",
+                target_id=str(listing.pk),
+            )
         return Response(venue_row(listing))
 
 
@@ -293,6 +339,7 @@ class AdminVendorUpdateView(_AdminWriteView):
         if vendor is None:
             return detail('Vendor not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
+        was_kyc, was_active = vendor.kyc, vendor.is_active
 
         if 'kyc' in data:
             value = str(data['kyc'])
@@ -317,8 +364,23 @@ class AdminVendorUpdateView(_AdminWriteView):
                 return detail('Invalid acc value.', status.HTTP_400_BAD_REQUEST)
 
         vendor.save()
-        record_audit(request, 'Vendor update', vendor.name or vendor.phone,
-                     f"kyc={vendor.kyc}, active={vendor.is_active}", target_id=str(vendor.pk))
+        label = vendor.name or vendor.phone
+        if vendor.kyc != was_kyc:
+            record_audit(
+                request, f'KYC {vendor.kyc}', label,
+                _transition(was_kyc, vendor.kyc), target_id=str(vendor.pk),
+                reason=data.get('reason'),
+            )
+        if vendor.is_active != was_active:
+            record_audit(
+                request,
+                'Reactivated vendor' if vendor.is_active else 'Suspended vendor',
+                label, _transition(
+                    'active' if was_active else 'suspended',
+                    'active' if vendor.is_active else 'suspended',
+                ),
+                target_id=str(vendor.pk), reason=data.get('reason'),
+            )
         return Response(vendor_row(vendor))
 
 
@@ -330,6 +392,7 @@ class AdminUserUpdateView(_AdminWriteView):
         if user is None:
             return detail('User not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
+        was_active = user.is_active
 
         if 'status' in data:
             value = str(data['status'])
@@ -341,8 +404,16 @@ class AdminUserUpdateView(_AdminWriteView):
                 return detail('Invalid status.', status.HTTP_400_BAD_REQUEST)
 
         user.save()
-        record_audit(request, 'User update', user.name or user.phone,
-                     'active' if user.is_active else 'blocked', target_id=str(user.pk))
+        if user.is_active != was_active:
+            record_audit(
+                request, 'Unblocked user' if user.is_active else 'Blocked user',
+                user.name or user.phone,
+                _transition(
+                    'active' if was_active else 'blocked',
+                    'active' if user.is_active else 'blocked',
+                ),
+                target_id=str(user.pk), reason=data.get('reason'),
+            )
         return Response(user_row(user))
 
 
@@ -354,6 +425,7 @@ class AdminBookingUpdateView(_AdminWriteView):
         if booking is None:
             return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
+        previous_status = booking.status
 
         if 'status' in data:
             value = str(data['status'])
@@ -392,8 +464,16 @@ class AdminBookingUpdateView(_AdminWriteView):
             booking.refund_amount = _to_int(data['refundAmount'], None)
 
         booking.save()
-        record_audit(request, 'Booking update', booking.venue_name or booking.id,
-                     booking.status, target_id=booking.id)
+        if booking.status != previous_status:
+            amount = booking.refund_amount or booking.amount
+            record_audit(
+                request,
+                'Issued refund' if booking.status == 'refunded' else 'Updated booking',
+                f'#{booking.id} · ₹{amount}' if booking.status == 'refunded'
+                else (booking.venue_name or booking.id),
+                _transition(previous_status, booking.status),
+                target_id=booking.id, reason=booking.refund_reason or data.get('reason'),
+            )
         return Response(booking_row(booking))
 
 
@@ -417,7 +497,11 @@ class AdminSettingsView(_AdminWriteView):
                 setattr(settings_obj, key, data[key])
 
         settings_obj.save()
-        record_audit(request, 'Settings saved', 'settings', f'fee ₹{settings_obj.booking_fee}')
+        record_audit(
+            request, 'Updated platform settings', 'Fees, categories, content',
+            f'fee ₹{settings_obj.booking_fee}'
+            + (f' eff. {settings_obj.fee_date}' if settings_obj.fee_date else ''),
+        )
         return Response(settings_row(settings_obj))
 
 
@@ -429,6 +513,7 @@ class AdminPayoutUpdateView(_AdminWriteView):
         if payout is None:
             return detail('Payout not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
+        previous_status = payout.status
 
         if 'status' in data:
             value = str(data['status'])
@@ -437,7 +522,10 @@ class AdminPayoutUpdateView(_AdminWriteView):
             payout.status = value
 
         payout.save()
-        record_audit(request, 'Payout update', payout.vendor, payout.status, target_id=str(payout.pk))
+        record_audit(
+            request, f'Payout {payout.status}', payout.vendor,
+            _transition(previous_status, payout.status), target_id=str(payout.pk),
+        )
         return Response(payout_row(payout))
 
 
@@ -461,20 +549,43 @@ class AdminReviewResolveView(_AdminWriteView):
             return detail('action must be "keep" or "remove".', status.HTTP_400_BAD_REQUEST)
 
         review.save()
-        record_audit(request, f'Review {action}', review.venue, review.reason, target_id=str(review.pk))
+        record_audit(
+            request, 'Removed review' if action == 'remove' else 'Kept review',
+            review.venue, '', target_id=str(review.pk), reason=review.reason,
+        )
         return Response(review_row(review))
 
 
 class AdminAuditView(_AdminWriteView):
-    """POST /api/admin/audit — append an audit row (panel-written)."""
+    """POST /api/admin/audit — legacy panel-written entry.
+
+    The server now logs every mutation itself, so this endpoint DEDUPES: if
+    an entry for the same target was written in the last few seconds (i.e.
+    the server already recorded this action), the panel's copy is dropped and
+    the existing row is returned. That kills the double-logging immediately,
+    without waiting for the panel to stop calling it. Entries for actions the
+    server can't see (e.g. 'Logged in') are still recorded.
+
+    The client's `time` is ignored — timestamps come from the server clock.
+    """
+
+    DEDUPE_SECONDS = 15
 
     def post(self, request):
         data = self._body(request)
+        target = str(data.get('target') or '')
+
+        recent = AuditEntry.objects.filter(
+            target=target,
+            created_at__gte=timezone.now() - datetime.timedelta(seconds=self.DEDUPE_SECONDS),
+        ).first()
+        if recent is not None:
+            return Response(audit_row(recent), status=status.HTTP_200_OK)
+
         entry = AuditEntry.objects.create(
-            time=str(data.get('time') or ''),
             admin=str(data.get('admin') or ''),
             action=str(data.get('action') or ''),
-            target=str(data.get('target') or ''),
+            target=target,
             change=str(data.get('change') or ''),
         )
         return Response(audit_row(entry), status=status.HTTP_201_CREATED)

@@ -377,6 +377,62 @@ class AdminPhase3Tests(APITestCase):
         boot = self.client.get('/api/admin/bootstrap')
         self.assertTrue(any(a['action'] == 'Logged in' for a in boot.data['audit']))
 
+    def test_audit_is_rich_and_not_duplicated(self):
+        # Server writes ONE detailed entry per action, with the real
+        # from->to (read from the DB, not trusted from the client).
+        vendor = User.objects.create_user(
+            phone='9990000021', name='Ravi', email='rv2@x.in', role=User.Role.VENDOR,
+        )
+        listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=vendor, slug='audit-hall',
+            record={'name': 'Audit Hall', 'price': 500, 'detail': {}},
+            name='Audit Hall', category='hall', locality='x', pincode='560001',
+            status='live',
+        )
+        self.client.patch(
+            f'/api/admin/venues/{listing.id}',
+            {'status': 'paused', 'reason': 'repair'}, format='json',
+        )
+        entry = AuditEntry.objects.filter(target='Audit Hall').first()
+        self.assertEqual(entry.action, 'Paused venue')
+        self.assertIn('live → paused', entry.change)
+        self.assertIn('reason: repair', entry.change)
+
+        # The panel's legacy POST for the SAME action is deduped away.
+        before = AuditEntry.objects.filter(target='Audit Hall').count()
+        response = self.client.post('/api/admin/audit', {
+            'time': 'Just now', 'admin': 'someone',
+            'action': 'Paused venue', 'target': 'Audit Hall',
+            'change': 'reason: repair',
+        }, format='json')
+        self.assertEqual(response.status_code, 200)  # 200 = deduped, not created
+        self.assertEqual(AuditEntry.objects.filter(target='Audit Hall').count(), before)
+
+    def test_audit_timestamp_comes_from_the_server(self):
+        response = self.client.post('/api/admin/audit', {
+            'time': 'Just now', 'action': 'Logged in', 'target': 'unique-target-x',
+        }, format='json')
+        self.assertEqual(response.status_code, 201)   # unseen target -> recorded
+        self.assertNotEqual(response.data['time'], 'Just now')
+        self.assertIn('createdAt', response.data)
+
+    def test_checklist_toggle_does_not_log_a_status_change(self):
+        vendor = User.objects.create_user(
+            phone='9990000022', name='R3', email='rv3@x.in', role=User.Role.VENDOR,
+        )
+        listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=vendor, slug='chk-hall',
+            record={'name': 'Chk Hall', 'price': 500, 'detail': {}},
+            name='Chk Hall', category='hall', locality='x', pincode='560001',
+            status='pending',
+        )
+        self.client.patch(
+            f'/api/admin/approvals/{listing.id}',
+            {'checks': {'photos': True}}, format='json',
+        )
+        entry = AuditEntry.objects.filter(target='Chk Hall').first()
+        self.assertEqual(entry.action, 'Updated review checklist')  # not "Approved"
+
     def test_server_writes_audit_on_write(self):
         vendor = User.objects.create_user(
             phone='9990000009', name='Ravi', email='rv@x.in', role=User.Role.VENDOR,
@@ -384,7 +440,7 @@ class AdminPhase3Tests(APITestCase):
         self.client.patch(
             f'/api/admin/vendors/{vendor.id}', {'kyc': 'verified'}, format='json'
         )
-        entry = AuditEntry.objects.filter(action='Vendor update').first()
+        entry = AuditEntry.objects.filter(action='KYC verified').first()
         self.assertIsNotNone(entry)
         self.assertEqual(entry.target, 'Ravi')             # name, not id
         self.assertEqual(entry.target_id, str(vendor.id))  # id kept separately
