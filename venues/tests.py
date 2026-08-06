@@ -747,9 +747,31 @@ class TaxonomyTests(APITestCase):
         data = self.client.get('/api/config').data
         names = [c['name'] for c in data['categories']]
         self.assertEqual(names, ['Party hall', 'Private theatre', 'Play zone',
-                                 'Resort', 'Open-air theatre'])
+                                 'Resort', 'Playstation', 'Open-air theatre'])
         play = next(c for c in data['categories'] if c['name'] == 'Play zone')
         self.assertIn('Box Cricket', play['subCategories'])
+        ps = next(c for c in data['categories'] if c['name'] == 'Playstation')
+        self.assertIn('PS5', ps['subCategories'])
+
+    def test_playstation_category_and_subcategories(self):
+        self.make('ps', 'Play Station', {'subCategories': ['PS5', 'VR Gaming']})
+        row = self.summary_for('ps')
+        self.assertEqual(row['category'], 'Playstation')
+        self.assertEqual(row['subCategories'], ['PS5', 'VR Gaming'])
+
+    def test_legacy_hall_spellings_now_match(self):
+        # The exact values GrandFun has stored in production.
+        self.make('grand', 'Party hall', {'occasions': [
+            'Others', 'Birthday', 'Anniversary', 'Bride to Be',
+            'Movie Package', 'Bachelors Party', 'Seminar / Meeting',
+        ]})
+        subs = self.summary_for('grand')['subCategories']
+        self.assertIn('Bachelor Party', subs)        # was unmatched
+        self.assertIn('Seminar & Meetings', subs)    # was unmatched
+        self.assertIn('Birthday Party', subs)
+        # Genuinely non-taxonomy values still pass through, never dropped.
+        self.assertIn('Others', subs)
+        self.assertIn('Movie Package', subs)
 
 
 class FavoritesTests(APITestCase):

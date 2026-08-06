@@ -17,7 +17,7 @@ CATEGORIES = {
         'Birthday Party', 'Anniversary Celebration', 'Bride to Be',
         'Baby Shower', 'Marriage Proposal', 'Engagement', 'Naming Ceremony',
         'Seminar & Meetings', 'Kitty Party', 'Family Gatherings',
-        'Corporate Events', 'Farewell Party',
+        'Corporate Events', 'Farewell Party', 'Bachelor Party',
     ],
     'Private theatre': [
         'Movie Screening', 'OTT Movies', 'Live Sports Screening',
@@ -34,6 +34,10 @@ CATEGORIES = {
         'Day Outing', 'Night Outing', 'Family Gateway', 'Couple stay',
         'Pool Party', 'Wedding Events', 'Campfire', 'Weekend Stay',
         'Get Together Party',
+    ],
+    'Playstation': [
+        'PS5', 'PS4', 'VR Gaming', 'Racing Simulator', 'Multiplayer Gaming',
+        'Tournament Play', 'Birthday Celebration', 'Friends Hangout',
     ],
     # Proposed — product had no list for this one yet.
     'Open-air theatre': [
@@ -58,11 +62,37 @@ _CATEGORY_ALIASES = {
     'turf': 'Play zone',
     'sports': 'Play zone',
     'resort': 'Resort',
+    'playstation': 'Playstation',
+    'play station': 'Playstation',
+    'ps5 lounge': 'Playstation',
+    'gaming lounge': 'Playstation',
     'open theatre': 'Open-air theatre',
     'open theater': 'Open-air theatre',
     'open-air theatre': 'Open-air theatre',
     'open air theatre': 'Open-air theatre',
 }
+
+
+# Legacy sub-category spellings vendors have actually typed -> canonical.
+_SUBCATEGORY_ALIASES = {
+    'bachelors party': 'Bachelor Party',
+    'bachelorette party': 'Bachelor Party',
+    'seminar / meeting': 'Seminar & Meetings',
+    'seminar/meeting': 'Seminar & Meetings',
+    'seminar and meetings': 'Seminar & Meetings',
+    'meetings': 'Seminar & Meetings',
+    'anniversary': 'Anniversary Celebration',
+    'get together': 'Get Together Party',
+    'football': 'Football Turf',
+    'ps 5': 'PS5',
+}
+
+
+def _normalise(text):
+    """'Seminar / Meeting' -> 'seminar meeting' so punctuation and separators
+    stop blocking otherwise obvious matches."""
+    cleaned = ''.join(ch if ch.isalnum() else ' ' for ch in str(text).lower())
+    return ' '.join(cleaned.split())
 
 
 def canonical_category(raw):
@@ -91,8 +121,18 @@ def canonical_sub_category(category, raw):
     for option in options:
         if option.lower() == lowered:
             return option
+
+    aliased = _SUBCATEGORY_ALIASES.get(lowered)
+    if aliased and aliased in options:
+        return aliased
+
+    normalised = _normalise(text)
     for option in options:
-        if option.lower().startswith(lowered) or lowered in option.lower():
+        if _normalise(option) == normalised:
+            return option
+    for option in options:
+        candidate = _normalise(option)
+        if candidate.startswith(normalised) or normalised in candidate:
             return option
     return text
 
