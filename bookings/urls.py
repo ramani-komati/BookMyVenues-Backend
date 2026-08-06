@@ -11,6 +11,11 @@ urlpatterns = [
     path('vendors/me/ratings', ratings.VendorRatingsView.as_view(), name='vendor-ratings'),
     path('vendors/me/walkin-bookings', vendor_views.WalkInBookingView.as_view(), name='walkin-booking'),
     path(
+        'vendors/me/bookings/<str:booking_id>/collect',
+        vendor_views.CollectBookingView.as_view(),
+        name='booking-collect',
+    ),
+    path(
         'venues/<uuid:listing_id>/availability',
         views.AvailabilityView.as_view(),
         name='venue-availability',

@@ -276,6 +276,8 @@ def booking_row(booking, today=None):
         'refundReason': booking.refund_reason,
         'refundAmount': booking.refund_amount,
         'method': booking.method,   # echoed exactly as stored (upi/card/…/venue/walk-in)
+        'collected': booking.collected,
+        'collectedAt': booking.collected_at.isoformat() if booking.collected_at else None,
         'status': _booking_status(booking, today),
         'slotsDesc': ', '.join(booking.slots),
         'slotsAmt': _rupees(booking.amount),

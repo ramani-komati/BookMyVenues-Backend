@@ -79,6 +79,12 @@ class Booking(models.Model):
 
     method = models.CharField(max_length=10, choices=Method.choices, default=Method.ONLINE)
     walk_in = models.BooleanField(default=False)
+    # DISPLAY ONLY — the vendor ticking "cash collected" for a pay-at-venue or
+    # walk-in booking. Deliberately has no effect on amounts, earnings, stats
+    # or payout math; it exists so a vendor can track who actually paid at the
+    # door (and spot no-shows).
+    collected = models.BooleanField(default=False)
+    collected_at = models.DateTimeField(null=True, blank=True)
     # Lifecycle state. 'payment_pending' = created for a Razorpay order,
     # holds the slot for PENDING_HOLD_MINUTES until paid; 'completed' is
     # derived from the date; an admin can set 'refunded' etc.
@@ -146,6 +152,8 @@ class Booking(models.Model):
             'amount': self.amount,
             'method': self.method,
             'walkIn': self.walk_in,
+            'collected': self.collected,
+            'collectedAt': self.collected_at.isoformat() if self.collected_at else None,
             'createdAt': self.created_at.isoformat(),
         }
 

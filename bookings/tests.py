@@ -1067,6 +1067,87 @@ class PaymentFlowTests(BookingTestBase):
         self.assertEqual(mock_post.call_args[1]['json'], {'amount': 30000})  # paise
 
 
+class CollectBookingTests(BookingTestBase):
+    """POST /vendors/me/bookings/:id/collect — display-only cash tick."""
+
+    def setUp(self):
+        super().setUp()
+        self.booking = Booking.objects.create(
+            listing=self.listing, user=self.customer, date=today_ist(),
+            slots=['10:00 – 11:00'], amount=600, fee=0,
+            venue_name='Grand Palace Hall', method=Booking.Method.VENUE,
+        )
+
+    def collect(self, booking_id=None, **body):
+        return self.client.post(
+            f'/api/vendors/me/bookings/{booking_id or self.booking.id}/collect',
+            body, format='json',
+        )
+
+    def test_defaults_to_not_collected(self):
+        self.assertEqual(self.booking.as_record()['collected'], False)
+        self.assertIsNone(self.booking.as_record()['collectedAt'])
+
+    def test_marks_collected_and_is_idempotent(self):
+        self.client.force_authenticate(user=self.vendor)
+        first = self.collect()
+        self.assertEqual(first.status_code, 200)
+        self.assertTrue(first.data['booking']['collected'])
+        stamp = first.data['booking']['collectedAt']
+        self.assertIsNotNone(stamp)
+
+        again = self.collect()  # repeat -> same answer, same timestamp
+        self.assertEqual(again.status_code, 200)
+        self.assertEqual(again.data['booking']['collectedAt'], stamp)
+
+    def test_can_be_undone(self):
+        self.client.force_authenticate(user=self.vendor)
+        self.collect()
+        undone = self.collect(collected=False)
+        self.assertFalse(undone.data['booking']['collected'])
+        self.assertIsNone(undone.data['booking']['collectedAt'])
+
+    def test_foreign_booking_403(self):
+        other = User.objects.create_user(
+            phone='9000000077', name='V9', email='v9@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.client.force_authenticate(user=other)
+        self.assertEqual(self.collect().status_code, 403)
+
+    def test_unknown_booking_404(self):
+        self.client.force_authenticate(user=self.vendor)
+        self.assertEqual(self.collect(booking_id='bk_nope').status_code, 404)
+
+    def test_does_not_touch_money(self):
+        # The whole point: display only. Earnings/stats must be identical.
+        self.client.force_authenticate(user=self.vendor)
+        before = self.client.get('/api/vendors/me/dashboard').data
+        self.collect()
+        after = self.client.get('/api/vendors/me/dashboard').data
+        self.assertEqual(before['stats'], after['stats'])
+        self.assertEqual(before['earnings'], after['earnings'])
+        self.assertEqual(before['week'], after['week'])
+        self.assertEqual(self.booking.amount, 600)
+
+    def test_echoed_on_customer_and_admin_views(self):
+        self.client.force_authenticate(user=self.vendor)
+        self.collect()
+
+        self.client.force_authenticate(user=self.customer)
+        mine = self.client.get('/api/users/me/bookings').data['bookings'][0]
+        self.assertTrue(mine['collected'])
+
+        admin = User.objects.create_user(
+            phone='9000000078', name='Adm', email='adm9@example.com',
+            role=User.Role.ADMIN, password='AdminPass123',
+        )
+        self.client.force_authenticate(user=admin)
+        row = self.client.get('/api/admin/bootstrap').data['bookings'][0]
+        self.assertTrue(row['collected'])
+        self.assertIsNotNone(row['collectedAt'])
+
+
 class RatingTests(BookingTestBase):
     """POST /api/venues/:venueId/ratings — one rating per completed booking."""
 

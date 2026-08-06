@@ -7,6 +7,7 @@ Error shape everywhere: {"message": "..."}.
 import datetime
 
 from django.db import transaction
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -166,6 +167,38 @@ class VendorDashboardView(APIView):
             'allBookings': all_bookings,
             'venues': venues,
         })
+
+
+class CollectBookingView(APIView):
+    """
+    POST /api/vendors/me/bookings/<id>/collect — the vendor ticks "cash
+    collected" on a pay-at-venue / walk-in booking. Owner-only, idempotent.
+
+    DISPLAY ONLY: amounts, stats, earnings and payout math are untouched.
+    Send {"collected": false} to undo a mis-tap.
+    """
+
+    permission_classes = [IsVendor]
+
+    def post(self, request, booking_id):
+        booking = Booking.objects.filter(pk=booking_id).first()
+        if booking is None:
+            return _message('Booking not found.', status.HTTP_404_NOT_FOUND)
+        if booking.listing is None or booking.listing.vendor_id != request.user.id:
+            return _message(
+                'This booking is not for one of your venues.',
+                status.HTTP_403_FORBIDDEN,
+            )
+
+        body = request.data if isinstance(request.data, dict) else {}
+        collected = body.get('collected', True) is not False
+
+        if collected != booking.collected:
+            booking.collected = collected
+            booking.collected_at = timezone.now() if collected else None
+            booking.save(update_fields=['collected', 'collected_at'])
+
+        return Response({'booking': booking.as_record()})
 
 
 class WalkInBookingView(APIView):
