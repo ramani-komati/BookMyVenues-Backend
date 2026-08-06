@@ -669,6 +669,89 @@ class OldWizardRemovedTests(DraftTestBase):
         self.assertEqual(response.status_code, 404)
 
 
+class TaxonomyTests(APITestCase):
+    """Canonical categories + flat subCategories on search results."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.vendor = User.objects.create_user(
+            phone='9500000001', name='V', email='tx@example.com',
+            role=User.Role.VENDOR,
+        )
+
+    def make(self, slug, category, detail):
+        from venues.models import Listing
+        return Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug=slug,
+            record={'name': slug, 'price': 500, 'category': category,
+                    'detail': detail},
+            name=slug, category=category, locality='x', pincode='560001',
+            status='live',
+        )
+
+    def summary_for(self, slug):
+        from django.core.cache import cache
+        cache.clear()
+        rows = self.client.get('/api/venues?limit=50').data['venues']
+        return next(r for r in rows if r['slug'] == slug)
+
+    def test_legacy_category_names_are_canonicalised(self):
+        self.make('a', 'Private Hall', {})
+        self.make('b', 'Playzone', {})
+        self.make('c', 'Box cricket', {})    # was mis-filed as a category
+        self.make('d', 'Open Theatre', {})
+        self.assertEqual(self.summary_for('a')['category'], 'Party hall')
+        self.assertEqual(self.summary_for('b')['category'], 'Play zone')
+        self.assertEqual(self.summary_for('c')['category'], 'Play zone')
+        self.assertEqual(self.summary_for('d')['category'], 'Open-air theatre')
+
+    def test_hall_occasions_become_canonical_subcategories(self):
+        self.make('hall1', 'Party hall',
+                  {'occasions': ['Birthday', 'Anniversary', 'Corporate Events']})
+        row = self.summary_for('hall1')
+        self.assertEqual(
+            row['subCategories'],
+            ['Birthday Party', 'Anniversary Celebration', 'Corporate Events'],
+        )
+
+    def test_theatre_birthday_maps_to_its_own_wording(self):
+        # Same raw value, different canonical name per category.
+        self.make('th1', 'Private theatre', {'occasions': ['Birthday']})
+        self.assertEqual(self.summary_for('th1')['subCategories'],
+                         ['Birthday Celebration'])
+
+    def test_playzone_sports_become_subcategories(self):
+        self.make('pz1', 'Play zone',
+                  {'sports': [{'name': 'Badminton'}, {'name': 'Pickleball'}]})
+        self.assertEqual(self.summary_for('pz1')['subCategories'],
+                         ['Badminton', 'Pickleball'])
+
+    def test_explicit_subcategories_field_wins_and_dedupes(self):
+        self.make('mix', 'Party hall', {
+            'subCategories': ['Baby Shower'],
+            'occasions': ['Baby Shower', 'Kitty Party'],   # duplicate + extra
+        })
+        self.assertEqual(self.summary_for('mix')['subCategories'],
+                         ['Baby Shower', 'Kitty Party'])
+
+    def test_detail_response_carries_them_too(self):
+        listing = self.make('det', 'Party hall', {'occasions': ['Engagement']})
+        from django.core.cache import cache
+        cache.clear()
+        data = self.client.get(f'/api/venues/{listing.id}').data
+        self.assertEqual(data['category'], 'Party hall')
+        self.assertEqual(data['subCategories'], ['Engagement'])
+
+    def test_config_serves_the_taxonomy(self):
+        data = self.client.get('/api/config').data
+        names = [c['name'] for c in data['categories']]
+        self.assertEqual(names, ['Party hall', 'Private theatre', 'Play zone',
+                                 'Resort', 'Open-air theatre'])
+        play = next(c for c in data['categories'] if c['name'] == 'Play zone')
+        self.assertIn('Box Cricket', play['subCategories'])
+
+
 class FavoritesTests(APITestCase):
     """Customer wishlist sync — GET/PUT /api/users/me/favorites."""
 

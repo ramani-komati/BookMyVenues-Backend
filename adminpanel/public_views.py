@@ -73,6 +73,7 @@ class PublicConfigView(APIView):
 
         from bookings.razorpay_client import configured as payments_configured
         from venues.public_views import NEW_BADGE_DAYS
+        from venues.taxonomy import taxonomy_payload
 
         settings_obj = Settings.load()
         # razorpayKeyId is PUBLIC by design (it goes into the checkout widget);
@@ -83,6 +84,9 @@ class PublicConfigView(APIView):
             'fee': settings_obj.effective_fee(),
             'feeDate': settings_obj.fee_date,
             'newBadgeDays': NEW_BADGE_DAYS,
+            # THE canonical venue taxonomy — registration and the customer
+            # filters should both read this instead of hard-coding a copy.
+            'categories': taxonomy_payload(),
             'paymentsEnabled': payments_configured(),
             'razorpayKeyId': key_id,
             'paymentsMode': (

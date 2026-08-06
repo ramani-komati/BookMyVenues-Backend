@@ -70,9 +70,19 @@ def _summary(listing, ratings=None):
         for key, value in listing.record.items()
         if key != 'detail'
     }
+    from .taxonomy import canonical_category, sub_categories_for
+
     summary['id'] = str(listing.id)
     summary['status'] = listing.status
     summary['slug'] = listing.slug
+    # Canonical taxonomy so the home nav can filter reliably: legacy category
+    # spellings are aliased ('Private Hall'/'Box cricket' -> 'Party hall'/
+    # 'Play zone') and sub-categories are flattened from wherever the vendor
+    # stored them (subCategories / occasions / sports).
+    summary['category'] = canonical_category(
+        summary.get('category') or listing.category
+    )
+    summary['subCategories'] = sub_categories_for(listing)
     summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
     if ratings is not None:
@@ -164,9 +174,14 @@ class PublicVenueDetailView(APIView):
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
 
         from bookings.ratings import venue_rating
+        from .taxonomy import canonical_category, sub_categories_for
         record = dict(listing.record)
         record['slug'] = listing.slug
         record['meta'] = _derive_meta(listing)
+        record['category'] = canonical_category(
+            record.get('category') or listing.category
+        )
+        record['subCategories'] = sub_categories_for(listing)
         average, count = venue_rating(listing)
         if average is not None:
             record['rating'] = average
