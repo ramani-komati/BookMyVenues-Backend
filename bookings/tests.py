@@ -1401,6 +1401,90 @@ class RatingTests(BookingTestBase):
         self.assertEqual(listing_row['rating'], 4.0)
 
 
+class WeekendPricingTests(BookingTestBase):
+    """Weekend rates apply by BOOKED DATE (Sat/Sun IST), with weekday
+    fallback whenever the vendor hasn't set one."""
+
+    def setUp(self):
+        super().setUp()
+        # Next Saturday and the following Monday, so the tests never depend
+        # on which day they happen to run.
+        today = today_ist()
+        self.saturday = today + datetime.timedelta(days=(5 - today.weekday()) % 7 or 7)
+        self.monday = self.saturday + datetime.timedelta(days=2)
+        assert self.saturday.weekday() == 5 and self.monday.weekday() == 0
+
+        self.weekend_listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='weekend-hall',
+            record={
+                'name': 'Weekend Hall', 'price': 600, 'weekendPrice': 900,
+                'detail': {'addons': []},
+            },
+            name='Weekend Hall', category='hall', locality='x', pincode='560001',
+        )
+
+    def book(self, date, amount, venue=None):
+        return self.client.post('/api/users/me/bookings', {
+            'venueId': str(venue.id if venue else self.weekend_listing.id),
+            'date': date.isoformat(), 'slots': ['19:00 – 21:00'],   # 2h
+            'addons': [], 'perSlot': 600, 'amount': amount,
+        }, format='json')
+
+    def test_weekday_uses_weekday_rate(self):
+        # 2h x 600 + 20 fee
+        self.assertEqual(self.book(self.monday, 1220).status_code, 201)
+
+    def test_saturday_uses_weekend_rate(self):
+        # 2h x 900 + 20 fee
+        response = self.book(self.saturday, 1820)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data['booking']['amount'], 1820)
+
+    def test_weekday_amount_on_a_weekend_is_rejected(self):
+        response = self.book(self.saturday, 1220)   # tried the weekday price
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(response.data['expectedAmount'], 1820)
+
+    def test_venue_without_weekend_price_is_unaffected(self):
+        # self.listing (from the base fixture) has no weekendPrice at all.
+        response = self.book(self.saturday, 1220, venue=self.listing)
+        self.assertEqual(response.status_code, 201)
+
+    def test_per_unit_weekend_prices(self):
+        turf = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='weekend-turf',
+            record={'name': 'Turf', 'price': 500, 'detail': {'addons': [], 'sports': [
+                {'name': 'Box Cricket', 'units': 2,
+                 'unitPrices': ['600', '700'],
+                 'weekendUnitPrices': ['900', '1000']},
+            ]}},
+            name='Turf', category='Play zone', locality='x', pincode='560001',
+        )
+        body = {
+            'venueId': str(turf.id), 'slots': ['19:00 – 21:00'],
+            'addons': [], 'sport': 'Box Cricket', 'unit': 2, 'perSlot': 700,
+        }
+        weekday = self.client.post('/api/users/me/bookings',
+            {**body, 'date': self.monday.isoformat(), 'amount': 1420},   # 2x700+20
+            format='json')
+        self.assertEqual(weekday.status_code, 201)
+        weekend = self.client.post('/api/users/me/bookings',
+            {**body, 'date': self.saturday.isoformat(), 'amount': 2020},  # 2x1000+20
+            format='json')
+        self.assertEqual(weekend.status_code, 201)
+
+    def test_availability_surfaces_the_effective_rate(self):
+        self.client.force_authenticate(user=None)
+        url = f'/api/venues/{self.weekend_listing.id}/availability?date='
+        weekday = self.client.get(url + self.monday.isoformat()).data
+        weekend = self.client.get(url + self.saturday.isoformat()).data
+        self.assertEqual(weekday['rate'], 600)
+        self.assertFalse(weekday['isWeekend'])
+        self.assertEqual(weekend['rate'], 900)
+        self.assertTrue(weekend['isWeekend'])
+
+
 class PlatformPromoTests(BookingTestBase):
     """Banner promo codes (source: 'platform') validated against active banners."""
 

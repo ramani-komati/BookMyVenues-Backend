@@ -21,6 +21,7 @@ from venues.models import Listing
 from .models import Booking
 from .slots import (
     SlotError,
+    is_weekend,
     now_minutes_ist,
     overlaps,
     parse_date,
@@ -144,31 +145,74 @@ def _parse_unit(body):
     return sport, unit, unit_label
 
 
-def _unit_rate(listing, sport, unit):
+def _price_at(values, unit):
+    """values[unit-1] as an int, or None when absent/blank."""
+    values = values or []
+    if unit is None or not (1 <= unit <= len(values)):
+        return None
+    raw = str(values[unit - 1]).strip()
+    return _to_int(raw, 'unit price') if raw else None
+
+
+def _amount_or_none(value, field):
+    text = str(value or '').strip()
+    return _to_int(text, field) if text else None
+
+
+def base_rate(listing, weekend=False):
+    """
+    The venue's hourly rate for a whole-venue booking.
+
+    Weekend (Sat/Sun IST) uses `weekendPrice` when the vendor has set one —
+    top level or under detail — otherwise the ordinary `price`. A venue with
+    no weekend price simply keeps its weekday rate, so nothing breaks.
+    """
+    record = listing.record or {}
+    if weekend:
+        for source in (record.get('weekendPrice'),
+                       (record.get('detail') or {}).get('weekendPrice')):
+            rate = _amount_or_none(source, 'weekend price')
+            if rate is not None:
+                return rate
+    return _to_int(record.get('price') or 0, 'venue price')
+
+
+def _unit_rate(listing, sport, unit, weekend=False):
     """
     The listing's hourly rate for a specific (sport, unit), or None when the
-    venue isn't priced per unit (caller then falls back to the listing price).
+    venue isn't priced per unit (caller then falls back to base_rate).
 
       playzone:     detail.sports[name==sport].unitPrices[unit-1]
       hall/theatre: detail.unitPrices[unit-1]
+
+    On a weekend the matching weekend list is preferred —
+    `weekendUnitPrices[unit-1]`, then the sport's `weekendPrice` — falling
+    back to the weekday value whenever the vendor hasn't set one.
     """
     if unit is None:
         return None
     detail = listing.record.get('detail') or {}
     if sport:
         for entry in detail.get('sports') or []:
-            if str(entry.get('name')) == sport:
-                prices = entry.get('unitPrices') or []
-                if 1 <= unit <= len(prices) and str(prices[unit - 1]).strip():
-                    return _to_int(prices[unit - 1], 'unit price')
-                if str(entry.get('price') or '').strip():
-                    return _to_int(entry.get('price'), 'sport price')
-                return None
+            if str(entry.get('name')) != sport:
+                continue
+            if weekend:
+                rate = _price_at(entry.get('weekendUnitPrices'), unit)
+                if rate is not None:
+                    return rate
+                rate = _amount_or_none(entry.get('weekendPrice'), 'sport weekend price')
+                if rate is not None:
+                    return rate
+            rate = _price_at(entry.get('unitPrices'), unit)
+            if rate is not None:
+                return rate
+            return _amount_or_none(entry.get('price'), 'sport price')
         return None
-    prices = detail.get('unitPrices') or []
-    if 1 <= unit <= len(prices) and str(prices[unit - 1]).strip():
-        return _to_int(prices[unit - 1], 'unit price')
-    return None
+    if weekend:
+        rate = _price_at(detail.get('weekendUnitPrices'), unit)
+        if rate is not None:
+            return rate
+    return _price_at(detail.get('unitPrices'), unit)
 
 
 def _addon_total(listing, requested_addons):
@@ -373,7 +417,8 @@ def _apply_offer(listing, base, offer_request):
     return discount, applied
 
 
-def compute_amount(listing, intervals, requested_addons, rate=None, offer_request=None):
+def compute_amount(listing, intervals, requested_addons, rate=None,
+                   offer_request=None, weekend=False):
     """
     Server-side total:
         base     = round(rate x minutes / 60) + sum(addon.price x qty)
@@ -385,7 +430,7 @@ def compute_amount(listing, intervals, requested_addons, rate=None, offer_reques
     actually charged, stored on the booking for payout math.
     """
     if rate is None:
-        rate = _to_int(listing.record.get('price') or 0, 'venue price')
+        rate = base_rate(listing, weekend)
     slot_base = round(rate * total_minutes(intervals) / 60)
     addon_total, cleaned = _addon_total(listing, requested_addons)
     base = slot_base + addon_total
@@ -401,6 +446,32 @@ def _slot_start(text):
         return parse_slots([text])[0][0]
     except SlotError:
         return 0
+
+
+def _rates_for(listing, date):
+    """The effective rates for this DATE — what a booking will actually be
+    charged, so the client never has to guess weekday vs weekend."""
+    weekend = is_weekend(date)
+    detail = listing.record.get('detail') or {}
+    unit_rates = []
+    for entry in detail.get('sports') or []:
+        name = str(entry.get('name') or '')
+        for unit in range(1, int(entry.get('units') or 1) + 1):
+            unit_rates.append({
+                'sport': name, 'unit': unit,
+                'rate': _unit_rate(listing, name, unit, weekend),
+            })
+    if not unit_rates:
+        for unit in range(1, len(detail.get('unitPrices') or []) + 1):
+            unit_rates.append({
+                'sport': None, 'unit': unit,
+                'rate': _unit_rate(listing, '', unit, weekend),
+            })
+    return {
+        'rate': base_rate(listing, weekend),
+        'isWeekend': weekend,
+        'unitRates': unit_rates,
+    }
 
 
 def _availability(listing, date):
@@ -425,11 +496,13 @@ def _availability(listing, date):
         for (sport, unit), ranges in sorted(per_unit.items(), key=lambda kv: (kv[0][0], kv[0][1]))
     ]
 
-    return {
+    payload = {
         'date': date.isoformat(),
         'booked': sorted(booked, key=_slot_start),
         'bookedUnits': booked_units,
     }
+    payload.update(_rates_for(listing, date))   # rate / isWeekend / unitRates
+    return payload
 
 
 class AvailabilityView(APIView):
@@ -491,10 +564,13 @@ def validate_booking_request(body):
         date = parse_date(body.get('date'))
         intervals = parse_slots(body.get('slots'))
         sport, unit, unit_label = _parse_unit(body)
-        rate = _unit_rate(listing, sport, unit)  # None -> listing price
+        # Rate depends on the DATE BEING BOOKED: weekend prices apply on
+        # Sat/Sun (IST), falling back to the weekday rate when unset.
+        weekend = is_weekend(date)
+        rate = _unit_rate(listing, sport, unit, weekend)  # None -> base rate
         amount, addons, applied_offer, discount, fee = compute_amount(
             listing, intervals, body.get('addons'), rate=rate,
-            offer_request=body.get('offer'),
+            offer_request=body.get('offer'), weekend=weekend,
         )
         client_amount = _to_int(body.get('amount'), 'amount')
         per_slot = _to_int(

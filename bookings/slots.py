@@ -105,6 +105,12 @@ def parse_date(text):
         raise SlotError('date must look like YYYY-MM-DD.')
 
 
+def is_weekend(date):
+    """Saturday or Sunday. Booking dates are already IST calendar dates
+    (parse_date / today_ist), so no timezone maths is needed here."""
+    return date.weekday() >= 5
+
+
 def today_ist():
     return datetime.datetime.now(IST).date()
 
