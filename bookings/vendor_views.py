@@ -75,7 +75,7 @@ def _trend(current, previous):
     return round((current - previous) / previous * 100)
 
 
-def _all_time_earnings(base):
+def _all_time_earnings(bookings):
     """
     {value, online, walkIn, count} — what the vendor has actually EARNED over
     all time, using the same per-booking rules as the payout math:
@@ -96,14 +96,18 @@ def _all_time_earnings(base):
     that was never kept.
     """
     value = online = walk_in_total = count = 0
-    rows = base.exclude(status='refund_pending').values(
-        'amount', 'fee', 'discount_amount', 'offer', 'walk_in', 'method',
-    )
-    for row in rows:
+    for booking in bookings:
+        if booking.status == 'refund_pending':
+            continue
+        row = {
+            'amount': booking.amount, 'fee': booking.fee,
+            'discount_amount': booking.discount_amount, 'offer': booking.offer,
+            'walk_in': booking.walk_in, 'method': booking.method,
+        }
         net = booking_net(row)
         value += net
         count += 1
-        if row['walk_in'] or row['method'] == Booking.Method.WALK_IN:
+        if booking.walk_in or booking.method == Booking.Method.WALK_IN:
             walk_in_total += net
         else:
             online += net
@@ -129,15 +133,22 @@ class VendorDashboardView(APIView):
             Booking.objects.filter(listing__vendor=request.user)
         ).exclude(status='payment_pending')
 
-        # One lightweight query feeds ALL the sums below.
-        rows = list(
-            base.filter(date__gte=history_start).values(
-                'date', 'amount', 'fee', 'discount_amount', 'offer',
-                'walk_in', 'method', 'slots',
-            )
-        )
-        for row in rows:
+        # ONE query for the vendor's bookings — the period sums, today's
+        # list, allBookings and the all-time total are all derived from it
+        # in Python. (It used to hit this table three separate times.)
+        bookings = list(base.order_by('-created_at'))
+        rows = []
+        for booking in bookings:
+            if booking.date < history_start:
+                continue
+            row = {
+                'date': booking.date, 'amount': booking.amount,
+                'fee': booking.fee, 'discount_amount': booking.discount_amount,
+                'offer': booking.offer, 'walk_in': booking.walk_in,
+                'method': booking.method, 'slots': booking.slots,
+            }
             row['net'] = booking_net(row)
+            rows.append(row)
 
         yesterday = today - datetime.timedelta(days=1)
         prev_week_start = week_start - datetime.timedelta(days=7)
@@ -174,7 +185,7 @@ class VendorDashboardView(APIView):
             # All-time net earnings. today/week/month above use the SAME
             # net-per-booking rule, just windowed — every figure on this
             # dashboard answers the same question.
-            'total': _all_time_earnings(base),
+            'total': _all_time_earnings(bookings),
         }
 
         earnings = {}
@@ -195,7 +206,10 @@ class VendorDashboardView(APIView):
                 'walkIn': _sum_range(rows, day, day, walk_in=True),
             })
 
-        todays = base.filter(date=today).order_by('created_at')[:TODAY_BOOKINGS_LIMIT]
+        todays = sorted(
+            (b for b in bookings if b.date == today),
+            key=lambda b: b.created_at,
+        )[:TODAY_BOOKINGS_LIMIT]
         today_bookings = [
             {
                 'time': booking.slots[0] if booking.slots else '',
@@ -206,10 +220,7 @@ class VendorDashboardView(APIView):
             for booking in todays
         ]
 
-        all_bookings = [
-            booking.as_record()
-            for booking in base.order_by('-created_at')
-        ]
+        all_bookings = [booking.as_record() for booking in bookings]
 
         from .ratings import venue_ratings_map
         own_listings = list(

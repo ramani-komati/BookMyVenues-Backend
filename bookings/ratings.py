@@ -6,7 +6,7 @@ the DB). The aggregate is computed over the venue SET — the base listing plus
 its "— Pitch/Screen N" unit siblings — because they are one physical venue.
 Error shape: {"message": "..."} (customer app conventions).
 """
-from django.db.models import Avg, Count
+from django.db.models import Avg, Count, Q
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -49,11 +49,11 @@ def venue_rating(listing):
 
 def venue_ratings_map(listings):
     """
-    {listing_id: (average, count)} for a whole page of venues in TWO queries,
+    {listing_id: (average, count)} for a whole page of venues in ONE query,
     folded per venue set (a rating on "— Pitch 2" counts for its base).
 
-    Called once per list response; the per-venue venue_rating() would cost
-    two queries EACH, which is what made the venue list slow.
+    Called once per list response; the per-venue venue_rating() would cost two
+    queries EACH, which is what made the venue list slow.
     """
     listings = list(listings)
     if not listings:
@@ -62,26 +62,22 @@ def venue_ratings_map(listings):
     base_of = {str(l.id): _base_id(l) for l in listings}
     bases = set(base_of.values())
 
-    # Every listing id belonging to those venue sets: the bases themselves
-    # plus any unit siblings pointing at them.
-    members = {base: {base} for base in bases}
-    siblings = Listing.objects.filter(
-        record__detail__unitOf__in=list(bases)
-    ).values_list('id', 'record')
-    for sibling_id, record in siblings:
-        base = str(((record or {}).get('detail') or {}).get('unitOf') or '').strip()
-        if base in members:
-            members[base].add(str(sibling_id))
+    # Ratings on the base venues themselves OR on any of their unit siblings,
+    # fetched with each rated listing's record so we can fold without a second
+    # round trip.
+    rows = Rating.objects.filter(
+        Q(listing_id__in=list(bases))
+        | Q(listing__record__detail__unitOf__in=list(bases))
+    ).values_list('listing_id', 'stars', 'listing__record')
 
-    owner = {mid: base for base, ids in members.items() for mid in ids}
     totals = {}
-    rated = Rating.objects.filter(
-        listing_id__in=list(owner)
-    ).values_list('listing_id', 'stars')
-    for listing_id, stars in rated:
-        entry = totals.setdefault(owner[str(listing_id)], [0, 0])
-        entry[0] += stars
-        entry[1] += 1
+    for listing_id, stars, record in rows:
+        unit_of = str(((record or {}).get('detail') or {}).get('unitOf') or '').strip()
+        base = unit_of or str(listing_id)
+        if base in bases:
+            entry = totals.setdefault(base, [0, 0])
+            entry[0] += stars
+            entry[1] += 1
 
     return {
         listing_id: (
