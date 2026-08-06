@@ -227,7 +227,17 @@ class VendorDashboardView(APIView):
             request.user.listings.exclude(status=Listing.Status.DELETED)
         )
         venue_ratings = venue_ratings_map(own_listings)
-        venues = [_summary(listing, venue_ratings) for listing in own_listings]
+        venues = []
+        for listing in own_listings:
+            row = _summary(listing, venue_ratings)
+            # Vendor-only: drives the "Deletion requested" chip and the
+            # Cancel-request button. Deliberately NOT in the public summary —
+            # customers have no business seeing a pending deletion.
+            row['deletionRequestedAt'] = (
+                listing.deletion_requested_at.isoformat()
+                if listing.deletion_requested_at else None
+            )
+            venues.append(row)
 
         return Response({
             'stats': stats,

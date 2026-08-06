@@ -617,6 +617,22 @@ class DeletionApprovalTests(APITestCase):
         self.listing.refresh_from_db()
         self.assertIsNone(self.listing.deletion_requested_at)
 
+    def test_vendor_dashboard_shows_the_pending_request(self):
+        self.request_deletion()
+        self.client.force_authenticate(user=self.vendor)
+        venues = self.client.get('/api/vendors/me/dashboard').data['venues']
+        row = next(v for v in venues if v['id'] == str(self.listing.id))
+        self.assertIsNotNone(row['deletionRequestedAt'])   # drives the chip
+        self.assertEqual(row['status'], 'live')            # still bookable
+
+    def test_public_catalogue_never_leaks_the_request(self):
+        self.request_deletion()
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_authenticate(user=None)
+        row = self.client.get('/api/venues').data['venues'][0]
+        self.assertNotIn('deletionRequestedAt', row)
+
     def test_admin_sees_it_as_deletion_requested(self):
         self.request_deletion()
         self.client.force_authenticate(user=self.admin)
