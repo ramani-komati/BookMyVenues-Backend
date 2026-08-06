@@ -43,15 +43,28 @@ def _is_walk_in(booking):
     return booking['walk_in'] or booking['method'] == Booking.Method.WALK_IN
 
 
+def booking_net(row):
+    """What the VENDOR earns from one booking: amount + platform-promo
+    top-up − the booking's frozen fee. One formula for every channel (see
+    _all_time_earnings). `row` is a values() dict or anything dict-like."""
+    promo = (
+        row['discount_amount']
+        if (row['offer'] or {}).get('source') == 'platform' else 0
+    )
+    return max(0, row['amount'] + promo - row['fee'])
+
+
 def _sum_range(rows, start, end, *, walk_in=None):
-    """Sum amounts for date range [start, end]; optionally one channel."""
+    """Sum NET earnings for date range [start, end]; optionally one channel.
+    Net, not gross, so every figure on the dashboard answers the same
+    question as stats.total."""
     total = 0
     for row in rows:
         if not (start <= row['date'] <= end):
             continue
         if walk_in is not None and _is_walk_in(row) != walk_in:
             continue
-        total += row['amount']
+        total += row['net']
     return total
 
 
@@ -87,11 +100,7 @@ def _all_time_earnings(base):
         'amount', 'fee', 'discount_amount', 'offer', 'walk_in', 'method',
     )
     for row in rows:
-        promo = (
-            row['discount_amount']
-            if (row['offer'] or {}).get('source') == 'platform' else 0
-        )
-        net = max(0, row['amount'] + promo - row['fee'])
+        net = booking_net(row)
         value += net
         count += 1
         if row['walk_in'] or row['method'] == Booking.Method.WALK_IN:
@@ -122,9 +131,13 @@ class VendorDashboardView(APIView):
 
         # One lightweight query feeds ALL the sums below.
         rows = list(
-            base.filter(date__gte=history_start)
-            .values('date', 'amount', 'walk_in', 'method', 'slots')
+            base.filter(date__gte=history_start).values(
+                'date', 'amount', 'fee', 'discount_amount', 'offer',
+                'walk_in', 'method', 'slots',
+            )
         )
+        for row in rows:
+            row['net'] = booking_net(row)
 
         yesterday = today - datetime.timedelta(days=1)
         prev_week_start = week_start - datetime.timedelta(days=7)
@@ -158,9 +171,9 @@ class VendorDashboardView(APIView):
                     _sum_range(rows, prev_month_start, month_start - datetime.timedelta(days=1)),
                 ),
             },
-            # All-time NET earnings (payout math). today/week/month above are
-            # GROSS amounts booked in that window — different question, so the
-            # numbers deliberately differ.
+            # All-time net earnings. today/week/month above use the SAME
+            # net-per-booking rule, just windowed — every figure on this
+            # dashboard answers the same question.
             'total': _all_time_earnings(base),
         }
 

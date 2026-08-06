@@ -278,6 +278,8 @@ def booking_row(booking, today=None):
         'unitLabel': booking.unit_label or None,
         'refundReason': booking.refund_reason,
         'refundAmount': booking.refund_amount,
+        'offer': booking.offer or None,        # {code,title,type,value,source}
+        'discountAmount': booking.discount_amount,
         'method': booking.method,   # echoed exactly as stored (upi/card/…/venue/walk-in)
         'collected': booking.collected,
         'collectedAt': booking.collected_at.isoformat() if booking.collected_at else None,

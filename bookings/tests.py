@@ -443,7 +443,7 @@ class VendorDashboardTests(BookingTestBase):
         )
         Booking.objects.create(
             listing=self.listing, user=None, date=today,
-            slots=['10:00 – 12:00'], amount=1200, customer_name='Ramesh',
+            slots=['10:00 – 12:00'], amount=1200, fee=0, customer_name='Ramesh',
             venue_name='Grand Palace Hall',
             method=Booking.Method.WALK_IN, walk_in=True,
         )
@@ -465,23 +465,24 @@ class VendorDashboardTests(BookingTestBase):
         response = self.get_dashboard()
         self.assertEqual(response.status_code, 200)
 
+        # All figures are NET: each booking's amount minus its frozen fee.
         stats = response.data['stats']
-        self.assertEqual(stats['today']['value'], 2120)       # 920 + 1200
+        self.assertEqual(stats['today']['value'], 2100)   # (920-20) + 1200
         self.assertEqual(stats['slotsToday']['value'], 2)
-        self.assertEqual(stats['week']['value'], 2620)        # + 500
-        self.assertEqual(stats['month']['value'], 3620)       # + 1000
+        self.assertEqual(stats['week']['value'], 2580)    # + (500-20)
+        self.assertEqual(stats['month']['value'], 3560)   # + (1000-20)
 
         earnings = response.data['earnings']
-        self.assertEqual(earnings['walkIn']['today'], 1200)
-        self.assertEqual(earnings['online']['today'], 920)
-        self.assertEqual(earnings['total']['month'], 3620)
+        self.assertEqual(earnings['walkIn']['today'], 1200)  # no fee on walk-ins
+        self.assertEqual(earnings['online']['today'], 900)
+        self.assertEqual(earnings['total']['month'], 3560)
 
     def test_week_chart_has_7_days(self):
         self.seed_bookings()
         week = self.get_dashboard().data['week']
         self.assertEqual(len(week), 7)
-        self.assertEqual(week[-1]['value'], 2120)  # last entry = today
-        self.assertEqual(week[-1]['online'], 920)
+        self.assertEqual(week[-1]['value'], 2100)  # last entry = today, net
+        self.assertEqual(week[-1]['online'], 900)
         self.assertEqual(week[-1]['walkIn'], 1200)
 
     def test_today_bookings_and_all_bookings(self):
@@ -964,9 +965,10 @@ class PaymentFlowTests(BookingTestBase):
         self.client.force_authenticate(user=self.vendor)
         data = self.client.get('/api/vendors/me/dashboard').data
         ids = {b['id'] for b in data['allBookings']}
-        self.assertEqual(ids, {paid.id})                      # lists clean
-        self.assertEqual(data['stats']['today']['value'], 620)  # earnings clean
-        self.assertEqual(data['earnings']['total']['today'], 620)
+        self.assertEqual(ids, {paid.id})                        # lists clean
+        # Figures are net: the ₹620 booking minus its ₹20 frozen fee.
+        self.assertEqual(data['stats']['today']['value'], 600)
+        self.assertEqual(data['earnings']['total']['today'], 600)
         self.assertEqual(data['stats']['slotsToday']['value'], 1)
 
     def test_booking_records_expose_status(self):
