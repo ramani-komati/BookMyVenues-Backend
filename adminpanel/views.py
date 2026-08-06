@@ -269,6 +269,11 @@ class AdminVenueUpdateView(_AdminWriteView):
         listing = Listing.objects.filter(pk=listing_id).first()
         if listing is None:
             return detail('Venue not found.', status.HTTP_404_NOT_FOUND)
+        if listing.status == Listing.Status.DELETED:
+            return detail(
+                'This venue was deleted by its vendor and can no longer be changed.',
+                status.HTTP_409_CONFLICT,
+            )
         data = self._body(request)
         previous, was_featured = listing.status, listing.featured
 

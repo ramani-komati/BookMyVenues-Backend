@@ -380,13 +380,22 @@ class VendorListingDeleteView(APIView):
                 status.HTTP_409_CONFLICT,
             )
 
-        # Deletions are irreversible — log who did it, so "where did this
-        # venue go?" is always answerable from the server logs.
         logger.info(
             'Vendor %s (%s) deleted listing %s (%s)',
             request.user.name, request.user.phone, listing.name, listing_id,
         )
-        listing.delete()  # past bookings survive (listing FK is SET_NULL)
+        # SOFT delete: the row stays so the admin registry keeps the venue's
+        # history (bookings and revenue remain attached instead of being
+        # orphaned). It disappears from the public catalogue and the vendor's
+        # own dashboard exactly as before.
+        now = timezone.now()
+        listing.status = Listing.Status.DELETED
+        listing.deleted_at = now
+        listing.save(update_fields=['status', 'deleted_at'])
+        # Deleting a base venue removes its pitch/screen family too.
+        Listing.objects.filter(record__detail__unitOf=str(listing.pk)).update(
+            status=Listing.Status.DELETED, deleted_at=now,
+        )
         return Response({'deleted': True, 'id': str(listing_id)})
 
 

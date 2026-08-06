@@ -525,7 +525,14 @@ class DeleteListingTests(BookingTestBase):
         response = self.delete_listing()
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['deleted'], True)
-        self.assertFalse(Listing.objects.filter(pk=self.listing.id).exists())
+        # SOFT delete: the row survives for the admin registry, but the venue
+        # is gone from the public catalogue.
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.status, 'deleted')
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/venues').data['total'], 0)
 
     def test_blocked_by_upcoming_bookings(self):
         self.book()
@@ -533,7 +540,7 @@ class DeleteListingTests(BookingTestBase):
         self.assertEqual(response.status_code, 409)
         self.assertTrue(Listing.objects.filter(pk=self.listing.id).exists())
 
-    def test_past_bookings_survive_deletion(self):
+    def test_past_bookings_stay_attached_after_deletion(self):
         past = today_ist() - datetime.timedelta(days=5)
         booking = Booking.objects.create(
             listing=self.listing, user=self.customer, date=past,
@@ -541,8 +548,10 @@ class DeleteListingTests(BookingTestBase):
         )
         self.delete_listing()
         booking.refresh_from_db()
-        self.assertIsNone(booking.listing)  # link cleared...
-        self.assertEqual(booking.venue_name, 'Grand Palace Hall')  # ...history kept
+        # Soft delete keeps the link, so the admin registry can still show the
+        # deleted venue's bookings and revenue (they used to be orphaned).
+        self.assertEqual(booking.listing_id, self.listing.id)
+        self.assertEqual(booking.venue_name, 'Grand Palace Hall')
 
     def test_foreign_listing_404(self):
         other_vendor = User.objects.create_user(

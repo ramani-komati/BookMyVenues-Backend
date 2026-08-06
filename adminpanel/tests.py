@@ -446,6 +446,104 @@ class AdminPhase3Tests(APITestCase):
         self.assertEqual(entry.target_id, str(vendor.id))  # id kept separately
 
 
+class SoftDeleteTests(APITestCase):
+    """Vendor deletion keeps the row so the admin registry retains history."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.admin = User.objects.create_user(
+            phone='9770000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9770000002', name='Ravi', email='sd@x.in', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(
+            phone='9770000003', name='Asha', email='sdc@x.in',
+        )
+        self.base = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='sd-hall',
+            record={'name': 'SD Hall', 'price': 500, 'detail': {}},
+            name='SD Hall', category='hall', locality='x', pincode='560001',
+            status='live',
+        )
+        self.sibling = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='sd-hall-2',
+            record={'name': 'SD Hall — Hall 2', 'price': 500,
+                    'detail': {'unitOf': str(self.base.id)}},
+            name='SD Hall — Hall 2', category='hall', locality='x',
+            pincode='560001', status='live',
+        )
+        # Past booking — its revenue must stay attached after deletion.
+        self.past = Booking.objects.create(
+            listing=self.base, user=self.customer,
+            date=today_ist() - datetime.timedelta(days=3),
+            slots=['10:00 – 11:00'], amount=900, fee=20,
+            venue_name='SD Hall', customer_name='Asha',
+        )
+
+    def delete_it(self):
+        self.client.force_authenticate(user=self.vendor)
+        return self.client.delete(f'/api/vendors/me/listings/{self.base.id}')
+
+    def test_delete_soft_deletes_family_and_keeps_history(self):
+        response = self.delete_it()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'deleted': True, 'id': str(self.base.id)})
+
+        self.base.refresh_from_db()
+        self.sibling.refresh_from_db()
+        self.assertEqual(self.base.status, 'deleted')
+        self.assertEqual(self.sibling.status, 'deleted')   # family goes too
+        self.assertIsNotNone(self.base.deleted_at)
+        # History stays attached rather than being orphaned:
+        self.past.refresh_from_db()
+        self.assertEqual(self.past.listing_id, self.base.id)
+
+    def test_gone_from_public_catalogue_and_vendor_dashboard(self):
+        self.delete_it()
+        from django.core.cache import cache
+        cache.clear()
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/venues').data['total'], 0)
+
+        self.client.force_authenticate(user=self.vendor)
+        dash = self.client.get('/api/vendors/me/dashboard').data
+        self.assertEqual(dash['venues'], [])
+
+    def test_still_409s_with_upcoming_bookings(self):
+        Booking.objects.create(
+            listing=self.base, user=self.customer,
+            date=today_ist() + datetime.timedelta(days=2),
+            slots=['10:00 – 11:00'], amount=900, fee=20,
+        )
+        self.assertEqual(self.delete_it().status_code, 409)
+        self.base.refresh_from_db()
+        self.assertEqual(self.base.status, 'live')  # untouched
+
+    def test_admin_registry_keeps_it_with_revenue(self):
+        self.delete_it()
+        self.client.force_authenticate(user=self.admin)
+        data = self.client.get('/api/admin/bootstrap').data
+        row = next(v for v in data['venues'] if v['id'] == str(self.base.id))
+        self.assertEqual(row['status'], 'deleted')
+        self.assertIsNotNone(row['deletedAt'])
+        self.assertEqual(row['revenueNum'], 900)   # history intact
+        self.assertEqual(row['bookings'], 1)
+        # ...and it leaves the approvals queue.
+        self.assertNotIn(str(self.base.id), {a['id'] for a in data['approvals']})
+
+    def test_admin_cannot_patch_a_deleted_venue(self):
+        self.delete_it()
+        self.client.force_authenticate(user=self.admin)
+        response = self.client.patch(
+            f'/api/admin/venues/{self.base.id}', {'status': 'live'}, format='json'
+        )
+        self.assertEqual(response.status_code, 409)
+        self.assertIn('detail', response.data)
+
+
 class VendorAdminDualRoleTests(APITestCase):
     """A platform admin who ALSO runs venues (is_vendor flag) — promoting a
     vendor to admin must never revoke their own vendor portal."""

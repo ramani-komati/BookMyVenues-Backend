@@ -354,6 +354,8 @@ class Listing(models.Model):
         PAUSED = 'paused', 'Paused'      # hidden by an admin (not public)
         CHANGES = 'changes', 'Changes'   # admin requested changes (not public)
         REJECTED = 'rejected', 'Rejected'  # admin rejected (not public)
+        DELETED = 'deleted', 'Deleted'   # vendor removed it — soft-deleted so
+        # the admin registry keeps its history (bookings, revenue) attached
 
     id = models.UUIDField(primary_key=True, editable=False)
     vendor = models.ForeignKey(
@@ -373,6 +375,7 @@ class Listing(models.Model):
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
     # Admin can spotlight a venue on the home page (P-admin Phase 2).
     featured = models.BooleanField(default=False)
+    deleted_at = models.DateTimeField(null=True, blank=True)
 
     # Admin approval review state (checklist / notes / timeline live on the
     # LISTING now — approvals are keyed by listing id since the frontend

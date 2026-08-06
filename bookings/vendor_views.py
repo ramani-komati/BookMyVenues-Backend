@@ -156,7 +156,9 @@ class VendorDashboardView(APIView):
         ]
 
         from .ratings import venue_ratings_map
-        own_listings = list(request.user.listings.all())
+        own_listings = list(
+            request.user.listings.exclude(status=Listing.Status.DELETED)
+        )
         venue_ratings = venue_ratings_map(own_listings)
         venues = [_summary(listing, venue_ratings) for listing in own_listings]
 

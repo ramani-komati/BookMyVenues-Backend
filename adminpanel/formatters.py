@@ -146,6 +146,8 @@ def _venue_status(listing):
         return 'live'
     if listing.status == Listing.Status.PAUSED:
         return 'paused'
+    if listing.status == Listing.Status.DELETED:
+        return 'deleted'
     return 'draft'
 
 
@@ -177,6 +179,7 @@ def venue_row(listing, ctx=None):
         'packages': str(len(detail.get('packages') or [])),
         'hours': '06:00 – 24:00',
         'addedOn': listing.created_at.strftime('%b %Y'),
+        'deletedAt': listing.deleted_at.isoformat() if listing.deleted_at else None,
         'revenueNum': sum(b.amount for b in bookings),
         'amenities': detail.get('amenities') or [],
         'photo': record.get('image') or '',
@@ -354,8 +357,8 @@ def format_approvals(ctx):
     rows = []
     needs_review = {Listing.Status.PENDING, Listing.Status.CHANGES, Listing.Status.REJECTED}
     for listing in ctx.listings:
-        if _unit_of(listing):
-            continue
+        if _unit_of(listing) or listing.status == Listing.Status.DELETED:
+            continue   # deleted venues leave the approvals queue
         has_history = bool(
             listing.review_timeline or listing.review_notes or listing.review_checks
         )
