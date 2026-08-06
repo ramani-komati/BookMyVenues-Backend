@@ -58,11 +58,13 @@ def _derive_meta(listing):
     return 'New' if age.days < NEW_BADGE_DAYS else ''
 
 
-def _summary(listing):
+def _summary(listing, ratings=None):
     """List row: the record minus the heavy `detail` block. Keeps `gallery`
-    (P3) so venue cards can show the photo slideshow without a call per venue."""
-    from bookings.ratings import venue_rating  # avoid import cycle at load
+    (P3) so venue cards can show the photo slideshow without a call per venue.
 
+    `ratings` is the precomputed {listing_id: (avg, count)} map from
+    venue_ratings_map — pass it when rendering a LIST, or every row costs two
+    extra queries."""
     summary = {
         key: value
         for key, value in listing.record.items()
@@ -73,7 +75,11 @@ def _summary(listing):
     summary['slug'] = listing.slug
     summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
-    average, count = venue_rating(listing)
+    if ratings is not None:
+        average, count = ratings.get(str(listing.id), (None, 0))
+    else:
+        from bookings.ratings import venue_rating  # avoid import cycle at load
+        average, count = venue_rating(listing)
     if average is not None:  # server rating takes precedence on the frontend
         summary['rating'] = average
         summary['ratingCount'] = count
@@ -130,9 +136,14 @@ class PublicVenueListView(APIView):
 
         total = queryset.count()
         start = offset if offset is not None else (page - 1) * limit
-        rows = queryset[start:start + limit]
+        rows = list(queryset[start:start + limit])
 
-        return Response({'venues': [_summary(row) for row in rows], 'total': total})
+        from bookings.ratings import venue_ratings_map
+        ratings = venue_ratings_map(rows)   # two queries for the whole page
+        return Response({
+            'venues': [_summary(row, ratings) for row in rows],
+            'total': total,
+        })
 
 
 @method_decorator(cache_page(CACHE_SECONDS), name='get')

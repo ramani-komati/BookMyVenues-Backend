@@ -155,9 +155,10 @@ class VendorDashboardView(APIView):
             for booking in base.order_by('-created_at')
         ]
 
-        venues = [
-            _summary(listing) for listing in request.user.listings.all()
-        ]
+        from .ratings import venue_ratings_map
+        own_listings = list(request.user.listings.all())
+        venue_ratings = venue_ratings_map(own_listings)
+        venues = [_summary(listing, venue_ratings) for listing in own_listings]
 
         return Response({
             'stats': stats,

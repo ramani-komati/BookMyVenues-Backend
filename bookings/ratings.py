@@ -35,13 +35,61 @@ def venue_set_ids(listing):
 
 
 def venue_rating(listing):
-    """(average rounded to 4 decimals or None, count) over the venue set."""
+    """(average rounded to 4 decimals or None, count) over the venue set.
+
+    Single-listing use only (venue detail page). For a LIST of venues use
+    venue_ratings_map — this costs two queries per venue."""
     result = Rating.objects.filter(
         listing_id__in=venue_set_ids(listing)
     ).aggregate(avg=Avg('stars'), count=Count('id'))
     if not result['count']:
         return None, 0
     return round(result['avg'], 4), result['count']
+
+
+def venue_ratings_map(listings):
+    """
+    {listing_id: (average, count)} for a whole page of venues in TWO queries,
+    folded per venue set (a rating on "— Pitch 2" counts for its base).
+
+    Called once per list response; the per-venue venue_rating() would cost
+    two queries EACH, which is what made the venue list slow.
+    """
+    listings = list(listings)
+    if not listings:
+        return {}
+
+    base_of = {str(l.id): _base_id(l) for l in listings}
+    bases = set(base_of.values())
+
+    # Every listing id belonging to those venue sets: the bases themselves
+    # plus any unit siblings pointing at them.
+    members = {base: {base} for base in bases}
+    siblings = Listing.objects.filter(
+        record__detail__unitOf__in=list(bases)
+    ).values_list('id', 'record')
+    for sibling_id, record in siblings:
+        base = str(((record or {}).get('detail') or {}).get('unitOf') or '').strip()
+        if base in members:
+            members[base].add(str(sibling_id))
+
+    owner = {mid: base for base, ids in members.items() for mid in ids}
+    totals = {}
+    rated = Rating.objects.filter(
+        listing_id__in=list(owner)
+    ).values_list('listing_id', 'stars')
+    for listing_id, stars in rated:
+        entry = totals.setdefault(owner[str(listing_id)], [0, 0])
+        entry[0] += stars
+        entry[1] += 1
+
+    return {
+        listing_id: (
+            (round(totals[base][0] / totals[base][1], 4), totals[base][1])
+            if base in totals else (None, 0)
+        )
+        for listing_id, base in base_of.items()
+    }
 
 
 def _booking_completed(booking):
