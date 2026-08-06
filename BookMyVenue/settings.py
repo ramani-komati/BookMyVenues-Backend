@@ -156,8 +156,11 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
 }
 
-# 2Factor.in API key for OTP SMS delivery. Empty = OTP endpoints will
-# return an error (we never print codes to the console).
+# OTP SMS delivery. Fast2SMS is used when its key is present, otherwise
+# 2Factor. With neither set, the OTP endpoints return an error — we never
+# print codes to the console.
+FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '')
+
 TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 # SMS template name — forces SMS delivery (omitting it can trigger
 # a voice call on some accounts).

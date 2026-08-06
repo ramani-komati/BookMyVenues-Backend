@@ -322,6 +322,67 @@ class OneTimeProfileFlowTests(OTPAuthTestBase):
         self.assertFalse(User.objects.filter(phone='1111111111').exists())
 
 
+class SmsProviderTests(APITestCase):
+    """Which provider sends the OTP, and how failures surface.
+    No real SMS is ever sent — the HTTP call is mocked."""
+
+    def _ok(self, payload):
+        from unittest.mock import MagicMock
+        response = MagicMock(status_code=200)
+        response.json.return_value = payload
+        return response
+
+    def test_fast2sms_preferred_when_configured(self):
+        from django.test import override_settings
+
+        from accounts.otp import send_otp_sms
+        with override_settings(
+            FAST2SMS_API_KEY='fast-key', TWOFACTOR_API_KEY='two-key'
+        ):
+            with patch(
+                'accounts.otp.requests.get', return_value=self._ok({'return': True})
+            ) as mock_get:
+                send_otp_sms('9876543210', '123456')
+        url = mock_get.call_args[0][0]
+        self.assertIn('fast2sms', url)                     # not 2Factor
+        kwargs = mock_get.call_args[1]
+        self.assertEqual(kwargs['headers']['authorization'], 'fast-key')
+        self.assertEqual(kwargs['params']['numbers'], '9876543210')
+        self.assertEqual(kwargs['params']['route'], 'otp')
+
+    def test_falls_back_to_2factor_without_fast2sms(self):
+        from django.test import override_settings
+
+        from accounts.otp import send_otp_sms
+        with override_settings(FAST2SMS_API_KEY='', TWOFACTOR_API_KEY='two-key'):
+            with patch(
+                'accounts.otp.requests.get',
+                return_value=self._ok({'Status': 'Success'}),
+            ) as mock_get:
+                send_otp_sms('9876543210', '123456')
+        self.assertIn('2factor.in', mock_get.call_args[0][0])
+
+    def test_fast2sms_failure_raises(self):
+        from django.test import override_settings
+
+        from accounts.otp import OTPSendError, send_otp_sms
+        with override_settings(FAST2SMS_API_KEY='fast-key'):
+            with patch(
+                'accounts.otp.requests.get',
+                return_value=self._ok({'return': False, 'message': ['Invalid key']}),
+            ):
+                with self.assertRaises(OTPSendError):
+                    send_otp_sms('9876543210', '123456')
+
+    def test_no_provider_configured_raises(self):
+        from django.test import override_settings
+
+        from accounts.otp import OTPSendError, send_otp_sms
+        with override_settings(FAST2SMS_API_KEY='', TWOFACTOR_API_KEY=''):
+            with self.assertRaises(OTPSendError):
+                send_otp_sms('9876543210', '123456')
+
+
 class BlockedUserTests(OTPAuthTestBase):
     """Admin-blocked accounts must be locked out of OTP sign-in entirely."""
 
