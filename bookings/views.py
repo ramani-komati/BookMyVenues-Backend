@@ -154,6 +154,20 @@ def _price_at(values, unit):
     return _to_int(raw, 'unit price') if raw else None
 
 
+# The wizard writes `unitWeekendPrices`; `weekendUnitPrices` is accepted as an
+# alias so either spelling works and no vendor data needs rewriting.
+WEEKEND_UNIT_KEYS = ('unitWeekendPrices', 'weekendUnitPrices')
+
+
+def _weekend_price_at(source, unit):
+    """The weekend per-unit price under either accepted key name."""
+    for key in WEEKEND_UNIT_KEYS:
+        rate = _price_at(source.get(key), unit)
+        if rate is not None:
+            return rate
+    return None
+
+
 def _amount_or_none(value, field):
     text = str(value or '').strip()
     return _to_int(text, field) if text else None
@@ -197,7 +211,7 @@ def _unit_rate(listing, sport, unit, weekend=False):
             if str(entry.get('name')) != sport:
                 continue
             if weekend:
-                rate = _price_at(entry.get('weekendUnitPrices'), unit)
+                rate = _weekend_price_at(entry, unit)
                 if rate is not None:
                     return rate
                 rate = _amount_or_none(entry.get('weekendPrice'), 'sport weekend price')
@@ -209,7 +223,7 @@ def _unit_rate(listing, sport, unit, weekend=False):
             return _amount_or_none(entry.get('price'), 'sport price')
         return None
     if weekend:
-        rate = _price_at(detail.get('weekendUnitPrices'), unit)
+        rate = _weekend_price_at(detail, unit)
         if rate is not None:
             return rate
     return _price_at(detail.get('unitPrices'), unit)

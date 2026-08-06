@@ -1481,7 +1481,8 @@ class WeekendPricingTests(BookingTestBase):
             record={'name': 'Turf', 'price': 500, 'detail': {'addons': [], 'sports': [
                 {'name': 'Box Cricket', 'units': 2,
                  'unitPrices': ['600', '700'],
-                 'weekendUnitPrices': ['900', '1000']},
+                 # The wizard's own spelling.
+                 'unitWeekendPrices': ['900', '1000']},
             ]}},
             name='Turf', category='Play zone', locality='x', pincode='560001',
         )
@@ -1497,6 +1498,39 @@ class WeekendPricingTests(BookingTestBase):
             {**body, 'date': self.saturday.isoformat(), 'amount': 2020},  # 2x1000+20
             format='json')
         self.assertEqual(weekend.status_code, 201)
+
+    def test_alias_spelling_also_works(self):
+        turf = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='alias-turf',
+            record={'name': 'Alias', 'price': 500, 'detail': {'addons': [], 'sports': [
+                {'name': 'Box Cricket', 'units': 1,
+                 'unitPrices': ['600'], 'weekendUnitPrices': ['950']},
+            ]}},
+            name='Alias', category='Play zone', locality='x', pincode='560001',
+        )
+        response = self.client.post('/api/users/me/bookings', {
+            'venueId': str(turf.id), 'date': self.saturday.isoformat(),
+            'slots': ['19:00 – 21:00'], 'addons': [], 'sport': 'Box Cricket',
+            'unit': 1, 'perSlot': 950, 'amount': 1920,      # 2x950 + 20
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
+
+    def test_blank_weekend_entry_falls_back_to_weekday(self):
+        turf = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='partial-turf',
+            record={'name': 'Partial', 'price': 500, 'detail': {'addons': [], 'sports': [
+                {'name': 'Box Cricket', 'units': 2,
+                 'unitPrices': ['600', '700'],
+                 'unitWeekendPrices': ['900', '']},   # pitch 2 has none
+            ]}},
+            name='Partial', category='Play zone', locality='x', pincode='560001',
+        )
+        response = self.client.post('/api/users/me/bookings', {
+            'venueId': str(turf.id), 'date': self.saturday.isoformat(),
+            'slots': ['19:00 – 21:00'], 'addons': [], 'sport': 'Box Cricket',
+            'unit': 2, 'perSlot': 700, 'amount': 1420,      # weekday 2x700 + 20
+        }, format='json')
+        self.assertEqual(response.status_code, 201)
 
     def test_availability_surfaces_the_effective_rate(self):
         self.client.force_authenticate(user=None)
