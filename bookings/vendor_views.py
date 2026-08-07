@@ -136,7 +136,7 @@ class VendorDashboardView(APIView):
         # ONE query for the vendor's bookings — the period sums, today's
         # list, allBookings and the all-time total are all derived from it
         # in Python. (It used to hit this table three separate times.)
-        bookings = list(base.order_by('-created_at'))
+        bookings = list(base.select_related('rating').order_by('-created_at'))
         rows = []
         for booking in bookings:
             if booking.date < history_start:

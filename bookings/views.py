@@ -680,9 +680,10 @@ class MyBookingsView(APIView):
 
     def get(self, request):
         # Unpaid Razorpay holds are checkout plumbing, not bookings.
-        queryset = Booking.objects.filter(user=request.user).exclude(
-            status='payment_pending'
-        )
+        # select_related('rating') so userRating costs no extra query per row.
+        queryset = Booking.objects.filter(user=request.user).select_related(
+            'rating'
+        ).exclude(status='payment_pending')
 
         wanted = request.query_params.get('status')
         if wanted == 'upcoming':

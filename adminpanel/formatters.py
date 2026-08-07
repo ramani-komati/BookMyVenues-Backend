@@ -53,7 +53,7 @@ class BootstrapContext:
 
         self.bookings_by_listing = defaultdict(list)
         self.bookings_by_user = defaultdict(list)
-        self.bookings = list(Booking.objects.all())
+        self.bookings = list(Booking.objects.select_related('rating').all())
         for booking in self.bookings:
             if booking.listing_id:
                 self.bookings_by_listing[str(booking.listing_id)].append(booking)

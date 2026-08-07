@@ -128,6 +128,15 @@ class Booking(models.Model):
                 return 'completed'
         return 'confirmed'
 
+    @property
+    def user_rating(self):
+        """The customer's own stars for this booking, or None. Django makes a
+        missing reverse one-to-one raise AttributeError, so getattr's default
+        covers it. Callers listing many bookings should
+        select_related('rating') to avoid a query per row."""
+        rating = getattr(self, 'rating', None)
+        return rating.stars if rating else None
+
     def as_record(self):
         """The camelCase booking record shape the frontend expects."""
         return {
@@ -152,6 +161,7 @@ class Booking(models.Model):
             'amount': self.amount,
             'method': self.method,
             'walkIn': self.walk_in,
+            'userRating': self.user_rating,
             'collected': self.collected,
             'collectedAt': self.collected_at.isoformat() if self.collected_at else None,
             'createdAt': self.created_at.isoformat(),

@@ -1413,6 +1413,28 @@ class RatingTests(BookingTestBase):
             self.client.get('/api/vendors/me/ratings').status_code, 403
         )
 
+    def test_user_rating_echoed_on_my_bookings(self):
+        mine = self.client.get('/api/users/me/bookings').data['bookings']
+        row = next(b for b in mine if b['id'] == self.done.id)
+        self.assertIsNone(row['userRating'])          # not rated yet
+
+        self.rate(stars=4)
+        mine = self.client.get('/api/users/me/bookings').data['bookings']
+        row = next(b for b in mine if b['id'] == self.done.id)
+        self.assertEqual(row['userRating'], 4)
+
+    def test_my_bookings_does_not_n_plus_one_on_ratings(self):
+        for index in range(6):
+            Booking.objects.create(
+                listing=self.listing, user=self.customer,
+                date=today_ist() - datetime.timedelta(days=index + 2),
+                slots=['10:00 – 11:00'], amount=620, fee=20,
+            )
+        # count + one row fetch that LEFT JOINs the ratings — flat regardless
+        # of how many bookings are listed.
+        with self.assertNumQueries(2):
+            self.client.get('/api/users/me/bookings')
+
     def test_rating_surfaces_on_public_venue(self):
         self.rate(stars=4)
         from django.core.cache import cache
