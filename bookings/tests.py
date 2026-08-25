@@ -4,7 +4,7 @@ Tests for bookings + availability (contract 1.3, 2.3, 2.4, 2.5).
 import datetime
 import uuid
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -73,7 +73,26 @@ class SlotParsingTests(TestCase):
         self.assertFalse(overlaps([parse_slot('21:00 – 22:00')], booked))  # touching is fine
 
 
+class _GatewayBooking:
+    """Mimics the old direct-create response shape (.status_code / .data
+    ['booking']) so the many existing assertions still read naturally now
+    that bookings are created through the payment gateway."""
+
+    status_code = 201
+
+    def __init__(self, booking):
+        self.booking = booking
+        self.data = {'booking': booking.as_record()}
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key',
+    RAZORPAY_KEY_SECRET='test_key_secret',
+    RAZORPAY_WEBHOOK_SECRET='test_webhook_secret',
+)
 class BookingTestBase(APITestCase):
+    _order_seq = 0
+
     def setUp(self):
         self.vendor = User.objects.create_user(
             phone='9000000001', name='Vendor', email='v@example.com',
@@ -89,8 +108,19 @@ class BookingTestBase(APITestCase):
             locality='Indiranagar', pincode='560038',
         )
         self.client.force_authenticate(user=self.customer)
+        # The payments endpoint is throttled (20/min) and the counter lives in
+        # the cache, which persists between tests.
+        from django.core.cache import cache
+        cache.clear()
 
     def book(self, **overrides):
+        """Create a booking the way a customer actually does now.
+
+        Pay-at-venue was retired, so there is no direct create path any more —
+        everything goes through POST /api/payments/order and is confirmed by
+        the gateway. Only Razorpay's HTTP call is mocked; the validation,
+        pricing, slot locking and confirmation are all the real code.
+        """
         body = {
             'venueId': str(self.listing.id),
             'date': TOMORROW,
@@ -100,7 +130,28 @@ class BookingTestBase(APITestCase):
             'perSlot': 600,
             **overrides,
         }
-        return self.client.post('/api/users/me/bookings', body, format='json')
+        return self.gateway_book(body)
+
+    def gateway_book(self, body):
+        from unittest.mock import MagicMock, patch
+
+        BookingTestBase._order_seq += 1
+        order_id = f'order_TEST{BookingTestBase._order_seq}'
+        fake = MagicMock(status_code=200)
+        fake.json.return_value = {'id': order_id}
+        with patch('bookings.razorpay_client.requests.post', return_value=fake):
+            response = self.client.post(
+                '/api/payments/order', body, format='json'
+            )
+        if response.status_code != 201:
+            return response      # same error shapes as the old direct path
+
+        # The money landed — this is what /payments/verify and the webhook do.
+        from .payments import _confirm_booking
+        booking = Booking.objects.get(pk=response.data['bookingId'])
+        _confirm_booking(booking, f'pay_{order_id}')
+        booking.refresh_from_db()
+        return _GatewayBooking(booking)
 
 
 class CreateBookingTests(BookingTestBase):
@@ -220,13 +271,13 @@ class CreateBookingTests(BookingTestBase):
         response = self.book(amount='920')
         self.assertEqual(response.status_code, 201)
 
-    def test_pay_at_venue_method_stored_and_echoed(self):
+    def test_pay_at_venue_is_retired(self):
+        # Withdrawn as a product decision: every customer booking is paid
+        # through the gateway now. Old 'venue' rows still exist and still
+        # display — they just cannot be created any more.
         response = self.book(method='venue')
-        self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['booking']['method'], 'venue')
-        self.assertFalse(response.data['booking']['walkIn'])
-        # Amount is identical to online — vendor collects it all on arrival.
-        self.assertEqual(response.data['booking']['amount'], 920)
+        self.assertEqual(response.status_code, 400)
+        self.assertFalse(Booking.objects.filter(method='venue').exists())
 
     def test_default_method_is_online(self):
         response = self.book()
@@ -237,16 +288,18 @@ class CreateBookingTests(BookingTestBase):
         self.assertEqual(response.status_code, 400)
 
     def test_method_echoed_verbatim_everywhere(self):
-        # upi booking + venue booking -> all three read paths echo them raw.
+        # All three read paths echo the method raw. Only gateway-backed
+        # bookings can carry an online method now, so the 'upi' row is created
+        # the way the real flow does: through the payment machinery.
+        self.book(method='card', slots=['21:00 – 22:00'], amount=620)
         self.book(method='upi')
-        self.book(method='venue', slots=['21:00 – 22:00'], amount=620)
 
         mine = self.client.get('/api/users/me/bookings').data['bookings']
-        self.assertEqual({b['method'] for b in mine}, {'upi', 'venue'})
+        self.assertEqual({b['method'] for b in mine}, {'upi', 'card'})
 
         self.client.force_authenticate(user=self.vendor)
         dash = self.client.get('/api/vendors/me/dashboard').data['allBookings']
-        self.assertEqual({b['method'] for b in dash}, {'upi', 'venue'})
+        self.assertEqual({b['method'] for b in dash}, {'upi', 'card'})
 
         admin = User.objects.create_user(
             phone='9000000099', name='Admin', email='adm@example.com',
@@ -254,10 +307,10 @@ class CreateBookingTests(BookingTestBase):
         )
         self.client.force_authenticate(user=admin)
         rows = self.client.get('/api/admin/bootstrap').data['bookings']
-        self.assertEqual({b['method'] for b in rows}, {'upi', 'venue'})
+        self.assertEqual({b['method'] for b in rows}, {'upi', 'card'})
 
-    def test_pay_at_venue_blocks_slots(self):
-        self.book(method='venue')
+    def test_booking_blocks_slots(self):
+        self.book()
         response = self.book(slots=['20:00 – 22:00'], amount=1220)
         self.assertEqual(response.status_code, 409)  # overlap sees it
 
@@ -751,7 +804,7 @@ class OfferBookingTests(BookingTestBase):
             'offer': offer,
             **overrides,
         }
-        return self.client.post('/api/users/me/bookings', body, format='json')
+        return self.gateway_book(body)
 
     def test_percent_offer(self):
         # 1200 - 10% (120) + 20 fee = 1100
@@ -843,9 +896,6 @@ class OfferBookingTests(BookingTestBase):
         self.assertEqual(r.status_code, 201)
         self.assertEqual(r.data['booking']['discountAmount'], 100)
         self.assertEqual(r.data['booking']['amount'], 1100)
-
-
-from django.test import override_settings
 
 
 @override_settings(
@@ -1470,11 +1520,11 @@ class WeekendPricingTests(BookingTestBase):
         )
 
     def book(self, date, amount, venue=None):
-        return self.client.post('/api/users/me/bookings', {
+        return self.gateway_book({
             'venueId': str(venue.id if venue else self.weekend_listing.id),
             'date': date.isoformat(), 'slots': ['19:00 – 21:00'],   # 2h
             'addons': [], 'perSlot': 600, 'amount': amount,
-        }, format='json')
+        })
 
     def test_weekday_uses_weekday_rate(self):
         # 2h x 600 + 20 fee
@@ -1512,13 +1562,13 @@ class WeekendPricingTests(BookingTestBase):
             'venueId': str(turf.id), 'slots': ['19:00 – 21:00'],
             'addons': [], 'sport': 'Box Cricket', 'unit': 2, 'perSlot': 700,
         }
-        weekday = self.client.post('/api/users/me/bookings',
+        weekday = self.gateway_book(
             {**body, 'date': self.monday.isoformat(), 'amount': 1420},   # 2x700+20
-            format='json')
+        )
         self.assertEqual(weekday.status_code, 201)
-        weekend = self.client.post('/api/users/me/bookings',
+        weekend = self.gateway_book(
             {**body, 'date': self.saturday.isoformat(), 'amount': 2020},  # 2x1000+20
-            format='json')
+        )
         self.assertEqual(weekend.status_code, 201)
 
     def test_alias_spelling_also_works(self):
@@ -1530,11 +1580,11 @@ class WeekendPricingTests(BookingTestBase):
             ]}},
             name='Alias', category='Play zone', locality='x', pincode='560001',
         )
-        response = self.client.post('/api/users/me/bookings', {
+        response = self.gateway_book({
             'venueId': str(turf.id), 'date': self.saturday.isoformat(),
             'slots': ['19:00 – 21:00'], 'addons': [], 'sport': 'Box Cricket',
             'unit': 1, 'perSlot': 950, 'amount': 1920,      # 2x950 + 20
-        }, format='json')
+        })
         self.assertEqual(response.status_code, 201)
 
     def test_blank_weekend_entry_falls_back_to_weekday(self):
@@ -1547,11 +1597,11 @@ class WeekendPricingTests(BookingTestBase):
             ]}},
             name='Partial', category='Play zone', locality='x', pincode='560001',
         )
-        response = self.client.post('/api/users/me/bookings', {
+        response = self.gateway_book({
             'venueId': str(turf.id), 'date': self.saturday.isoformat(),
             'slots': ['19:00 – 21:00'], 'addons': [], 'sport': 'Box Cricket',
             'unit': 2, 'perSlot': 700, 'amount': 1420,      # weekday 2x700 + 20
-        }, format='json')
+        })
         self.assertEqual(response.status_code, 201)
 
     def test_availability_surfaces_the_effective_rate(self):
@@ -1596,7 +1646,7 @@ class PlatformPromoTests(BookingTestBase):
             'offer': offer,
             **overrides,
         }
-        return self.client.post('/api/users/me/bookings', body, format='json')
+        return self.gateway_book(body)
 
     def test_platform_percent_promo_applied(self):
         # 1200 - 15% (180, under the 200 cap) + 20 fee = 1040.
@@ -1661,7 +1711,7 @@ class PerUnitBookingTests(BookingTestBase):
             'amount': 1218,               # 599*2 + ₹20 fee
             **overrides,
         }
-        return self.client.post('/api/users/me/bookings', body, format='json')
+        return self.gateway_book(body)
 
     def test_two_pitches_bookable_in_same_slot(self):
         first = self.book_unit()

@@ -115,12 +115,30 @@ class PaymentOrderView(APIView):
 
 def _confirm_booking(booking, payment_id):
     """Move a pending booking to confirmed (idempotent)."""
+    already_confirmed = booking.status == 'confirmed'
     booking.status = 'confirmed'
     booking.razorpay_payment_id = payment_id or booking.razorpay_payment_id
     booking.save(update_fields=['status', 'razorpay_payment_id'])
     if booking.user_id and not booking.user.is_customer:
         booking.user.is_customer = True
         booking.user.save(update_fields=['is_customer'])
+    # Tell the customer and the vendor. Best-effort and idempotent: a webhook
+    # re-delivery must not send a second copy, and a failed send must never
+    # fail the payment — the scheduled catch-up run retries it.
+    if not already_confirmed and booking.confirmation_sent_at is None:
+        _notify_confirmed(booking)
+
+
+def _notify_confirmed(booking):
+    from django.utils import timezone as _tz
+
+    from .notifications import notify_booking_confirmed
+    try:
+        if notify_booking_confirmed(booking):
+            booking.confirmation_sent_at = _tz.now()
+            booking.save(update_fields=['confirmation_sent_at'])
+    except Exception:                      # never break a paid booking
+        logger.exception('Booking confirmation notification failed')
 
 
 class PaymentVerifyView(APIView):

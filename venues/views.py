@@ -250,15 +250,44 @@ def _unique_slug(name, listing_id):
     return slug
 
 
-def _resolve_publish_status(record, existing):
+# Keys that must never reach the public venue record. The listing JSON is
+# stored and served verbatim, so a wizard bug (or a malicious vendor) that
+# spreads the whole draft into the publish payload would otherwise put bank
+# details on the public venue page.
+PRIVATE_RECORD_KEYS = {
+    'payout', 'payoutdetails', 'bank', 'bankname', 'bankdetails',
+    'accountnumber', 'accountno', 'account', 'accountholder', 'ifsc',
+    'upi', 'upiid', 'pan', 'gst', 'gstin', 'aadhaar', 'aadhar',
+}
+
+
+def _strip_private_keys(value):
+    """Recursively drop payout/bank/KYC keys from a listing record."""
+    if isinstance(value, dict):
+        return {
+            key: _strip_private_keys(inner)
+            for key, inner in value.items()
+            if str(key).replace('_', '').replace('-', '').lower()
+            not in PRIVATE_RECORD_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_private_keys(item) for item in value]
+    return value
+
+
+def _resolve_publish_status(record, existing, vendor):
     """
     The listing status is SERVER-OWNED — the client's status field is ignored.
 
     - Existing listing (republish/edit/self-heal): keep its current status.
       An approved venue never falls back to pending because of a republish.
-    - New unit sibling (detail.unitOf) of a LIVE base: live immediately —
-      the base venue's approval covers its pitches/screens/halls.
+    - New unit sibling (detail.unitOf) of the VENDOR'S OWN LIVE base: live
+      immediately — the base venue's approval covers its pitches/screens.
     - Any other new listing: pending, waiting for admin approval.
+
+    SECURITY: the base must belong to the SAME vendor. Live venue ids are
+    public, so without that check any vendor could point `unitOf` at somebody
+    else's approved venue and have their own listing go live with no review.
     """
     if existing is not None:
         return existing.status
@@ -269,7 +298,11 @@ def _resolve_publish_status(record, existing):
             base = Listing.objects.filter(pk=uuid.UUID(base_ref)).first()
         except ValueError:
             base = None
-        if base is not None and base.status == Listing.Status.LIVE:
+        if (
+            base is not None
+            and base.status == Listing.Status.LIVE
+            and base.vendor_id == vendor.id
+        ):
             return Listing.Status.LIVE
     return Listing.Status.PENDING
 
@@ -313,11 +346,32 @@ class VendorListingPublishView(APIView):
                 )
 
         record = dict(record)  # never mutate request.data itself
+
+        # `unitOf` names this listing's base venue. It drives rating/favourite
+        # folding and the status cascades, so a foreign base would let a
+        # vendor attach themselves to someone else's venue.
+        base_ref = str((record.get('detail') or {}).get('unitOf') or '').strip()
+        if base_ref:
+            try:
+                base = Listing.objects.filter(pk=uuid.UUID(base_ref)).first()
+            except (ValueError, TypeError):
+                base = None
+            if base is None or base.vendor_id != request.user.id:
+                return _message(
+                    'unitOf must reference one of your own venues.',
+                    status.HTTP_400_BAD_REQUEST,
+                )
+
+        # The record is echoed VERBATIM to unauthenticated visitors, so bank
+        # and payout fields must never survive into it — whatever the wizard
+        # happens to spread into the payload.
+        record = _strip_private_keys(record)
+
         # Contract: "keep existing photos if update has none".
         if existing is not None and not record.get('gallery'):
             record['gallery'] = existing.record.get('gallery', [])
 
-        listing_status = _resolve_publish_status(record, existing)
+        listing_status = _resolve_publish_status(record, existing, request.user)
         record['id'] = str(listing_id)
         record['status'] = listing_status
 
@@ -443,6 +497,26 @@ def soft_delete_listing(listing):
     )
 
 
+# Leading bytes of the formats we accept. The client's declared content_type
+# is not evidence of anything — these are.
+_IMAGE_SIGNATURES = (
+    b'\xff\xd8\xff',      # JPEG
+    b'\x89PNG\r\n\x1a\n',  # PNG
+)
+
+
+def _looks_like_image(file):
+    """True when the uploaded bytes actually start like a JPEG/PNG/WebP."""
+    try:
+        head = file.read(12)
+    finally:
+        file.seek(0)   # rewind — the upload still has to read the whole file
+    if any(head.startswith(sig) for sig in _IMAGE_SIGNATURES):
+        return True
+    # WebP: 'RIFF' <4-byte size> 'WEBP'
+    return head[:4] == b'RIFF' and head[8:12] == b'WEBP'
+
+
 class DraftPhotoUploadView(APIView):
     """
     POST /api/venues/drafts/<id>/photos  (multipart/form-data)
@@ -477,6 +551,17 @@ class DraftPhotoUploadView(APIView):
             return _message(
                 'Image is too large (max 5 MB).',
                 status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            )
+
+        # content_type is just a client-supplied label. Check the actual
+        # leading bytes so a non-image cannot be stored (and later served)
+        # under an image/* content type. Runs AFTER the size check so an
+        # oversized upload still gets its 413 (and we don't touch the bytes
+        # of a file we are about to reject anyway).
+        if not _looks_like_image(file):
+            return _message(
+                'That file is not a valid JPEG, PNG or WebP image.',
+                status.HTTP_400_BAD_REQUEST,
             )
 
         photos = draft.data.setdefault(

@@ -13,6 +13,7 @@ from django.views.decorators.cache import cache_page
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .models import Listing
@@ -98,6 +99,11 @@ def _summary(listing, ratings=None):
 
 @method_decorator(cache_page(CACHE_SECONDS), name='get')
 class PublicVenueListView(APIView):
+    # Free-text q/locality/pincode run icontains scans, and varying the query
+    # by one character defeats the 60s response cache.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'public'
+
     """GET /api/venues?q=&category=&locality=&pincode=&page=&limit=&sort="""
 
     permission_classes = [AllowAny]

@@ -17,6 +17,20 @@ class UserAdmin(BaseUserAdmin):
     search_fields = ('phone', 'name', 'email')
     ordering = ('-date_joined',)
 
+    def get_readonly_fields(self, request, obj=None):
+        """Only a superuser may change the privilege fields.
+
+        `role`, `is_staff` and `is_superuser` are the escalation path: editing
+        them here grants super-admin access WITHOUT the OTP step the panel
+        enforces, and Django's admin logs it to its own LogEntry rather than
+        our AuditEntry trail. Staff who are not superusers get a read-only
+        view of them."""
+        readonly = list(super().get_readonly_fields(request, obj))
+        if not request.user.is_superuser:
+            readonly += ['role', 'is_staff', 'is_superuser',
+                         'groups', 'user_permissions']
+        return readonly
+
     # Field layout when EDITING an existing user:
     fieldsets = (
         (None, {'fields': ('phone', 'password')}),

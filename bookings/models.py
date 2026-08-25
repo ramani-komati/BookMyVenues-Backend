@@ -18,12 +18,17 @@ class Booking(models.Model):
         UPI = 'upi', 'UPI'
         CARD = 'card', 'Card'
         NETBANKING = 'netbanking', 'Netbanking'
-        VENUE = 'venue', 'Pay at venue'      # customer pays FULL amount on arrival
+        VENUE = 'venue', 'Pay at venue'      # RETIRED — kept for old rows only
         WALK_IN = 'walk-in', 'Walk-in'       # vendor-recorded offline booking
 
     # Methods a customer may send on POST /users/me/bookings. Everything except
     # 'venue' means the money was collected online (payout passes it through).
-    CUSTOMER_METHODS = {'online', 'upi', 'card', 'netbanking', 'venue'}
+    # What a CUSTOMER may choose today. Pay-at-venue was retired: every
+    # customer booking now goes through Razorpay. 'venue' stays in Method
+    # above because existing rows still carry it (history, payouts, the
+    # vendor's cash-collected flag) — it just cannot be created any more.
+    # 'walk-in' is vendor-only (see WalkInBookingView), never customer-chosen.
+    CUSTOMER_METHODS = {'online', 'upi', 'card', 'netbanking'}
 
     id = models.CharField(
         max_length=20, primary_key=True, default=make_booking_id, editable=False
@@ -90,6 +95,9 @@ class Booking(models.Model):
     # derived from the date; an admin can set 'refunded' etc.
     status = models.CharField(max_length=20, default='confirmed')
     # Razorpay linkage (empty for pay-at-venue / walk-ins / legacy bookings).
+    # Set once the confirmation actually got through, so a webhook
+    # re-delivery never sends a second copy.
+    confirmation_sent_at = models.DateTimeField(null=True, blank=True)
     razorpay_order_id = models.CharField(max_length=64, blank=True, default='', db_index=True)
     razorpay_payment_id = models.CharField(max_length=64, blank=True, default='')
     refund_id = models.CharField(max_length=64, blank=True, default='')

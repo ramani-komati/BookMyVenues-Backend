@@ -142,6 +142,11 @@ REST_FRAMEWORK = {
     # password brute-forcing and mass account creation.
     'DEFAULT_THROTTLE_RATES': {
         'auth': '10/min',
+        # Public, unauthenticated and expensive: free-text venue search, the
+        # deliberately-uncached availability endpoint, and the maps resolver
+        # (which makes a blocking outbound request per uncached URL).
+        'public': '60/min',
+        'maps': '20/min',
         # Payment order/verify: each order call creates a real gateway order
         # and a 30-min slot hold — throttled against hold-griefing.
         'payments': '20/min',
@@ -168,6 +173,23 @@ TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 # SMS template name — forces SMS delivery (omitting it can trigger
 # a voice call on some accounts).
 TWOFACTOR_SMS_TEMPLATE = os.environ.get('TWOFACTOR_SMS_TEMPLATE', 'OTP1')
+
+# Resend (transactional email). Used to deliver the OTP by email ALONGSIDE
+# the SMS — same code, two channels. Unset means email delivery is simply
+# skipped, so nothing breaks if the key is missing.
+RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
+# Must be a domain verified in Resend; onboarding@resend.dev works for testing.
+RESEND_FROM = os.environ.get('RESEND_FROM', 'onboarding@resend.dev')
+
+
+# Booking notifications (confirmation + 30-minute reminder).
+# Email is effectively free, so it is on. SMS is OFF because Fast2SMS's quick
+# route costs more per message than the platform fee earns on a booking, and
+# the cheap 'otp' route cannot carry anything but a bare code. Turn it on once
+# DLT-approved templates exist.
+NOTIFY_EMAIL_ENABLED = os.environ.get('NOTIFY_EMAIL_ENABLED', 'True') == 'True'
+NOTIFY_SMS_ENABLED = os.environ.get('NOTIFY_SMS_ENABLED', 'False') == 'True'
+
 
 # Razorpay (payments). Test keys and live keys are a pure env-var swap.
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
@@ -222,10 +244,15 @@ CORS_ALLOWED_ORIGINS = [
 CORS_ALLOW_CREDENTIALS = True
 
 if not DEBUG and CORS_ALLOW_ALL_ORIGINS:
-    import warnings
-    warnings.warn(
+    # HARD FAIL, not a warning. Admin writes are CSRF-exempt and authenticate
+    # with a SameSite=None cookie, so the CORS allowlist is the ONLY thing
+    # standing between a logged-in admin and any website that wants to issue
+    # refunds or change the platform fee on their behalf. A log line nobody
+    # reads is not an acceptable guard for that; refusing to boot is.
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
         'CORS_ALLOW_ALL_ORIGINS=True in production while admin sessions use '
-        'credentialed cookies — any website can call the admin API with a '
+        'credentialed cookies — any website could drive the admin API with a '
         'logged-in admin\'s session. Set CORS_ALLOW_ALL_ORIGINS=False and '
         'list the real frontend origins in CORS_ALLOWED_ORIGINS.'
     )

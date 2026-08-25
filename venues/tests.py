@@ -274,14 +274,24 @@ class DraftPhotoTests(DraftTestBase):
         self.addCleanup(upload_patcher.stop)
         self.addCleanup(delete_patcher.stop)
 
+    # A real JPEG starts with FF D8 FF. The upload endpoint checks the actual
+    # bytes now, so the fixture has to look like an image.
+    JPEG_BYTES = b'\xff\xd8\xff\xe0' + b'fake-image-bytes'
+
     def upload(self, gallery='venuePhotos', name='hall.jpg',
-               content=b'fake-image-bytes', content_type='image/jpeg'):
+               content=None, content_type='image/jpeg'):
+        content = self.JPEG_BYTES if content is None else content
         file = SimpleUploadedFile(name, content, content_type=content_type)
         return self.client.post(
             f'/api/venues/drafts/{self.draft.id}/photos',
             {'file': file, 'gallery': gallery},
             format='multipart',
         )
+
+    def test_non_image_disguised_as_jpeg_is_rejected(self):
+        """content_type is a client-supplied label — the BYTES decide."""
+        response = self.upload(content=b'<html>not an image</html>')
+        self.assertEqual(response.status_code, 400)
 
     def test_upload_happy_path(self):
         response = self.upload()
@@ -342,7 +352,9 @@ class DraftPhotoTests(DraftTestBase):
 
     def test_foreign_draft_404(self):
         foreign = VenueDraft.objects.create(vendor=self.other_vendor)
-        file = SimpleUploadedFile('a.jpg', b'x', content_type='image/jpeg')
+        file = SimpleUploadedFile(
+            'a.jpg', b'\xff\xd8\xffx', content_type='image/jpeg'
+        )
         response = self.client.post(
             f'/api/venues/drafts/{foreign.id}/photos',
             {'file': file, 'gallery': 'venuePhotos'},
@@ -878,7 +890,12 @@ class MapsResolveTests(APITestCase):
         cache.clear()  # the resolver caches results — isolate tests
 
     def _fake(self, final_url):
+        """A 301 to `final_url` — the resolver follows redirects one hop at a
+        time now, re-checking the allowlist at each hop, so the fake has to
+        carry the Location header a real redirect would."""
         class FakeResponse:
+            is_redirect = True
+            headers = {'Location': final_url}
             url = final_url
         return FakeResponse()
 
@@ -906,6 +923,18 @@ class MapsResolveTests(APITestCase):
             self.client.get(self.URL, {'url': 'https://goo.gl/maps/ABC'})
             self.client.get(self.URL, {'url': 'https://goo.gl/maps/ABC'})
         self.assertEqual(mock_get.call_count, 1)  # 2nd request served from cache
+
+    def test_redirect_to_unexpected_host_is_refused(self):
+        """SSRF guard: only the FIRST url used to be checked, so a redirect
+        could point the server at an internal address and the resolved URL was
+        handed back to an unauthenticated caller."""
+        evil = self._fake('http://169.254.169.254/latest/meta-data/')
+        with patch('venues.maps.requests.get', return_value=evil):
+            response = self.client.get(
+                self.URL, {'url': 'https://maps.app.goo.gl/XYZ'}
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn('169.254', str(response.data))
 
     def test_public_no_auth_needed(self):
         with patch(

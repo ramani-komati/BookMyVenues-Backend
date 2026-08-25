@@ -10,16 +10,18 @@ Phase 1: auth + the aggregate `bootstrap` read. Writes and the new models
 import datetime
 
 from django.contrib.auth import login, logout
+from django.db import transaction
 from django.contrib.auth.hashers import check_password, make_password
 from django.utils import timezone
 from rest_framework import status
+from rest_framework.parsers import JSONParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from accounts.models import PhoneOTP, User, vendor_accounts_q
-from accounts.otp import OTPSendError, generate_code, send_otp_sms
+from accounts.otp import OTPSendError, deliver_otp, generate_code
 from bookings.models import Booking
 from venues.models import Listing, VenueDraft
 
@@ -47,7 +49,7 @@ PAYOUT_STATUSES = {'pending', 'failed', 'completed'}
 def _to_int(value, default=0):
     try:
         return int(float(str(value)))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -57,7 +59,8 @@ def _transition(before, after):
     return f'{before} → {after}' if before != after else str(after)
 
 
-def record_audit(request, action, target, change='', target_id='', reason=None):
+def record_audit(request, action, target, change='', target_id='', reason=None,
+                 subject=None):
     """Write THE audit row for an admin action — the server is the sole
     logger, so an action can never happen without being recorded (a
     client-sent entry would go missing whenever its fire-and-forget POST
@@ -68,6 +71,11 @@ def record_audit(request, action, target, change='', target_id='', reason=None):
     reason = str(reason or '').strip()
     if reason:
         change = f'{change} · reason: {reason}' if change else f'reason: {reason}'
+    # `subject` is the owner of the thing being acted on. When that is the
+    # acting admin, say so — an admin approving/featuring their own venue is
+    # a legitimate but self-interested action and should read as one.
+    if subject is not None and getattr(subject, 'id', None) == request.user.id:
+        change = f'{change} · SELF-ACTION' if change else 'SELF-ACTION'
     AuditEntry.objects.create(
         admin=admin, action=action, target=str(target),
         target_id=str(target_id), change=str(change),
@@ -81,7 +89,9 @@ def _admin_by_email(email):
     email = str(email or '').strip().lower()
     if not email:
         return None
-    return User.objects.filter(email__iexact=email, role=User.Role.ADMIN).first()
+    return User.objects.filter(
+        email__iexact=email, role=User.Role.ADMIN, is_active=True
+    ).first()
 
 
 class AdminLoginView(APIView):
@@ -99,13 +109,18 @@ class AdminLoginView(APIView):
         admin = _admin_by_email(request.data.get('email'))
         password = str(request.data.get('password') or '')
         # Same generic message whether the email is unknown or the password is
-        # wrong — never reveal which admin emails exist.
-        if admin is None or not admin.check_password(password):
+        # wrong — and the same amount of WORK either way, so response timing
+        # cannot be used to discover which admin emails exist.
+        if admin is None:
+            check_password(password, make_password('timing-equaliser'))
+            return detail('Invalid email or password.', status.HTTP_400_BAD_REQUEST)
+        if not admin.check_password(password):
             return detail('Invalid email or password.', status.HTTP_400_BAD_REQUEST)
 
         code = generate_code()
+        # Admins sign in WITH their email, so both channels always apply.
         try:
-            send_otp_sms(admin.phone, code)
+            deliver_otp(code, admin.phone, admin.email)
         except OTPSendError:
             return detail(
                 'Could not send the OTP right now. Please try again.',
@@ -157,9 +172,11 @@ class AdminVerifyOtpView(APIView):
         otp.verified = True
         otp.save(update_fields=['used', 'verified'])
 
-        # Establish the session cookie.
+        # Establish the session cookie. NOTE: `token` is deliberately not the
+        # session key — auth is the HttpOnly cookie, and echoing the key into a
+        # readable body would hand it to anything that can see the response.
         login(request, admin, backend=_BACKEND)
-        return Response({'token': request.session.session_key or ''})
+        return Response({'token': 'session'})
 
 
 class AdminLogoutView(APIView):
@@ -192,6 +209,15 @@ class AdminBootstrapView(APIView):
 class _AdminWriteView(APIView):
     authentication_classes = [CsrfExemptSessionAuthentication]
     permission_classes = [IsAdmin]
+    # JSON ONLY — and that is a security control, not a preference. Admin
+    # writes are CSRF-exempt (decoupled SPA) and the session cookie is
+    # SameSite=None, so protection rests entirely on the CORS origin
+    # allowlist. Form-encoded and multipart POSTs are CORS-"simple": the
+    # browser sends them cross-site with cookies and NEVER preflights, so the
+    # allowlist would never be consulted and a plain <form> on any website
+    # could drive this API as a logged-in admin. Requiring JSON forces a
+    # preflight on every admin write.
+    parser_classes = [JSONParser]
 
     def _body(self, request):
         return request.data if isinstance(request.data, dict) else {}
@@ -282,6 +308,15 @@ class AdminVenueUpdateView(_AdminWriteView):
             value = str(data['status'])
             if value == 'deleted':
                 # APPROVE a vendor's deletion request — the real delete.
+                # This endpoint only ever APPROVES: with no pending request
+                # there is nothing to approve, and allowing it would turn the
+                # vendor-consent flow into a unilateral admin delete.
+                if not was_requested:
+                    return detail(
+                        'This venue has not requested deletion. Ask the '
+                        'vendor to request it first.',
+                        status.HTTP_409_CONFLICT,
+                    )
                 from venues.views import has_upcoming_bookings, soft_delete_listing
                 if has_upcoming_bookings(listing):
                     return detail(
@@ -294,6 +329,7 @@ class AdminVenueUpdateView(_AdminWriteView):
                     request, 'Approved venue deletion', listing.name,
                     _transition(previous, 'deleted'),
                     target_id=str(listing.pk), reason=data.get('reason'),
+                    subject=listing.vendor,
                 )
                 return Response(venue_row(listing))
             if value == 'live' and was_requested:
@@ -371,6 +407,15 @@ class AdminVendorUpdateView(_AdminWriteView):
         vendor = User.objects.filter(vendor_accounts_q(), pk=vendor_id).first()
         if vendor is None:
             return detail('Vendor not found.', status.HTTP_404_NOT_FOUND)
+        # Admins hold is_vendor too, so they match the vendor lookup. Suspending
+        # one here would flip is_active and lock them out of the admin panel
+        # entirely — that is not a vendor-moderation action.
+        if vendor.role == User.Role.ADMIN:
+            return detail(
+                'This account belongs to an admin and cannot be changed '
+                'from the vendors page.',
+                status.HTTP_403_FORBIDDEN,
+            )
         data = self._body(request)
         was_kyc, was_active = vendor.kyc, vendor.is_active
 
@@ -454,7 +499,16 @@ class AdminBookingUpdateView(_AdminWriteView):
     """PATCH /api/admin/bookings/<id> — status (e.g. refunded)."""
 
     def patch(self, request, booking_id):
-        booking = Booking.objects.filter(pk=booking_id).first()
+        # Lock the row for the whole read-check-refund-write sequence: two
+        # concurrent PATCHes (double-click, two tabs) could otherwise both see
+        # "not yet refunded" and fire two real gateway refunds.
+        with transaction.atomic():
+            return self._patch_locked(request, booking_id)
+
+    def _patch_locked(self, request, booking_id):
+        booking = (
+            Booking.objects.select_for_update().filter(pk=booking_id).first()
+        )
         if booking is None:
             return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
@@ -478,11 +532,18 @@ class AdminBookingUpdateView(_AdminWriteView):
                 from bookings.razorpay_client import (
                     RazorpayError, configured, refund_payment,
                 )
+                refund_amount = _to_int(data.get('refundAmount'), 0) or None
+                if refund_amount is not None and not (
+                    0 < refund_amount <= booking.amount
+                ):
+                    return detail(
+                        f'refundAmount must be between 1 and {booking.amount}.',
+                        status.HTTP_400_BAD_REQUEST,
+                    )
                 if configured():
                     try:
                         booking.refund_id = refund_payment(
-                            booking.razorpay_payment_id,
-                            _to_int(data.get('refundAmount'), 0) or None,
+                            booking.razorpay_payment_id, refund_amount,
                         )
                     except RazorpayError:
                         return detail(
@@ -607,6 +668,9 @@ class AdminAuditView(_AdminWriteView):
     def post(self, request):
         data = self._body(request)
         target = str(data.get('target') or '')
+        # `admin` is NEVER taken from the body — an audit trail that lets one
+        # admin attribute an action to another proves nothing.
+        acting = getattr(request.user, 'name', '') or getattr(request.user, 'phone', '')
 
         recent = AuditEntry.objects.filter(
             target=target,
@@ -616,7 +680,7 @@ class AdminAuditView(_AdminWriteView):
             return Response(audit_row(recent), status=status.HTTP_200_OK)
 
         entry = AuditEntry.objects.create(
-            admin=str(data.get('admin') or ''),
+            admin=acting,
             action=str(data.get('action') or ''),
             target=target,
             change=str(data.get('change') or ''),

@@ -14,6 +14,7 @@ from django.db import transaction
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from venues.models import Listing
@@ -65,11 +66,19 @@ def _amount_mismatch(expected):
 
 
 def _to_int(value, field):
-    """Numeric form fields may arrive as strings ('120') — coerce."""
+    """Numeric form fields may arrive as strings ('120') — coerce.
+
+    Negatives are refused here rather than at each call site: no price, rate,
+    fee, amount or discount in this system is ever legitimately below zero,
+    and a single negative value anywhere in a venue's stored catalogue would
+    otherwise zero out the bill for every customer of that venue."""
     try:
-        return int(str(value))
+        number = int(str(value))
     except (TypeError, ValueError):
         raise SlotError(f'{field} must be a number.')
+    if number < 0:
+        raise SlotError(f'{field} cannot be negative.')
+    return number
 
 
 def _vendor_paused(listing):
@@ -145,6 +154,21 @@ def _parse_unit(body):
     return sport, unit, unit_label
 
 
+# A venue cannot plausibly have more units than this. The value is
+# vendor-supplied JSON and is used as a LOOP BOUND on the public availability
+# endpoint, so it must be clamped or a single listing can hang every worker.
+MAX_UNITS = 64
+
+
+def _unit_count(entry):
+    """How many units this sport declares, clamped to something sane."""
+    try:
+        declared = int(entry.get('units') or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(declared, MAX_UNITS))
+
+
 def _price_at(values, unit):
     """values[unit-1] as an int, or None when absent/blank."""
     values = values or []
@@ -207,9 +231,16 @@ def _unit_rate(listing, sport, unit, weekend=False):
         return None
     detail = listing.record.get('detail') or {}
     if sport:
-        for entry in detail.get('sports') or []:
+        sports = detail.get('sports') or []
+        for entry in sports:
             if str(entry.get('name')) != sport:
                 continue
+            declared = _unit_count(entry)
+            if declared and unit > declared:
+                raise SlotError(
+                    f'{sport} has only {declared} '
+                    f'{"unit" if declared == 1 else "units"} at this venue.'
+                )
             if weekend:
                 rate = _weekend_price_at(entry, unit)
                 if rate is not None:
@@ -221,6 +252,11 @@ def _unit_rate(listing, sport, unit, weekend=False):
             if rate is not None:
                 return rate
             return _amount_or_none(entry.get('price'), 'sport price')
+        # The venue IS priced per sport, but this sport is not one of them.
+        # Refusing beats falling back to base_rate: that silently priced a
+        # made-up sport at the top-level rate (often absent, i.e. ₹0).
+        if sports:
+            raise SlotError(f'"{sport}" is not offered at this venue.')
         return None
     if weekend:
         rate = _weekend_price_at(detail, unit)
@@ -470,13 +506,13 @@ def _rates_for(listing, date):
     unit_rates = []
     for entry in detail.get('sports') or []:
         name = str(entry.get('name') or '')
-        for unit in range(1, int(entry.get('units') or 1) + 1):
+        for unit in range(1, (_unit_count(entry) or 1) + 1):
             unit_rates.append({
                 'sport': name, 'unit': unit,
                 'rate': _unit_rate(listing, name, unit, weekend),
             })
     if not unit_rates:
-        for unit in range(1, len(detail.get('unitPrices') or []) + 1):
+        for unit in range(1, min(len(detail.get('unitPrices') or []), MAX_UNITS) + 1):
             unit_rates.append({
                 'sport': None, 'unit': unit,
                 'rate': _unit_rate(listing, '', unit, weekend),
@@ -520,6 +556,11 @@ def _availability(listing, date):
 
 
 class AvailabilityView(APIView):
+    # Public and deliberately UNCACHED (slot freshness matters), so it needs a
+    # per-IP ceiling of its own.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'public'
+
     """GET /api/venues/<id>/availability?date=YYYY-MM-DD (public).
 
     NOT cached on purpose — a stale "free" slot would be a lie."""
@@ -603,12 +644,12 @@ def validate_booking_request(body):
                 'That time has already passed today.', status.HTTP_400_BAD_REQUEST
             )
 
-    # Payment method — stored and echoed EXACTLY as received ('online'
-    # only when the client sends none).
+    # Payment method — every customer booking is paid through the gateway
+    # now, so this only records WHICH online instrument was used.
     method = str(body.get('method') or Booking.Method.ONLINE)
     if method not in Booking.CUSTOMER_METHODS:
         return None, _message(
-            'method must be one of: online, upi, card, netbanking, venue.',
+            'method must be one of: online, upi, card, netbanking.',
             status.HTTP_400_BAD_REQUEST,
         )
 
@@ -709,37 +750,25 @@ class MyBookingsView(APIView):
         })
 
     def post(self, request):
-        body = request.data if isinstance(request.data, dict) else {}
+        """
+        RETIRED. This used to create a confirmed booking directly, with no
+        payment step — which meant anyone could mint a fully-paid booking for
+        free, and the weekly payout would wire the vendor real money for it.
+        Pay-at-venue was its last legitimate use and has been withdrawn, so
+        there is no longer any way to create a customer booking without the
+        gateway confirming the money first.
 
-        data, error = validate_booking_request(body)
-        if error is not None:
-            return error
-        listing, date = data['listing'], data['date']
-        intervals, sport, unit = data['intervals'], data['sport'], data['unit']
-
-        # --- The race-safe part ------------------------------------
-        with transaction.atomic():
-            # Lock this venue's row: concurrent bookings for the same
-            # venue now wait here and run strictly one at a time.
-            Listing.objects.select_for_update().get(pk=listing.pk)
-
-            if overlaps(intervals, _booked_intervals(listing, date, sport, unit)):
-                return _message(
-                    'One or more selected time slots were just booked. '
-                    'Please pick different slots.',
-                    status.HTTP_409_CONFLICT,
-                )
-
-            booking = Booking.objects.create(
-                **build_booking_fields(request.user, body, data)
-            )
-
-        # Booking makes you a customer, whatever your role (admin Users list).
-        if not request.user.is_customer:
-            request.user.is_customer = True
-            request.user.save(update_fields=['is_customer'])
-
-        return Response({'booking': booking.as_record()}, status=status.HTTP_201_CREATED)
+        Kept (rather than deleted) so an older client gets a clear, actionable
+        error instead of a bare 405.
+        """
+        return Response(
+            {
+                'message': 'Bookings are created through the payment gateway. '
+                           'Start with POST /api/payments/order.',
+                'code': 'PAYMENT_REQUIRED',
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
 
 
 class CancelBookingView(APIView):

@@ -23,7 +23,7 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import PhoneOTP, User, vendor_accounts_q
-from .otp import OTPSendError, generate_code, send_otp_sms
+from .otp import OTPSendError, deliver_otp, generate_code
 from .serializers import (
     OTPRequestSerializer,
     OTPVerifySerializer,
@@ -171,8 +171,15 @@ class BaseOTPRequestView(APIView):
             )
 
         code = generate_code()
+        # Same code over every channel we have. Login is phone-based, so an
+        # email only exists for someone who already has an account with one
+        # on file; when there is none this is simply SMS as before.
+        existing_email = (
+            User.objects.filter(phone=phone)
+            .values_list('email', flat=True).first() or ''
+        )
         try:
-            send_otp_sms(phone, code)
+            deliver_otp(code, phone, existing_email)
         except OTPSendError:
             # Never store an OTP the user did not receive.
             return _message(
@@ -366,7 +373,7 @@ class VendorRegisterView(APIView):
         if User.objects.filter(vendor_accounts_q(), phone=phone).exists():
             return _message('Phone already registered as a vendor.', status.HTTP_409_CONFLICT)
 
-        if email and User.objects.filter(email=email).exclude(phone=phone).exists():
+        if email and User.objects.filter(email__iexact=email).exclude(phone=phone).exists():
             return _message('Email already in use.', status.HTTP_400_BAD_REQUEST)
 
         existing = User.objects.filter(phone=phone).first()

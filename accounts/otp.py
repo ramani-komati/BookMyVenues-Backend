@@ -118,3 +118,79 @@ def send_otp_sms(phone: str, code: str) -> None:
     if settings.TWOFACTOR_API_KEY:
         return _send_via_2factor(phone, code)
     raise OTPSendError('SMS service is not configured (no provider API key set).')
+
+
+RESEND_URL = 'https://api.resend.com/emails'
+
+
+def send_otp_email(email: str, code: str) -> None:
+    """
+    Deliver the SAME code by email via Resend.
+
+    Resend does not generate anything — like the SMS provider, it is only a
+    delivery pipe for the code WE generated. Pass the same `code` you passed
+    to send_otp_sms and both messages carry the same number.
+
+    Raises OTPSendError on failure; callers decide whether that is fatal
+    (see deliver_otp — it is not, as long as one channel got through).
+    """
+    if not settings.RESEND_API_KEY:
+        raise OTPSendError('Email service is not configured (RESEND_API_KEY unset).')
+    if not email:
+        raise OTPSendError('No email address to send to.')
+
+    try:
+        response = requests.post(
+            RESEND_URL,
+            headers={'Authorization': f'Bearer {settings.RESEND_API_KEY}'},
+            json={
+                'from': settings.RESEND_FROM,
+                'to': [email],
+                'subject': f'{code} is your BookMyVenues code',
+                # Plain text only — no tracking pixels, nothing to click.
+                'text': (
+                    f'Your BookMyVenues verification code is {code}.\n\n'
+                    'It expires in 5 minutes. If you did not request it, '
+                    'you can ignore this email.'
+                ),
+            },
+            timeout=SMS_TIMEOUT,
+        )
+    except requests.RequestException as exc:
+        raise OTPSendError('Could not reach the email service.') from exc
+
+    if response.status_code not in (200, 201):
+        # The body can echo the code back — log only the status.
+        raise OTPSendError(f'Email service returned HTTP {response.status_code}.')
+
+
+def deliver_otp(code: str, phone: str, email: str = '') -> None:
+    """
+    Send ONE code over every channel we can.
+
+    The code is generated once by the caller and stored once (hashed), so it
+    does not matter which message the user reads it from — verification checks
+    the single stored copy.
+
+    Succeeds if AT LEAST ONE channel delivered. Only when every channel fails
+    do we raise, because storing an OTP the user never received would lock
+    them out. SECURITY: the code is never logged, on any path.
+    """
+    delivered = False
+    errors = []
+
+    try:
+        send_otp_sms(phone, code)
+        delivered = True
+    except OTPSendError as exc:
+        errors.append(f'sms: {exc}')
+
+    if email and settings.RESEND_API_KEY:
+        try:
+            send_otp_email(email, code)
+            delivered = True
+        except OTPSendError as exc:
+            errors.append(f'email: {exc}')
+
+    if not delivered:
+        raise OTPSendError('; '.join(errors) or 'No delivery channel configured.')

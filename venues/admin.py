@@ -41,8 +41,21 @@ class VenueAdmin(admin.ModelAdmin):
 
 @admin.register(PayoutDetails)
 class PayoutDetailsAdmin(admin.ModelAdmin):
-    list_display = ('user', 'account_holder', 'bank_name', 'ifsc')
+    """Bank details are shown MASKED, matching the super-admin panel
+    (adminpanel/formatters._mask_account). Nobody browsing Django admin needs
+    a full account number on screen, and this page has no OTP gate."""
+
+    list_display = ('user', 'account_holder', 'bank_name', 'ifsc', 'account_masked')
     search_fields = ('user__phone', 'account_holder')
+
+    @admin.display(description='Account number')
+    def account_masked(self, obj):
+        number = str(getattr(obj, 'account_number', '') or '')
+        return f'****{number[-4:]}' if len(number) > 4 else '****'
+
+    def get_readonly_fields(self, request, obj=None):
+        # Never editable here — payout details are the vendor's own data.
+        return [f.name for f in self.model._meta.fields]
 
 
 # Simple registrations so each model is also browsable on its own.

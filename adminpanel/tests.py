@@ -21,6 +21,46 @@ ADMIN_EMAIL = 'anita@bookmyvenues.in'
 ADMIN_PASSWORD = 'StrongPass123'
 
 
+
+_ORDER_SEQ = [0]
+
+
+def gateway_book(client, body):
+    """Create a booking through the payment gateway.
+
+    Pay-at-venue was retired, so POST /api/users/me/bookings no longer creates
+    anything — every customer booking goes order -> paid -> confirmed. Only
+    Razorpay's HTTP call is faked; the rest is the real code path.
+
+    Returns something shaped like the old create response (.status_code and
+    .data['booking']) on success, or the real error response on failure.
+    """
+    from unittest.mock import MagicMock, patch
+
+    from django.core.cache import cache
+    from django.test import override_settings
+
+    from bookings.models import Booking
+    from bookings.payments import _confirm_booking
+    from bookings.tests import _GatewayBooking
+
+    cache.clear()   # the payments throttle counter lives in the cache
+    _ORDER_SEQ[0] += 1
+    order_id = f'order_ADM{_ORDER_SEQ[0]}'
+    fake = MagicMock(status_code=200)
+    fake.json.return_value = {'id': order_id}
+    with override_settings(
+        RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+    ), patch('bookings.razorpay_client.requests.post', return_value=fake):
+        response = client.post('/api/payments/order', body, format='json')
+    if response.status_code != 201:
+        return response
+    booking = Booking.objects.get(pk=response.data['bookingId'])
+    _confirm_booking(booking, f'pay_{order_id}')
+    booking.refresh_from_db()
+    return _GatewayBooking(booking)
+
+
 class AdminAuthTests(APITestCase):
     def setUp(self):
         from django.core.cache import cache
@@ -31,10 +71,10 @@ class AdminAuthTests(APITestCase):
         )
         self.sent = {}
 
-        def fake_send(phone, code):
+        def fake_send(code, phone, email=''):
             self.sent[phone] = code
 
-        patcher = patch('adminpanel.views.send_otp_sms', side_effect=fake_send)
+        patcher = patch('adminpanel.views.deliver_otp', side_effect=fake_send)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -324,11 +364,11 @@ class AdminPhase3Tests(APITestCase):
         )
         self.client.force_authenticate(user=customer)
         tomorrow = (today_ist() + datetime.timedelta(days=1)).isoformat()
-        resp = self.client.post('/api/users/me/bookings', {
+        resp = gateway_book(self.client, {
             'venueId': str(listing.id), 'date': tomorrow,
             'slots': ['19:00 – 20:00'], 'addons': [], 'perSlot': 600,
             'amount': 650,  # 600 (1h) + ₹50 fee
-        }, format='json')
+        })
         self.assertEqual(resp.status_code, 201)
         self.assertEqual(resp.data['booking']['amount'], 650)
 
@@ -799,10 +839,10 @@ class ConsolidatedRoundTests(APITestCase):
         self.assertEqual(self.client.get(avail).data['booked'], [])  # slot freed
         # And the slot is genuinely rebookable:
         self.client.force_authenticate(user=self.customer)
-        rebook = self.client.post('/api/users/me/bookings', {
+        rebook = gateway_book(self.client, {
             'venueId': str(self.listing.id), 'date': self.tomorrow.isoformat(),
             'slots': ['18:00 – 20:00'], 'addons': [], 'perSlot': 600, 'amount': 1220,
-        }, format='json')
+        })
         self.assertEqual(rebook.status_code, 201)
 
     def test_pay_at_venue_booking_not_refundable(self):
@@ -983,11 +1023,11 @@ class PlatformFeeTests(APITestCase):
         import datetime as dt
         self.client.force_authenticate(user=self.customer)
         tomorrow = (today_ist() + dt.timedelta(days=1)).isoformat()
-        return self.client.post('/api/users/me/bookings', {
+        return gateway_book(self.client, {
             'venueId': str(self.listing.id), 'date': tomorrow,
             'slots': [slot], 'addons': [], 'perSlot': 600,
             'amount': amount,
-        }, format='json')
+        })
 
     def test_config_default(self):
         response = self.client.get('/api/config')
@@ -1185,10 +1225,10 @@ class CustomerVendorIdentityTests(APITestCase):
         self.client.force_authenticate(user=vendor)
         import datetime as dt
         tomorrow = (today_ist() + dt.timedelta(days=1)).isoformat()
-        r = self.client.post('/api/users/me/bookings', {
+        r = gateway_book(self.client, {
             'venueId': str(listing.id), 'date': tomorrow,
             'slots': ['10:00 – 11:00'], 'addons': [], 'perSlot': 600, 'amount': 620,
-        }, format='json')
+        })
         self.assertEqual(r.status_code, 201)
 
         self.client.force_authenticate(user=self.admin)
@@ -1202,7 +1242,7 @@ class CustomerVendorIdentityTests(APITestCase):
         vendor = User.objects.create_user(
             phone='9990000004', name='V', email='v2@x.in', role=User.Role.VENDOR,
         )
-        with patch('accounts.views.send_otp_sms', side_effect=lambda p, c: None):
+        with patch('accounts.views.deliver_otp', side_effect=lambda c, p, e='': None):
             self.client.post('/api/users/auth/otp', {'phone': '9990000004'}, format='json')
         from accounts.models import PhoneOTP
         from django.contrib.auth.hashers import make_password

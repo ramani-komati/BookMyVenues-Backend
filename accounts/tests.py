@@ -23,10 +23,12 @@ class OTPAuthTestBase(APITestCase):
         cache.clear()
         self.sent = {}  # phone -> last code "sent"
 
-        def fake_send(phone, code):
+        # deliver_otp(code, phone, email) — one code, every channel. The
+        # view calls this instead of the SMS sender directly now.
+        def fake_send(code, phone, email=''):
             self.sent[phone] = code
 
-        patcher = patch('accounts.views.send_otp_sms', side_effect=fake_send)
+        patcher = patch('accounts.views.deliver_otp', side_effect=fake_send)
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -99,7 +101,7 @@ class UserOTPTests(OTPAuthTestBase):
 
     def test_sms_failure_returns_502_and_stores_nothing(self):
         from accounts.otp import OTPSendError
-        with patch('accounts.views.send_otp_sms', side_effect=OTPSendError('down')):
+        with patch('accounts.views.deliver_otp', side_effect=OTPSendError('down')):
             response = self.request_otp(self.OTP_URL)
         self.assertEqual(response.status_code, 502)
         self.assertEqual(PhoneOTP.objects.count(), 0)
