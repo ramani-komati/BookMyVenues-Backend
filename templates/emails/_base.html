@@ -1,0 +1,86 @@
+{% comment %}
+Shared shell for every transactional email.
+
+Brand comes from the live site (thebookmyvenues.in):
+  navy-800 #06152C   brand primary / header
+  red-500  #F1252E   brand accent
+  logo     rounded navy square, red "B"  (favicon.svg)
+
+Email HTML is not web HTML: Outlook renders via Word, Gmail strips <style>
+blocks, and clients block remote images until the reader allows them. So this
+is TABLE-based with INLINE styles at a fixed 600px, and the logo mark is
+rebuilt in HTML rather than referenced as an image — it always renders, with
+no broken-icon placeholder. Set BRAND_LOGO_URL to use a hosted image instead.
+{% endcomment %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background-color:#EEF1F6;margin:0;padding:32px 12px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0"
+             style="width:600px;max-width:100%;border-collapse:collapse;">
+
+        <!-- Header -->
+        <tr>
+          <td style="background-color:#06152C;padding:26px 32px;border-radius:12px 12px 0 0;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                {% if logo_url %}
+                <td>
+                  <img src="{{ logo_url }}" alt="TheBookMyVenues" width="190"
+                       style="display:block;border:0;outline:none;height:auto;max-width:190px;">
+                </td>
+                {% else %}
+                <!-- Logo mark: the favicon, rebuilt so it needs no image. -->
+                <td width="42" style="width:42px;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" border="0"
+                         width="42" height="42"
+                         style="width:42px;height:42px;background-color:#0C1A32;border-radius:11px;">
+                    <tr>
+                      <td align="center" valign="middle"
+                          style="font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                                 font-size:25px;font-weight:800;color:#F1252E;line-height:42px;">B</td>
+                    </tr>
+                  </table>
+                </td>
+                <td style="padding-left:13px;
+                           font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                           font-size:19px;font-weight:800;letter-spacing:-0.3px;color:#FFFFFF;">
+                  The<span style="color:#F1252E;">Book</span>MyVenues
+                </td>
+                {% endif %}
+              </tr>
+            </table>
+            <div style="font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                        font-size:11px;letter-spacing:1.5px;text-transform:uppercase;
+                        color:#7789A6;padding-top:14px;">{{ eyebrow }}</div>
+          </td>
+        </tr>
+
+        <!-- Body -->
+        <tr>
+          <td style="background-color:#FFFFFF;padding:34px 32px 30px 32px;
+                     font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                     color:#06152C;">
+            {% block content %}{% endblock %}
+          </td>
+        </tr>
+
+        <!-- Footer -->
+        <tr>
+          <td style="background-color:#FFFFFF;border-top:1px solid #D6DEEA;
+                     padding:20px 32px 26px 32px;border-radius:0 0 12px 12px;
+                     font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                     font-size:12px;line-height:19px;color:#7789A6;">
+            {% block footer %}
+              This is an automated message from TheBookMyVenues.
+            {% endblock %}
+            <div style="padding-top:10px;">
+              <a href="{{ site_url }}" style="color:#45577A;text-decoration:underline;">{{ site_domain }}</a>
+            </div>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

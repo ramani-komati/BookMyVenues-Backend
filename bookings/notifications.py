@@ -2,19 +2,17 @@
 Booking notifications — sent when a booking is confirmed.
 
 Two channels, same content:
-  * email  (Resend)  — effectively free, so it is the default
-  * SMS    (Fast2SMS) — OFF by default; see NOTIFY_SMS_ENABLED below
+  * email (Resend)    — no template registration needed, body sent inline
+  * SMS   (Fast2SMS)  — needs a DLT-approved template for the cheap route
 
-WHY SMS IS OFF BY DEFAULT
--------------------------
-Fast2SMS's 'q' (quick) route costs several rupees per message. A booking sends
-two (customer confirm + vendor alert), which together cost more than the
-platform fee earns on that booking — every booking would lose money.
-The cheap 'otp' route cannot carry these messages: it only sends a bare code.
-Real transactional SMS in India needs DLT-registered templates.
+Both are on by default (NOTIFY_EMAIL_ENABLED / NOTIFY_SMS_ENABLED). A booking
+sends two messages per channel: one to the customer, one to the vendor.
 
-So: email carries the notifications, SMS stays for OTP. Flip NOTIFY_SMS_ENABLED
-to True once DLT templates are approved and the per-message price is sane.
+NOTE ON THE SMS ROUTE: the 'q' (quick) route sends arbitrary text and needs no
+template, but is priced per message at the higher rate. The ~20 paise rate
+comes from a DLT-registered transactional template, which requires the message
+text to be registered in advance with matching {#var#} placeholders — see
+FRONTEND_API_GUIDE / README for the exact strings to register.
 
 NOTHING HERE MAY BREAK A BOOKING. Every send is best-effort: failures are
 logged and swallowed, never raised into the request that created the booking.
@@ -38,7 +36,7 @@ def _slot_text(booking):
     return booking.slots[0] if booking.slots else ''
 
 
-def _send(channel, target, body, subject=''):
+def _send(channel, target, body, subject='', html=None):
     """One best-effort delivery. Returns True when it got through.
 
     Catches everything: a notification must never break the booking that
@@ -50,7 +48,7 @@ def _send(channel, target, body, subject=''):
         if channel == 'email':
             if not settings.NOTIFY_EMAIL_ENABLED:
                 return False
-            _send_email(target, subject, body)
+            _send_email(target, subject, body, html)
         else:
             if not settings.NOTIFY_SMS_ENABLED:
                 return False
@@ -61,21 +59,24 @@ def _send(channel, target, body, subject=''):
         return False
 
 
-def _send_email(address, subject, body):
-    """Reuses the Resend transport; the subject differs from the OTP mail."""
+def _send_email(address, subject, body, html=None):
+    """Resend transport. `html` is optional so callers can send text-only."""
     import requests
 
     if not settings.RESEND_API_KEY:
         raise OTPSendError('RESEND_API_KEY unset.')
+    payload = {
+        'from': settings.RESEND_FROM,
+        'to': [address],
+        'subject': subject,
+        'text': body,
+    }
+    if html:
+        payload['html'] = html
     response = requests.post(
         'https://api.resend.com/emails',
         headers={'Authorization': f'Bearer {settings.RESEND_API_KEY}'},
-        json={
-            'from': settings.RESEND_FROM,
-            'to': [address],
-            'subject': subject,
-            'text': body,
-        },
+        json=payload,
         timeout=10,
     )
     if response.status_code not in (200, 201):
@@ -88,21 +89,18 @@ def notify_booking_confirmed(booking):
     Best-effort: returns True if at least one message got through, so the
     caller can record it and a later catch-up run can retry the rest.
     """
+    from BookMyVenue.emails import render_booking_email
+
     when = f'{booking.date:%d %b %Y} at {_slot_text(booking)}'
     sent = False
 
     # --- customer ---
-    customer_email = getattr(booking.user, 'email', '') or ''
-    body = (
-        f'Your booking is confirmed.\n\n'
-        f'Venue: {booking.venue_name}\n'
-        f'When: {when}\n'
-        f'Amount: {_rupees(booking.amount)}\n'
-        f'Booking ID: {booking.id}\n\n'
-        f'Show this booking ID at the venue.'
+    subject, html, text = render_booking_email(
+        venue=booking.venue_name, when=when, amount=booking.amount,
+        booking_id=booking.id,
     )
-    sent |= _send('email', customer_email, body,
-                  subject=f'Booking confirmed — {booking.venue_name}')
+    sent |= _send('email', getattr(booking.user, 'email', '') or '', text,
+                  subject=subject, html=html)
     sent |= _send('sms', booking.phone,
                   f'Booking confirmed: {booking.venue_name}, {when}. '
                   f'ID {booking.id}')
@@ -111,17 +109,13 @@ def notify_booking_confirmed(booking):
     vendor = getattr(booking.listing, 'vendor', None)
     if vendor is not None:
         who = booking.customer_name or 'A customer'
-        contact = booking.phone or 'no phone on file'
-        vendor_body = (
-            f'You have a new booking.\n\n'
-            f'Venue: {booking.venue_name}\n'
-            f'When: {when}\n'
-            f'Customer: {who} ({contact})\n'
-            f'Amount: {_rupees(booking.amount)}\n'
-            f'Booking ID: {booking.id}\n'
+        subject, html, text = render_booking_email(
+            venue=booking.venue_name, when=when, amount=booking.amount,
+            booking_id=booking.id, customer=who, phone=booking.phone,
+            is_vendor=True,
         )
-        sent |= _send('email', vendor.email or '', vendor_body,
-                      subject=f'New booking — {booking.venue_name}')
+        sent |= _send('email', vendor.email or '', text,
+                      subject=subject, html=html)
         sent |= _send('sms', vendor.phone,
                       f'New booking: {booking.venue_name}, {when}, '
                       f'{who}. ID {booking.id}')

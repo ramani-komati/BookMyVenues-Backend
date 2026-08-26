@@ -339,7 +339,8 @@ class SmsProviderTests(APITestCase):
 
         from accounts.otp import send_otp_sms
         with override_settings(
-            FAST2SMS_API_KEY='fast-key', TWOFACTOR_API_KEY='two-key'
+            FAST2SMS_API_KEY='fast-key', TWOFACTOR_API_KEY='two-key',
+            FAST2SMS_ROUTE='q',   # pinned: the live env now runs 'dlt'
         ):
             with patch(
                 'accounts.otp.requests.get', return_value=self._ok({'return': True})
@@ -350,8 +351,7 @@ class SmsProviderTests(APITestCase):
         kwargs = mock_get.call_args[1]
         self.assertEqual(kwargs['headers']['authorization'], 'fast-key')
         self.assertEqual(kwargs['params']['numbers'], '9876543210')
-        # Default route is 'q' — Fast2SMS's dedicated OTP route needs website
-        # verification, so we compose the message ourselves.
+        # On 'q' we compose the message ourselves and it carries the code.
         self.assertEqual(kwargs['params']['route'], 'q')
         self.assertIn('123456', kwargs['params']['message'])
 
@@ -367,6 +367,29 @@ class SmsProviderTests(APITestCase):
         params = mock_get.call_args[1]['params']
         self.assertEqual(params['route'], 'otp')
         self.assertEqual(params['variables_values'], '123456')
+
+    def test_dlt_route_sends_template_id_not_message_text(self):
+        """On DLT the carrier already holds the wording: we send the approved
+        template id plus the variable, never free text. Sending text here
+        would be rejected, which is why booking SMS cannot use this route
+        until its own templates are approved."""
+        from django.test import override_settings
+
+        from accounts.otp import send_otp_sms
+        with override_settings(
+            FAST2SMS_API_KEY='fast-key', FAST2SMS_ROUTE='dlt',
+            FAST2SMS_SENDER_ID='TBMV', FAST2SMS_DLT_TEMPLATE_ID='223840',
+        ):
+            with patch(
+                'accounts.otp.requests.get', return_value=self._ok({'return': True})
+            ) as mock_get:
+                send_otp_sms('9876543210', '123456')
+        params = mock_get.call_args[1]['params']
+        self.assertEqual(params['route'], 'dlt')
+        self.assertEqual(params['sender_id'], 'TBMV')
+        self.assertEqual(params['message'], '223840')       # template id
+        self.assertEqual(params['variables_values'], '123456')
+        self.assertNotIn('OTP', str(params.get('message')))  # no free text
 
     def test_falls_back_to_2factor_without_fast2sms(self):
         from django.test import override_settings

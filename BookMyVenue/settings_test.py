@@ -15,3 +15,13 @@ DATABASES['default']['TEST']['NAME'] = 'test_bmv_suite'
 
 # The test client talks to this host.
 ALLOWED_HOSTS = ['testserver', 'localhost', '127.0.0.1']
+
+# SAFETY: blank every outbound provider credential so a test can never reach a
+# real service — no stray SMS, no email, no gateway call, no spend. Tests that
+# exercise a provider supply their own fake keys with override_settings.
+FAST2SMS_API_KEY = ''
+TWOFACTOR_API_KEY = ''
+RESEND_API_KEY = ''
+RAZORPAY_KEY_ID = ''
+RAZORPAY_KEY_SECRET = ''
+RAZORPAY_WEBHOOK_SECRET = ''

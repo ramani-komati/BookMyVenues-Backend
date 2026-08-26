@@ -86,7 +86,7 @@ ROOT_URLCONF = 'BookMyVenue.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -168,6 +168,13 @@ FAST2SMS_API_KEY = os.environ.get('FAST2SMS_API_KEY', '')
 # 'q' (quick) works on any recharged account; 'otp' is Fast2SMS's dedicated
 # OTP route and needs website verification on their dashboard first.
 FAST2SMS_ROUTE = os.environ.get('FAST2SMS_ROUTE', 'q')
+# DLT route (the cheap, TRAI-compliant one). Both must be set to use it:
+#   FAST2SMS_SENDER_ID       your approved 6-character header, e.g. TBMYVN
+#   FAST2SMS_DLT_TEMPLATE_ID the numeric Message ID Fast2SMS shows for the
+#                            approved template in DLT Manager
+# The template text is fixed at approval time; we only supply the variable.
+FAST2SMS_SENDER_ID = os.environ.get('FAST2SMS_SENDER_ID', '')
+FAST2SMS_DLT_TEMPLATE_ID = os.environ.get('FAST2SMS_DLT_TEMPLATE_ID', '')
 
 TWOFACTOR_API_KEY = os.environ.get('TWOFACTOR_API_KEY', '')
 # SMS template name — forces SMS delivery (omitting it can trigger
@@ -180,13 +187,22 @@ TWOFACTOR_SMS_TEMPLATE = os.environ.get('TWOFACTOR_SMS_TEMPLATE', 'OTP1')
 RESEND_API_KEY = os.environ.get('RESEND_API_KEY', '')
 # Must be a domain verified in Resend; onboarding@resend.dev works for testing.
 RESEND_FROM = os.environ.get('RESEND_FROM', 'onboarding@resend.dev')
+# Optional: absolute https URL of a logo image (PNG, ~240px wide, transparent).
+# Unset -> the emails fall back to a typographic wordmark, which always renders
+# even when the client blocks images.
+BRAND_LOGO_URL = os.environ.get('BRAND_LOGO_URL', '')
+BRAND_SITE_URL = os.environ.get('BRAND_SITE_URL', 'https://thebookmyvenues.in')
 
 
-# Booking notifications (confirmation + 30-minute reminder).
-# Email is effectively free, so it is on. SMS is OFF because Fast2SMS's quick
-# route costs more per message than the platform fee earns on a booking, and
-# the cheap 'otp' route cannot carry anything but a bare code. Turn it on once
-# DLT-approved templates exist.
+# Booking notifications go by EMAIL only.
+#
+# SMS is off because the DLT route accepts nothing but pre-approved template
+# text, and the only approved template is the OTP one — a booking SMS would be
+# rejected by the carrier, not merely expensive. Register booking templates
+# with DLT and set NOTIFY_SMS_ENABLED=True to turn this on; the code already
+# handles both channels.
+#
+# NOTE: this flag does NOT affect the OTP, which always goes by SMS.
 NOTIFY_EMAIL_ENABLED = os.environ.get('NOTIFY_EMAIL_ENABLED', 'True') == 'True'
 NOTIFY_SMS_ENABLED = os.environ.get('NOTIFY_SMS_ENABLED', 'False') == 'True'
 

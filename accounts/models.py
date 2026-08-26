@@ -139,7 +139,10 @@ class PhoneOTP(models.Model):
         VENDOR = 'VENDOR', 'Vendor'  # vendor login / signup
         ADMIN = 'ADMIN', 'Admin'     # super-admin login (2nd step after password)
 
-    LIFETIME_MINUTES = 5   # code expires 5 minutes after sending
+    # 10 minutes because the approved DLT template says "valid for 10
+    # minutes" — the SMS text is locked once DLT approves it, so the code
+    # must outlive what the message promises, not the other way round.
+    LIFETIME_MINUTES = 10
     MAX_ATTEMPTS = 5       # wrong guesses allowed before the OTP is locked
     REGISTER_WINDOW_MINUTES = 30  # how long a verified OTP stays valid for vendor signup
 

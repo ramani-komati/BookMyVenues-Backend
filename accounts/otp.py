@@ -43,6 +43,19 @@ def _fast2sms_params(phone: str, code: str) -> dict:
     cleaner, but it requires website verification on their dashboard. Switch
     with FAST2SMS_ROUTE once that verification is done; no code change.
     """
+    if settings.FAST2SMS_ROUTE == 'dlt':
+        # The approved template supplies the wording; we only fill {#var#}.
+        # Approved text:
+        #   "Your OTP for THEBOOKMY VENUES is {#var#}. This OTP is valid for
+        #    10 minutes. Do not share this OTP with anyone."
+        return {
+            'route': 'dlt',
+            'sender_id': settings.FAST2SMS_SENDER_ID,
+            'message': settings.FAST2SMS_DLT_TEMPLATE_ID,
+            'variables_values': code,
+            'flash': '0',
+            'numbers': phone,
+        }
     if settings.FAST2SMS_ROUTE == 'otp':
         return {'route': 'otp', 'variables_values': code, 'numbers': phone}
     return {
@@ -139,6 +152,10 @@ def send_otp_email(email: str, code: str) -> None:
     if not email:
         raise OTPSendError('No email address to send to.')
 
+    from BookMyVenue.emails import render_otp_email
+    from accounts.models import PhoneOTP
+
+    subject, html, text = render_otp_email(code, PhoneOTP.LIFETIME_MINUTES)
     try:
         response = requests.post(
             RESEND_URL,
@@ -146,13 +163,11 @@ def send_otp_email(email: str, code: str) -> None:
             json={
                 'from': settings.RESEND_FROM,
                 'to': [email],
-                'subject': f'{code} is your BookMyVenues code',
-                # Plain text only — no tracking pixels, nothing to click.
-                'text': (
-                    f'Your BookMyVenues verification code is {code}.\n\n'
-                    'It expires in 5 minutes. If you did not request it, '
-                    'you can ignore this email.'
-                ),
+                'subject': subject,
+                # Both parts: some clients show text, and multipart mail is
+                # treated better by spam filters than HTML alone.
+                'html': html,
+                'text': text,
             },
             timeout=SMS_TIMEOUT,
         )

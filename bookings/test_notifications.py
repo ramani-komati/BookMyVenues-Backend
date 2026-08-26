@@ -60,7 +60,9 @@ class BookingNotificationTests(TestCase):
         self.assertIn('asha@example.com', recipients)     # customer
         self.assertIn('vendor@example.com', recipients)   # vendor
 
-    def test_sms_is_off_by_default_because_it_costs_more_than_the_fee(self):
+    def test_booking_sms_is_off_until_dlt_templates_exist(self):
+        """The DLT route rejects any text that is not an approved template,
+        and only the OTP template is approved."""
         booking = self._booking()
         with patch('bookings.notifications._send_email'), \
              patch('bookings.notifications.send_otp_sms') as sms:
@@ -68,7 +70,7 @@ class BookingNotificationTests(TestCase):
         sms.assert_not_called()
 
     @override_settings(NOTIFY_SMS_ENABLED=True)
-    def test_sms_goes_out_when_explicitly_enabled(self):
+    def test_sms_goes_to_both_sides_once_enabled(self):
         booking = self._booking()
         with patch('bookings.notifications._send_email'), \
              patch('bookings.notifications.send_otp_sms') as sms:

@@ -1,0 +1,57 @@
+{% extends "emails/_base.html" %}
+{% block content %}
+  <!-- Status badge, in brand navy rather than a stock green -->
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+    <tr>
+      <td style="background-color:#EEF1F6;border-radius:20px;padding:7px 15px;
+                 font-size:11px;font-weight:800;letter-spacing:1px;color:#06152C;">
+        &#10003; {% if is_vendor %}NEW BOOKING{% else %}CONFIRMED{% endif %}
+      </td>
+    </tr>
+  </table>
+
+  <div style="font-size:23px;font-weight:800;line-height:30px;color:#06152C;
+              letter-spacing:-0.4px;padding-top:16px;">
+    {{ venue }}
+  </div>
+  <div style="font-size:15px;line-height:23px;color:#45577A;padding-top:6px;">
+    {% if is_vendor %}A customer just booked this venue.{% else %}You're all set. Show the booking ID below at the venue.{% endif %}
+  </div>
+
+  <!-- Detail card -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="margin-top:24px;border:1px solid #D6DEEA;border-radius:10px;">
+    {% for label, value in rows %}
+    <tr>
+      <td style="padding:13px 18px;font-size:13px;color:#7789A6;width:36%;
+                 {% if not forloop.last %}border-bottom:1px solid #EEF1F6;{% endif %}">
+        {{ label }}
+      </td>
+      <td style="padding:13px 18px;font-size:14px;color:#06152C;font-weight:600;
+                 {% if not forloop.last %}border-bottom:1px solid #EEF1F6;{% endif %}">
+        {{ value }}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <!-- Amount: brand red on navy -->
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+         style="margin-top:14px;background-color:#06152C;border-radius:10px;">
+    <tr>
+      <td style="padding:17px 18px;font-size:13px;color:#7789A6;">
+        {% if is_vendor %}Booking value{% else %}Amount paid{% endif %}
+      </td>
+      <td align="right" style="padding:17px 18px;font-size:23px;font-weight:800;color:#F1252E;">
+        &#8377;{{ amount }}
+      </td>
+    </tr>
+  </table>
+{% endblock %}
+{% block footer %}
+  {% if is_vendor %}
+    The slot is already blocked on your calendar — no action needed.
+  {% else %}
+    Need to cancel? Open your bookings in the app.
+  {% endif %}
+{% endblock %}

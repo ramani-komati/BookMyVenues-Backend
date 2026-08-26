@@ -1,0 +1,29 @@
+{% extends "emails/_base.html" %}
+{% block content %}
+  <div style="font-size:20px;font-weight:800;line-height:27px;color:#06152C;letter-spacing:-0.3px;">
+    Your verification code
+  </div>
+  <div style="font-size:15px;line-height:23px;color:#45577A;padding-top:8px;">
+    Enter this code to sign in. It expires in {{ minutes }} minutes.
+  </div>
+
+  <!-- Large and letter-spaced so it reads cleanly off a phone. -->
+  <table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:22px 0 4px 0;">
+    <tr>
+      <td style="background-color:#EEF1F6;border:1px solid #D6DEEA;border-radius:10px;
+                 padding:17px 28px;font-family:ui-monospace,'SF Mono',Menlo,Consolas,'Courier New',monospace;
+                 font-size:32px;letter-spacing:9px;font-weight:700;color:#06152C;">
+        {{ code }}
+      </td>
+    </tr>
+  </table>
+
+  <div style="font-size:13px;line-height:20px;color:#7789A6;padding-top:16px;">
+    Didn't request this? You can safely ignore this email — nobody can sign in
+    without the code.
+  </div>
+{% endblock %}
+{% block footer %}
+  For your security, never share this code with anyone — including someone
+  claiming to be from TheBookMyVenues.
+{% endblock %}
