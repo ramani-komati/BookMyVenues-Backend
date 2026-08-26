@@ -12,10 +12,13 @@ Switching provider is therefore a pure environment change.
 
 SECURITY: the OTP code is never logged or printed anywhere.
 """
+import logging
 import secrets
 
 import requests
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 # How long we wait for the provider to answer before giving up (seconds).
 SMS_TIMEOUT = 10
@@ -194,18 +197,27 @@ def deliver_otp(code: str, phone: str, email: str = '') -> None:
     delivered = False
     errors = []
 
+    # Each channel is isolated behind a BROAD except, not just OTPSendError.
+    # A channel can fail in ways that are not OTPSendError — a missing
+    # template, a bad sender address, any library raising something new — and
+    # if that escaped, one broken channel would take login down even though
+    # the other had already delivered the code. Worse, the caller stores the
+    # OTP only after this returns, so an escape means the user receives a
+    # code the server never saved.
     try:
         send_otp_sms(phone, code)
         delivered = True
-    except OTPSendError as exc:
+    except Exception as exc:
         errors.append(f'sms: {exc}')
+        logger.warning('OTP SMS delivery failed: %s', exc)
 
     if email and settings.RESEND_API_KEY:
         try:
             send_otp_email(email, code)
             delivered = True
-        except OTPSendError as exc:
+        except Exception as exc:
             errors.append(f'email: {exc}')
+            logger.warning('OTP email delivery failed: %s', exc)
 
     if not delivered:
         raise OTPSendError('; '.join(errors) or 'No delivery channel configured.')

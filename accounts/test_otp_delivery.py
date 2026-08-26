@@ -51,6 +51,24 @@ class DeliverOtpTests(TestCase):
             deliver_otp('483920', '9000000001', 'asha@example.com')
         email.assert_called_once()
 
+    def test_a_channel_crashing_does_not_break_login(self):
+        """REGRESSION: the email path raised something that was not an
+        OTPSendError, it escaped deliver_otp, and login 500'd — even though
+        the SMS had already gone out. The user got a code the server never
+        stored."""
+        with patch('accounts.otp.send_otp_sms') as sms, \
+             patch('accounts.otp.send_otp_email',
+                   side_effect=RuntimeError('template blew up')):
+            deliver_otp('483920', '9000000001', 'asha@example.com')  # must not raise
+        sms.assert_called_once()
+
+    def test_sms_crashing_still_delivers_by_email(self):
+        with patch('accounts.otp.send_otp_sms',
+                   side_effect=RuntimeError('provider exploded')), \
+             patch('accounts.otp.send_otp_email') as email:
+            deliver_otp('483920', '9000000001', 'asha@example.com')
+        email.assert_called_once()
+
     def test_all_channels_failing_raises(self):
         """Never store an OTP the user could not possibly have received."""
         with patch('accounts.otp.send_otp_sms',
