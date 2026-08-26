@@ -14,6 +14,8 @@ urlpatterns = [
     # Writes (Phase 2)
     path('approvals/<uuid:listing_id>', views.AdminApprovalUpdateView.as_view(), name='admin-approval'),
     path('venues/<uuid:listing_id>', views.AdminVenueUpdateView.as_view(), name='admin-venue'),
+    # Must precede the <int:vendor_id> route so 'token' is never read as an id.
+    path('vendors/token', views.AdminVendorTokenView.as_view(), name='admin-vendor-token'),
     path('vendors/<int:vendor_id>', views.AdminVendorUpdateView.as_view(), name='admin-vendor'),
     path('users/<int:user_id>', views.AdminUserUpdateView.as_view(), name='admin-user'),
     path('bookings/<str:booking_id>', views.AdminBookingUpdateView.as_view(), name='admin-booking'),

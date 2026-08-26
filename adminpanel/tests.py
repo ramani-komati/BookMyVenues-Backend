@@ -1394,3 +1394,82 @@ class PayoutGenerationTests(APITestCase):
             self.assertEqual(self._boot()['bookings'][0]['status'], 'confirmed')
         with patch('bookings.slots.now_minutes_ist', return_value=9 * 60):
             self.assertEqual(self._boot()['bookings'][0]['status'], 'completed')
+
+
+class AdminVendorTokenTests(APITestCase):
+    """POST /api/admin/vendors/token — an admin registering a venue for an
+    owner. This is impersonation, so the guards matter as much as the token."""
+
+    URL = '/api/admin/vendors/token'
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000001', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    def test_creates_a_new_vendor_and_returns_a_working_token(self):
+        r = self.client.post(self.URL, {'phone': '9812345670', 'name': 'Owner'},
+                             format='json')
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(r.data['created'])
+        self.assertEqual(r.data['vendor']['phone'], '9812345670')
+
+        # The token must work on the real vendor endpoints, unchanged.
+        from rest_framework.test import APIClient
+        vendor_client = APIClient()
+        vendor_client.credentials(HTTP_AUTHORIZATION=f'Bearer {r.data["token"]}')
+        self.assertEqual(
+            vendor_client.get('/api/vendors/me/dashboard').status_code, 200
+        )
+
+    def test_existing_vendor_is_reused_not_duplicated(self):
+        from accounts.models import User
+        existing = User.objects.create_user(
+            phone='9812345671', name='Real Name', role=User.Role.VENDOR,
+        )
+        r = self.client.post(self.URL, {'phone': '9812345671', 'name': 'Wrong Name'},
+                             format='json')
+        self.assertEqual(r.status_code, 200)
+        self.assertFalse(r.data['created'])
+        existing.refresh_from_db()
+        self.assertEqual(existing.name, 'Real Name')   # never overwritten
+
+    def test_admin_accounts_cannot_be_impersonated(self):
+        r = self.client.post(self.URL, {'phone': self.admin.phone}, format='json')
+        self.assertEqual(r.status_code, 403)
+
+    def test_blocked_vendor_refused(self):
+        from accounts.models import User
+        User.objects.create_user(
+            phone='9812345672', name='Blocked', role=User.Role.VENDOR,
+            is_active=False,
+        )
+        r = self.client.post(self.URL, {'phone': '9812345672'}, format='json')
+        self.assertEqual(r.status_code, 403)
+
+    def test_invalid_phone_rejected(self):
+        for bad in ('123', '', '5123456789', 'abcdefghij'):
+            r = self.client.post(self.URL, {'phone': bad}, format='json')
+            self.assertEqual(r.status_code, 400, f'{bad!r} was accepted')
+
+    def test_requires_an_admin_session(self):
+        self.client.force_authenticate(user=None)
+        r = self.client.post(self.URL, {'phone': '9812345670'}, format='json')
+        self.assertIn(r.status_code, (401, 403))
+
+    def test_token_is_short_lived_and_names_the_acting_admin(self):
+        r = self.client.post(self.URL, {'phone': '9812345673'}, format='json')
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken(r.data['token'])
+        self.assertEqual(token['actor'], f'admin:{self.admin.id}')
+        # 2 hours, not the usual 30 days.
+        self.assertLess(token['exp'] - token['iat'], 3 * 3600)
+
+    def test_the_mint_is_audited(self):
+        from adminpanel.models import AuditEntry
+        self.client.post(self.URL, {'phone': '9812345674'}, format='json')
+        entry = AuditEntry.objects.order_by('-created_at').first()
+        self.assertIn('vendor token issued', entry.change)
+        self.assertEqual(entry.admin, self.admin.name or self.admin.phone)

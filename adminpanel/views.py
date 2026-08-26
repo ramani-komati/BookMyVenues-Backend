@@ -8,6 +8,7 @@ Phase 1: auth + the aggregate `bootstrap` read. Writes and the new models
 (payouts / reviews / audit / settings persistence) come in later phases.
 """
 import datetime
+import re
 
 from django.contrib.auth import login, logout
 from django.db import transaction
@@ -19,6 +20,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from accounts.models import PhoneOTP, User, vendor_accounts_q
 from accounts.otp import OTPSendError, deliver_otp, generate_code
@@ -44,6 +46,8 @@ from .models import AuditEntry, Payout, Review, Settings
 REVIEW_STATUSES = {'pending', 'approved', 'changes', 'rejected'}
 BOOKING_STATUSES = {'confirmed', 'completed', 'refund_pending', 'refunded', 'cancelled'}
 PAYOUT_STATUSES = {'pending', 'failed', 'completed'}
+# An admin-minted vendor token only has to outlive one registration wizard.
+TOKEN_HOURS = 2
 
 
 def _to_int(value, default=0):
@@ -392,6 +396,96 @@ def _vendor_has_active_bookings(vendor):
         if not end or end > now_minutes_ist():
             return True
     return False
+
+
+class AdminVendorTokenView(_AdminWriteView):
+    """
+    POST /api/admin/vendors/token {phone, name?} -> a vendor JWT.
+
+    Lets an admin register a venue on an owner's behalf by reusing the normal
+    vendor pipeline (/venues/drafts/* -> /submit) instead of duplicating it.
+    Creates the vendor if that phone is new — the admin session is the
+    authorization, so no OTP.
+
+    SECURITY — this is admin impersonation of a vendor, and the token it
+    returns is a FULL vendor token: it also opens /vendors/me/dashboard
+    (earnings), payout details and venue deletion, not just the draft
+    endpoints. Three things narrow that:
+      * it expires in 2 hours, not the usual 30 days,
+      * it carries an `actor` claim naming the admin who minted it, and
+      * every mint is written to the audit log.
+    Admin accounts are refused outright — one admin must not be able to mint
+    a token for another.
+    """
+
+    def post(self, request):
+        data = self._body(request)
+        phone = ''.join(ch for ch in str(data.get('phone') or '') if ch.isdigit())
+        if len(phone) == 11 and phone.startswith('0'):
+            phone = phone[1:]
+        if len(phone) == 12 and phone.startswith('91'):
+            phone = phone[2:]
+        if not re.fullmatch(r'[6-9]\d{9}', phone):
+            return detail(
+                'A valid 10-digit mobile number is required.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        name = str(data.get('name') or '').strip()
+        vendor = User.objects.filter(phone=phone).first()
+        created = vendor is None
+
+        if created:
+            vendor = User.objects.create_user(
+                phone=phone, name=name, role=User.Role.VENDOR,
+            )
+            vendor.is_vendor = True
+            vendor.save(update_fields=['is_vendor'])
+        else:
+            if vendor.role == User.Role.ADMIN:
+                return detail(
+                    'That number belongs to an admin account.',
+                    status.HTTP_403_FORBIDDEN,
+                )
+            if not vendor.is_active:
+                return detail(
+                    'That vendor account is blocked.',
+                    status.HTTP_403_FORBIDDEN,
+                )
+            fields = []
+            # Only ever FILL a blank name — never overwrite what the vendor set.
+            if name and not vendor.name:
+                vendor.name = name
+                fields.append('name')
+            if not vendor.is_vendor:
+                vendor.is_vendor = True
+                fields.append('is_vendor')
+            if fields:
+                vendor.save(update_fields=fields)
+
+        token = RefreshToken.for_user(vendor).access_token
+        token.set_exp(lifetime=datetime.timedelta(hours=TOKEN_HOURS))
+        # Traceable: the token still authenticates AS the vendor, but records
+        # who minted it.
+        token['actor'] = f'admin:{request.user.id}'
+
+        record_audit(
+            request,
+            'Created vendor' if created else 'Issued vendor token',
+            vendor.name or vendor.phone,
+            f'vendor token issued ({TOKEN_HOURS}h)',
+            target_id=str(vendor.id),
+            subject=vendor,
+        )
+
+        return Response({
+            'vendor': {
+                'id': str(vendor.id), 'phone': vendor.phone,
+                'name': vendor.name or '', 'email': vendor.email or '',
+            },
+            'token': str(token),
+            'created': created,
+        })
 
 
 class AdminVendorUpdateView(_AdminWriteView):
