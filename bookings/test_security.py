@@ -327,7 +327,7 @@ class OfferPerUserLimitTests(GatewayBookingMixin, APITestCase):
         Booking.objects.create(
             listing=self.listing, user=None, venue_name='Limit Hall',
             category='hall', location='x', image='', customer_name='Offline',
-            phone='', date=today_ist() + datetime.timedelta(days=1),
+            phone='', date=datetime.date.fromisoformat(TOMORROW),   # must match the request body
             slots=['08:00 – 09:00'], per_slot=600, addons=[], fee=0,
             amount=500, method='walk-in', walk_in=True, status='confirmed',
             offer={'code': 'ONCE', 'title': 'Once only', 'source': 'venue'},
@@ -465,3 +465,129 @@ class PackagePricingTests(GatewayBookingMixin, APITestCase):
             ['19:00 – 20:00'], [], 620,              # overlaps the package
         )
         self.assertEqual(clash.status_code, 409)
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class PlatformPromoPerUserLimitTests(GatewayBookingMixin, APITestCase):
+    """
+    `perUserLimit` on an admin banner promo. Unlike a venue offer this is
+    PLATFORM-WIDE: one campaign, so a limit of 1 means once per person
+    overall — not once per venue, which could be farmed across listings.
+    """
+
+    def setUp(self):
+        from adminpanel.models import Settings
+
+        self.vendor = User.objects.create_user(
+            phone='9400000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9400000002', name='Asha')
+        self.other = User.objects.create_user(phone='9400000003', name='Ravi')
+        record = {**RECORD, 'id': 'pp', 'status': 'live', 'price': 600,
+                  'detail': {'addons': []}}
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='pp-hall',
+            record=record, name='Promo Hall', category='hall',
+            locality='X', pincode='560001',
+        )
+        # A SECOND venue — a platform cap must hold across venues.
+        self.other_listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='pp-hall-2',
+            record={**record, 'id': 'pp2'}, name='Promo Hall Two',
+            category='hall', locality='X', pincode='560002',
+        )
+        today = today_ist()
+        s = Settings.load()
+        s.banners = [
+            {'id': 1, 'title': 'One Shot', 'type': 'flat', 'value': 100,
+             'code': 'ONESHOT', 'minAmount': '', 'maxDiscount': '',
+             'from': today.isoformat(), 'to': today.isoformat(),
+             'perUserLimit': '1'},
+            {'id': 2, 'title': 'Open Promo', 'type': 'flat', 'value': 50,
+             'code': 'OPEN', 'minAmount': '', 'maxDiscount': '',
+             'from': today.isoformat(), 'to': today.isoformat()},   # no limit
+        ]
+        s.save()
+        self.client.force_authenticate(user=self.customer)
+
+    SLOTS = ['09:00 – 10:00', '11:00 – 12:00', '13:00 – 14:00']
+
+    def book(self, code='ONESHOT', discount=100, slot=0, listing=None):
+        return self.gateway_book({
+            'venueId': str((listing or self.listing).id), 'date': TOMORROW,
+            'slots': [self.SLOTS[slot]], 'addons': [], 'perSlot': 600,
+            'amount': 600 - discount + 20,
+            'offer': {'code': code, 'source': 'platform'},
+        })
+
+    def _confirm_all(self):
+        Booking.objects.filter(status='payment_pending').update(status='confirmed')
+
+    def test_second_use_is_refused(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        self._confirm_all()
+        second = self.book(slot=1)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.data['code'], 'OFFER_LIMIT_REACHED')
+        self.assertIn('maximum number of times', second.data['message'])
+
+    def test_the_cap_holds_across_DIFFERENT_venues(self):
+        """The whole point of a platform-wide cap."""
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        self._confirm_all()
+        elsewhere = self.book(slot=1, listing=self.other_listing)
+        self.assertEqual(elsewhere.status_code, 400)
+        self.assertEqual(elsewhere.data['code'], 'OFFER_LIMIT_REACHED')
+
+    def test_banner_without_a_limit_is_unlimited(self):
+        for slot in range(3):
+            r = self.book(code='OPEN', discount=50, slot=slot)
+            self.assertEqual(r.status_code, 201, r.data)
+            self._confirm_all()
+
+    def test_the_cap_is_per_user(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        self._confirm_all()
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_cancelling_gives_the_allowance_back(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        Booking.objects.update(status='cancelled')
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_a_live_hold_still_counts(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)   # payment_pending
+        second = self.book(slot=1)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.data['code'], 'OFFER_LIMIT_REACHED')
+
+    def test_an_expired_hold_stops_counting(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        stale = timezone.now() - datetime.timedelta(minutes=90)
+        Booking.objects.filter(status='payment_pending').update(created_at=stale)
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_platform_and_venue_allowances_stay_separate(self):
+        """A banner promo must not eat a venue offer's allowance."""
+        self.listing.record = {
+            **self.listing.record,
+            'detail': {'addons': [], 'offers': [
+                {'title': 'Venue one', 'code': 'ONESHOT', 'type': 'flat',
+                 'value': '100', 'minAmount': '', 'maxDiscount': '',
+                 'expiry': '', 'perUserLimit': '1'},
+            ]},
+        }
+        self.listing.save(update_fields=['record'])
+
+        self.assertEqual(self.book(slot=0).status_code, 201)   # platform ONESHOT
+        self._confirm_all()
+        # Same code, but the VENUE's own offer — a separate pot.
+        venue = self.gateway_book({
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': [self.SLOTS[1]], 'addons': [], 'perSlot': 600,
+            'amount': 520, 'offer': {'code': 'ONESHOT'},
+        })
+        self.assertEqual(venue.status_code, 201, venue.data)

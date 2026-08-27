@@ -1365,7 +1365,7 @@ class RatingTests(BookingTestBase):
     def test_upcoming_booking_409(self):
         upcoming = Booking.objects.create(
             listing=self.listing, user=self.customer,
-            date=today_ist() + datetime.timedelta(days=1),
+            date=datetime.date.fromisoformat(TOMORROW),   # must match the request body
             slots=['10:00 – 11:00'], amount=620,
         )
         response = self.rate(booking_id=upcoming.id)
@@ -1783,7 +1783,7 @@ class PerUnitBookingTests(BookingTestBase):
         # A booking with no unit (legacy) blocks every pitch (safe default).
         Booking.objects.create(
             listing=self.turf, user=self.customer,
-            date=today_ist() + datetime.timedelta(days=1),
+            date=datetime.date.fromisoformat(TOMORROW),   # must match the request body
             slots=['19:00 – 21:00'], amount=1218,
         )
         self.assertEqual(self.book_unit().status_code, 409)

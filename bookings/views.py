@@ -375,7 +375,7 @@ def _parse_iso_date(text):
         return None  # unparseable/empty -> open-ended
 
 
-def _apply_platform_offer(base, offer_request):
+def _apply_platform_offer(base, offer_request, user=None):
     """
     A PLATFORM promo (source: "platform") validates against the ACTIVE admin
     banners instead of the venue's offers: matching code, today inside the
@@ -427,6 +427,15 @@ def _apply_platform_offer(base, offer_request):
     if discount <= 0:
         raise SlotError('This promo is not applicable to this booking.')
 
+    # Same per-user cap as venue offers. 0 / absent means unlimited, so
+    # existing banners keep working untouched.
+    per_user = _to_int(matched.get('perUserLimit') or 0, 'perUserLimit')
+    if per_user > 0 and _platform_redemptions(user, code) >= per_user:
+        raise SlotError(
+            "You've already used this offer the maximum number of times.",
+            code='OFFER_LIMIT_REACHED',
+        )
+
     applied = {
         'code': code,
         'title': matched.get('title') or '',
@@ -463,30 +472,55 @@ def _same_offer(stored, code, title):
     )
 
 
+def _standing_redemptions(user):
+    """The user's bookings whose discount has NOT been handed back.
+
+    Live unpaid holds are included. Without them, opening several checkout
+    tabs at once would let every one see a count of zero and sail past a
+    limit of 1. An ABANDONED hold stops counting once it expires, so a failed
+    payment never permanently burns someone's allowance.
+    """
+    hold_cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+    return Booking.objects.filter(user=user, walk_in=False).filter(
+        Q(status__in=REDEEMED_STATUSES)
+        | Q(status='payment_pending', created_at__gte=hold_cutoff)
+    )
+
+
 def _redemptions(user, listing, code, title):
-    """How many times this user has already used this venue's offer.
+    """How many times this user has already used THIS VENUE'S offer.
 
     Counted across the venue SET (base + its unit siblings), so a per-user
     limit cannot be dodged by booking a different pitch of the same venue.
-
-    Live unpaid holds count too. Without that, opening several checkout tabs
-    at once would let every one of them see a count of zero and sail past a
-    limit of 1. An ABANDONED hold stops counting once it expires, so a failed
-    payment never permanently burns someone's allowance.
     """
     if user is None or getattr(user, 'id', None) is None:
         return 0            # walk-ins have no customer account
 
     from .ratings import venue_set_ids
 
-    hold_cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
-    rows = Booking.objects.filter(
-        user=user, walk_in=False, listing_id__in=venue_set_ids(listing),
-    ).filter(
-        Q(status__in=REDEEMED_STATUSES)
-        | Q(status='payment_pending', created_at__gte=hold_cutoff)
+    rows = _standing_redemptions(user).filter(
+        listing_id__in=venue_set_ids(listing)
     ).values_list('offer', flat=True)
     return sum(1 for stored in rows if _same_offer(stored, code, title))
+
+
+def _platform_redemptions(user, code):
+    """How many times this user has already used a PLATFORM promo code.
+
+    Deliberately NOT venue-scoped: a banner promo is one platform-wide
+    campaign, so `perUserLimit: 1` means once per person overall — not once
+    per venue, which would be trivially farmed across listings.
+    """
+    if user is None or getattr(user, 'id', None) is None:
+        return 0
+
+    rows = _standing_redemptions(user).values_list('offer', flat=True)
+    return sum(
+        1 for stored in rows
+        if isinstance(stored, dict)
+        and str(stored.get('source') or '') == 'platform'
+        and str(stored.get('code') or '').strip().upper() == code
+    )
 
 
 def _apply_offer(listing, base, offer_request, user=None):
@@ -503,7 +537,7 @@ def _apply_offer(listing, base, offer_request, user=None):
         return 0, None
 
     if str(offer_request.get('source') or '').strip().lower() == 'platform':
-        return _apply_platform_offer(base, offer_request)
+        return _apply_platform_offer(base, offer_request, user)
 
     code = str(offer_request.get('code') or '').strip().upper()
     catalog = (listing.record.get('detail') or {}).get('offers') or []
