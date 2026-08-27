@@ -9,6 +9,7 @@ import datetime
 import uuid
 
 from django.test import override_settings
+from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from accounts.models import User
@@ -201,3 +202,139 @@ class AvailabilityDoSTests(APITestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertLessEqual(len(response.data.get('unitRates') or []), 64)
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class OfferPerUserLimitTests(GatewayBookingMixin, APITestCase):
+    """
+    `perUserLimit` on a venue offer. A redemption STANDS while the money is
+    kept or in flight; cancelling or refunding gives the allowance back.
+    """
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9200000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9200000002', name='Asha')
+        self.other = User.objects.create_user(phone='9200000003', name='Ravi')
+        record = {
+            **RECORD, 'id': 'lim', 'status': 'live',
+            'detail': {
+                **RECORD['detail'],
+                'offers': [
+                    {'title': 'Once only', 'code': 'ONCE', 'type': 'flat',
+                     'value': '100', 'minAmount': '', 'maxDiscount': '',
+                     'expiry': '', 'perUserLimit': '1'},
+                    {'title': 'Twice', 'code': 'TWICE', 'type': 'flat',
+                     'value': '50', 'minAmount': '', 'maxDiscount': '',
+                     'expiry': '', 'perUserLimit': '2'},
+                    {'title': 'Unlimited', 'code': 'FREEFORALL', 'type': 'flat',
+                     'value': '10', 'minAmount': '', 'maxDiscount': '',
+                     'expiry': ''},                       # no perUserLimit
+                    {'title': 'No code offer', 'code': '', 'type': 'flat',
+                     'value': '25', 'minAmount': '', 'maxDiscount': '',
+                     'expiry': '', 'perUserLimit': '1'},
+                ],
+            },
+        }
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='lim-hall',
+            record=record, name='Limit Hall', category='hall',
+            locality='X', pincode='560001',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    SLOTS = ['09:00 – 10:00', '11:00 – 12:00', '13:00 – 14:00', '15:00 – 16:00']
+
+    def book(self, code='ONCE', discount=100, slot=0, **overrides):
+        body = {
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': [self.SLOTS[slot]], 'addons': [], 'perSlot': 600,
+            'amount': 600 - discount + 20,
+            'offer': {'code': code},
+            **overrides,
+        }
+        return self.gateway_book(body)
+
+    def _confirm_all(self):
+        Booking.objects.filter(status='payment_pending').update(status='confirmed')
+
+    def test_second_use_is_refused_with_the_agreed_code(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        self._confirm_all()
+        second = self.book(slot=1)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.data['code'], 'OFFER_LIMIT_REACHED')
+        self.assertIn('maximum number of times', second.data['message'])
+
+    def test_limit_of_two_allows_exactly_two(self):
+        self.assertEqual(self.book(code='TWICE', discount=50, slot=0).status_code, 201)
+        self._confirm_all()
+        self.assertEqual(self.book(code='TWICE', discount=50, slot=1).status_code, 201)
+        self._confirm_all()
+        third = self.book(code='TWICE', discount=50, slot=2)
+        self.assertEqual(third.status_code, 400)
+        self.assertEqual(third.data['code'], 'OFFER_LIMIT_REACHED')
+
+    def test_no_limit_set_means_unlimited(self):
+        for slot in range(3):
+            r = self.book(code='FREEFORALL', discount=10, slot=slot)
+            self.assertEqual(r.status_code, 201)
+            self._confirm_all()
+
+    def test_the_cap_is_per_user_not_global(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        self._confirm_all()
+        self.client.force_authenticate(user=self.other)
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_cancelling_gives_the_allowance_back(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        Booking.objects.update(status='cancelled')
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_a_refund_gives_the_allowance_back(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        Booking.objects.update(status='refunded')
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_a_live_unpaid_hold_still_counts(self):
+        """Otherwise several checkout tabs would each see a count of zero and
+        every one of them would slip past a limit of 1."""
+        self.assertEqual(self.book(slot=0).status_code, 201)   # payment_pending
+        second = self.book(slot=1)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.data['code'], 'OFFER_LIMIT_REACHED')
+
+    def test_an_expired_hold_stops_counting(self):
+        """A failed payment must not burn the allowance forever."""
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        stale = timezone.now() - datetime.timedelta(minutes=90)
+        Booking.objects.filter(status='payment_pending').update(created_at=stale)
+        self.assertEqual(self.book(slot=1).status_code, 201)
+
+    def test_code_less_offers_are_limited_by_title(self):
+        self.assertEqual(self.book(code='', discount=25, slot=0).status_code, 201)
+        self._confirm_all()
+        second = self.book(code='', discount=25, slot=1)
+        self.assertEqual(second.status_code, 400)
+        self.assertEqual(second.data['code'], 'OFFER_LIMIT_REACHED')
+
+    def test_walk_ins_are_ignored_by_the_cap(self):
+        """Vendor-entered walk-ins have no customer account to attribute."""
+        Booking.objects.create(
+            listing=self.listing, user=None, venue_name='Limit Hall',
+            category='hall', location='x', image='', customer_name='Offline',
+            phone='', date=today_ist() + datetime.timedelta(days=1),
+            slots=['08:00 – 09:00'], per_slot=600, addons=[], fee=0,
+            amount=500, method='walk-in', walk_in=True, status='confirmed',
+            offer={'code': 'ONCE', 'title': 'Once only', 'source': 'venue'},
+        )
+        self.assertEqual(self.book(slot=0).status_code, 201)
+
+    def test_a_different_offer_has_its_own_allowance(self):
+        self.assertEqual(self.book(slot=0).status_code, 201)
+        self._confirm_all()
+        self.assertEqual(self.book(code='TWICE', discount=50, slot=1).status_code, 201)

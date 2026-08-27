@@ -24,7 +24,16 @@ _SLOT_RE = re.compile(r'^\s*(\d{1,2}):(\d{2})\s*[–-]\s*(\d{1,2}):(\d{2})\s*$')
 
 
 class SlotError(ValueError):
-    """Raised with a human-readable message for any invalid slot."""
+    """Raised with a human-readable message for any invalid slot.
+
+    `code` is optional and, when set, is echoed in the 400 response next to
+    the message so the frontend can branch on it instead of matching text —
+    the same pattern as AMOUNT_MISMATCH / OFFER_MISMATCH.
+    """
+
+    def __init__(self, message, code=''):
+        super().__init__(message)
+        self.code = code
 
 
 def _to_minutes(hours, minutes, *, is_end):

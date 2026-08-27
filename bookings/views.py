@@ -11,6 +11,8 @@ import datetime
 from collections import defaultdict
 
 from django.db import transaction
+from django.db.models import Q
+from django.utils import timezone
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -50,6 +52,15 @@ def _booking_fee():
 
 def _message(text, http_status):
     return Response({'message': text}, status=http_status)
+
+
+def _slot_error_response(error):
+    """400 for a SlotError, including its `code` when it carries one."""
+    body = {'message': str(error)}
+    code = getattr(error, 'code', '')
+    if code:
+        body['code'] = code
+    return Response(body, status=status.HTTP_400_BAD_REQUEST)
 
 
 def _amount_mismatch(expected):
@@ -400,7 +411,59 @@ def _apply_platform_offer(base, offer_request):
     return discount, applied
 
 
-def _apply_offer(listing, base, offer_request):
+# A redemption STANDS while the money is kept or still in flight. Cancelled
+# and refunded bookings gave the discount back, so they free the allowance
+# again. 'completed' is derived (a past confirmed booking), not stored, so
+# 'confirmed' already covers it.
+REDEEMED_STATUSES = ('confirmed', 'refund_pending')
+
+
+def _same_offer(stored, code, title):
+    """Does a booking's stored offer refer to the offer being applied?
+
+    Matched on CODE when there is one, else on title — code-less public
+    offers still need to be limited. Comparison is case- and
+    whitespace-insensitive because the vendor types these by hand.
+    """
+    if not isinstance(stored, dict):
+        return False
+    if str(stored.get('source') or '') == 'platform':
+        return False          # platform promos are a different pot
+    if code:
+        return str(stored.get('code') or '').strip().upper() == code
+    return (
+        str(stored.get('title') or '').strip().lower()
+        == str(title or '').strip().lower()
+    )
+
+
+def _redemptions(user, listing, code, title):
+    """How many times this user has already used this venue's offer.
+
+    Counted across the venue SET (base + its unit siblings), so a per-user
+    limit cannot be dodged by booking a different pitch of the same venue.
+
+    Live unpaid holds count too. Without that, opening several checkout tabs
+    at once would let every one of them see a count of zero and sail past a
+    limit of 1. An ABANDONED hold stops counting once it expires, so a failed
+    payment never permanently burns someone's allowance.
+    """
+    if user is None or getattr(user, 'id', None) is None:
+        return 0            # walk-ins have no customer account
+
+    from .ratings import venue_set_ids
+
+    hold_cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+    rows = Booking.objects.filter(
+        user=user, walk_in=False, listing_id__in=venue_set_ids(listing),
+    ).filter(
+        Q(status__in=REDEEMED_STATUSES)
+        | Q(status='payment_pending', created_at__gte=hold_cutoff)
+    ).values_list('offer', flat=True)
+    return sum(1 for stored in rows if _same_offer(stored, code, title))
+
+
+def _apply_offer(listing, base, offer_request, user=None):
     """
     Validate the requested coupon and return (discount, applied_offer) —
     discount in ₹, applied_offer a {code,title,type,value,source} dict (or
@@ -457,6 +520,17 @@ def _apply_offer(listing, base, offer_request):
         # "applied offer" on the receipt would be misleading.
         raise SlotError('This offer is not applicable to this booking.')
 
+    # Per-user cap. 0 / absent means unlimited, so venues that never set one
+    # keep working exactly as before.
+    per_user = _to_int(matched.get('perUserLimit') or 0, 'perUserLimit')
+    if per_user > 0:
+        used = _redemptions(user, listing, code, matched.get('title'))
+        if used >= per_user:
+            raise SlotError(
+                "You've already used this offer the maximum number of times.",
+                code='OFFER_LIMIT_REACHED',
+            )
+
     applied = {
         'code': matched.get('code') or '',
         'title': matched.get('title') or '',
@@ -468,7 +542,7 @@ def _apply_offer(listing, base, offer_request):
 
 
 def compute_amount(listing, intervals, requested_addons, rate=None,
-                   offer_request=None, weekend=False):
+                   offer_request=None, weekend=False, user=None):
     """
     Server-side total:
         base     = round(rate x minutes / 60) + sum(addon.price x qty)
@@ -485,7 +559,7 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     addon_total, cleaned = _addon_total(listing, requested_addons)
     base = slot_base + addon_total
 
-    discount, applied_offer = _apply_offer(listing, base, offer_request)
+    discount, applied_offer = _apply_offer(listing, base, offer_request, user)
     fee = _booking_fee()
     amount = max(0, base - discount) + fee
     return amount, cleaned, applied_offer, discount, fee
@@ -577,7 +651,7 @@ class AvailabilityView(APIView):
         try:
             date = parse_date(request.query_params.get('date'))
         except SlotError as error:
-            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+            return _slot_error_response(error)
 
         if date < today_ist():
             return _message('date cannot be in the past.', status.HTTP_400_BAD_REQUEST)
@@ -585,7 +659,7 @@ class AvailabilityView(APIView):
         return Response(_availability(listing, date))
 
 
-def validate_booking_request(body):
+def validate_booking_request(body, user=None):
     """
     Full server-side validation + pricing for a customer booking request.
     Shared by direct booking creation AND Razorpay order creation so the two
@@ -625,14 +699,14 @@ def validate_booking_request(body):
         rate = _unit_rate(listing, sport, unit, weekend)  # None -> base rate
         amount, addons, applied_offer, discount, fee = compute_amount(
             listing, intervals, body.get('addons'), rate=rate,
-            offer_request=body.get('offer'), weekend=weekend,
+            offer_request=body.get('offer'), weekend=weekend, user=user,
         )
         client_amount = _to_int(body.get('amount'), 'amount')
         per_slot = _to_int(
             body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'
         )
     except SlotError as error:
-        return None, _message(str(error), status.HTTP_400_BAD_REQUEST)
+        return None, _slot_error_response(error)
 
     today = today_ist()
     if date < today:

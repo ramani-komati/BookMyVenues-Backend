@@ -76,7 +76,7 @@ class PaymentOrderView(APIView):
     def post(self, request):
         body = request.data if isinstance(request.data, dict) else {}
 
-        data, error = validate_booking_request(body)
+        data, error = validate_booking_request(body, user=request.user)
         if error is not None:
             return error
         listing, date = data['listing'], data['date']
