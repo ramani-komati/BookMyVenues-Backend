@@ -387,6 +387,8 @@ class VendorListingPublishView(APIView):
         elif not str(record.get('submittedAt') or '').strip():
             record['submittedAt'] = timezone.now().isoformat()
 
+        from .public_views import invalidate_listing_cache
+
         columns = _extract_listing_columns(record)
 
         if existing is not None:
@@ -405,6 +407,12 @@ class VendorListingPublishView(APIView):
                 status=listing_status,
                 **columns,
             )
+
+        # The public detail is cached, so without this a vendor who deletes an
+        # offer keeps seeing it for up to a minute and concludes the save
+        # silently failed. The record IS replaced wholesale — the staleness was
+        # the cache, not a merge.
+        invalidate_listing_cache(listing)
 
         return Response({'listing': listing.record}, status=status.HTTP_201_CREATED)
 
@@ -495,6 +503,8 @@ def soft_delete_listing(listing):
     Listing.objects.filter(record__detail__unitOf=str(listing.pk)).update(
         status=Listing.Status.DELETED, deleted_at=now,
     )
+    from .public_views import invalidate_listing_cache
+    invalidate_listing_cache(listing)
 
 
 # Leading bytes of the formats we accept. The client's declared content_type

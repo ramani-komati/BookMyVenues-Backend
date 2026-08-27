@@ -943,3 +943,158 @@ class MapsResolveTests(APITestCase):
         ):
             response = self.client.get(self.URL, {'url': 'https://g.co/maps/Q'})
         self.assertEqual(response.status_code, 200)
+
+
+class OfferReplacementTests(ListingTestBase):
+    """
+    Republishing must REPLACE detail.offers wholesale, not merge it: an offer
+    missing from the payload is deleted, [] clears them all, and editing an
+    existing offer overwrites it rather than appending a duplicate.
+    """
+
+    TWO_OFFERS = [
+        {'title': 'Weekend', 'code': 'SAVE10', 'type': 'percent', 'value': '10'},
+        {'title': 'Flat hundred', 'code': 'FLAT100', 'type': 'flat', 'value': '100'},
+    ]
+
+    def _publish_with(self, offers):
+        record = {
+            **LISTING_RECORD,
+            'detail': {**LISTING_RECORD['detail'], 'offers': offers},
+        }
+        response = self.publish(record)
+        # 201 on first create, 200 on every republish.
+        self.assertIn(response.status_code, (200, 201), response.data)
+        return response
+
+    def _stored_offers(self):
+        from .models import Listing
+        listing = Listing.objects.get(pk=self.draft.id)
+        return (listing.record.get('detail') or {}).get('offers')
+
+    def test_removing_one_offer_deletes_it(self):
+        self._publish_with(self.TWO_OFFERS)
+        self.assertEqual(len(self._stored_offers()), 2)
+
+        # Republish with only the first — the second must be gone.
+        self._publish_with(self.TWO_OFFERS[:1])
+        stored = self._stored_offers()
+        self.assertEqual(len(stored), 1)
+        self.assertEqual(stored[0]['code'], 'SAVE10')
+
+    def test_empty_array_clears_every_offer(self):
+        self._publish_with(self.TWO_OFFERS)
+        self._publish_with([])
+        self.assertEqual(self._stored_offers(), [])
+
+    def test_editing_an_offer_overwrites_rather_than_appends(self):
+        self._publish_with(self.TWO_OFFERS)
+        edited = [
+            {**self.TWO_OFFERS[0], 'value': '25', 'perUserLimit': '1'},
+            self.TWO_OFFERS[1],
+        ]
+        self._publish_with(edited)
+        stored = self._stored_offers()
+        self.assertEqual(len(stored), 2)                    # not 3
+        save10 = next(o for o in stored if o['code'] == 'SAVE10')
+        self.assertEqual(save10['value'], '25')
+        self.assertEqual(save10['perUserLimit'], '1')
+
+    def test_omitting_offers_entirely_leaves_none_behind(self):
+        """The record is the whole truth — a detail with no `offers` key at
+        all must not resurrect the previous list."""
+        self._publish_with(self.TWO_OFFERS)
+        self.assertIn(self.publish(LISTING_RECORD).status_code, (200, 201))  # no offers key
+        self.assertIsNone(self._stored_offers())
+
+
+class DraftOfferMergeTests(DraftTestBase):
+    """Where the offers ACTUALLY survive a delete: the draft, not the publish.
+
+    Draft sections are shallow-merged, which is right for autosave — a
+    debounced PATCH sends only the field that changed. But it means a PATCH
+    that omits `offers` keeps the old list, and a record later rebuilt from
+    that draft carries the deleted offer straight back.
+    """
+
+    TWO = [
+        {'title': 'Weekend', 'code': 'SAVE10', 'type': 'percent', 'value': '10'},
+        {'title': 'Flat', 'code': 'FLAT100', 'type': 'flat', 'value': '100'},
+    ]
+
+    def _patch_details(self, payload):
+        return self.client.patch(
+            f'/api/venues/drafts/{self.draft.id}/sections/details',
+            payload, format='json',
+        )
+
+    def setUp(self):
+        super().setUp()
+        self.draft = VenueDraft.objects.create(
+            vendor=self.vendor, data=empty_draft_data()
+        )
+        self._patch_details({'offers': self.TWO})
+
+    def _draft_offers(self):
+        self.draft.refresh_from_db()
+        return (self.draft.data.get('details') or {}).get('offers')
+
+    def test_sending_offers_replaces_them(self):
+        self.assertEqual(len(self._draft_offers()), 2)
+        self._patch_details({'offers': self.TWO[:1]})
+        self.assertEqual(len(self._draft_offers()), 1)
+
+    def test_sending_an_empty_array_clears_them(self):
+        self._patch_details({'offers': []})
+        self.assertEqual(self._draft_offers(), [])
+
+    def test_a_patch_that_OMITS_offers_keeps_the_old_list(self):
+        """THIS is the trap: autosave a different field and the deleted offer
+        is still sitting in the draft, ready to be republished."""
+        self._patch_details({'capacity': '300'})
+        self.assertEqual(len(self._draft_offers()), 2)   # untouched, by design
+
+
+class RepublishCacheInvalidationTests(ListingTestBase):
+    """The reported bug: a deleted offer 'still shows' after republish.
+
+    The record was always replaced correctly — the venue detail is cached for
+    60s, so the vendor kept seeing the old copy and concluded the save failed.
+    """
+
+    OFFERS = [{'title': 'Weekend', 'code': 'SAVE10',
+               'type': 'percent', 'value': '10'}]
+
+    def _publish(self, offers):
+        record = {
+            **LISTING_RECORD,
+            'detail': {**LISTING_RECORD['detail'], 'offers': offers},
+        }
+        response = self.publish(record)
+        self.assertIn(response.status_code, (200, 201), response.data)
+        return response
+
+    def _public_offers(self):
+        from .models import Listing
+        Listing.objects.filter(pk=self.draft.id).update(status=Listing.Status.LIVE)
+        r = self.client.get(f'/api/venues/{self.draft.id}')
+        self.assertEqual(r.status_code, 200)
+        return (r.data.get('detail') or {}).get('offers')
+
+    def test_a_deleted_offer_disappears_immediately(self):
+        self._publish(self.OFFERS)
+        self.assertEqual(len(self._public_offers()), 1)   # now cached
+
+        self._publish([])                                  # vendor deletes it
+        # Without invalidation this still returned the cached single offer.
+        self.assertEqual(self._public_offers(), [])
+
+    def test_an_edited_offer_is_visible_immediately(self):
+        self._publish(self.OFFERS)
+        self._public_offers()                              # prime the cache
+
+        edited = [{**self.OFFERS[0], 'value': '30', 'perUserLimit': '2'}]
+        self._publish(edited)
+        stored = self._public_offers()
+        self.assertEqual(stored[0]['value'], '30')
+        self.assertEqual(stored[0]['perUserLimit'], '2')

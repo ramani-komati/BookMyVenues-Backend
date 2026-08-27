@@ -9,6 +9,7 @@ Only LIVE listings are ever returned.
 import uuid
 
 from django.utils.decorators import method_decorator
+from django.core.cache import cache
 from django.views.decorators.cache import cache_page
 from rest_framework import status
 from rest_framework.permissions import AllowAny
@@ -162,13 +163,42 @@ class PublicVenueListView(APIView):
         })
 
 
-@method_decorator(cache_page(CACHE_SECONDS), name='get')
+def detail_cache_keys(listing):
+    """Every cache key the venue detail can be served under.
+
+    The endpoint accepts an id OR a slug, so both spellings are cached and
+    both must be dropped when the venue changes.
+    """
+    return [f'venue:detail:{listing.pk}', f'venue:detail:{listing.slug}']
+
+
+def invalidate_listing_cache(listing):
+    """Drop a venue's cached detail so an edit is visible immediately.
+
+    Called on republish and on admin status changes. Without this a vendor
+    who deletes an offer keeps seeing it for up to CACHE_SECONDS and
+    reasonably concludes the save did not work.
+    """
+    cache.delete_many(detail_cache_keys(listing))
+
+
 class PublicVenueDetailView(APIView):
-    """GET /api/venues/<idOrSlug> — full record incl. gallery + detail."""
+    """GET /api/venues/<idOrSlug> — full record incl. gallery + detail.
+
+    Cached by hand rather than with cache_page so a republish can invalidate
+    exactly this venue — cache_page keys on the whole request and cannot be
+    cleared for one listing without flushing the shared cache, which would
+    also reset the throttle counters that live there.
+    """
 
     permission_classes = [AllowAny]
 
     def get(self, request, id_or_slug):
+        cache_key = f'venue:detail:{id_or_slug}'
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return Response(cached)
+
         queryset = Listing.objects.filter(status=Listing.Status.LIVE)
 
         try:
@@ -192,4 +222,5 @@ class PublicVenueDetailView(APIView):
         if average is not None:
             record['rating'] = average
             record['ratingCount'] = count
+        cache.set(cache_key, record, CACHE_SECONDS)
         return Response(record)
