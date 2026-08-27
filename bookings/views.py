@@ -276,6 +276,22 @@ def _unit_rate(listing, sport, unit, weekend=False):
     return _price_at(detail.get('unitPrices'), unit)
 
 
+def _package_minutes(package):
+    """A package's duration in minutes, or None when it declares none.
+
+    The wizard has used a few spellings for this, so accept them all rather
+    than silently charging a package price for the wrong length of time.
+    """
+    for key in ('duration', 'hours', 'durationHrs', 'durationHours'):
+        raw = str(package.get(key) or '').strip()
+        if raw:
+            try:
+                return int(round(float(raw) * 60))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
 def _addon_total(listing, requested_addons):
     """
     (total, cleaned_lines) for the add-on line items. With LIVE payments the
@@ -299,7 +315,10 @@ def _addon_total(listing, requested_addons):
     for package in detail.get('packages') or []:
         label = str(package.get('label') or package.get('name') or '').strip().lower()
         if label:
-            packages[label] = _to_int(package.get('price') or 0, 'package price')
+            packages[label] = {
+                'price': _to_int(package.get('price') or 0, 'package price'),
+                'minutes': _package_minutes(package),
+            }
     extra_raw = str(detail.get('extraPersonPrice') or '').strip()
     extra_price = _to_int(extra_raw, 'extraPersonPrice') if extra_raw else None
     max_raw = str(detail.get('maxExtraPersons') or '').strip()
@@ -307,6 +326,7 @@ def _addon_total(listing, requested_addons):
 
     addon_total = 0
     cleaned = []
+    chosen_package = None
     for line in requested_addons or []:
         name = str(line.get('name') or '').strip()
         if not name:
@@ -325,9 +345,11 @@ def _addon_total(listing, requested_addons):
         if key in catalogue:
             price = catalogue[key]
         elif package_key is not None and package_key in packages:
-            price = packages[package_key]
+            price = packages[package_key]['price']
+            chosen_package = (name, packages[package_key], qty)
         elif key in packages:
-            price = packages[key]
+            price = packages[key]['price']
+            chosen_package = (name, packages[key], qty)
         elif 'extra person' in key:
             if extra_price is None:
                 raise SlotError('This venue does not charge for extra persons.')
@@ -339,7 +361,11 @@ def _addon_total(listing, requested_addons):
 
         addon_total += price * qty
         cleaned.append({'name': name, 'qty': qty, 'price': price})
-    return addon_total, cleaned
+
+    if chosen_package is not None and chosen_package[2] != 1:
+        # Two of a package is not a thing — the package IS the booking.
+        raise SlotError('Only one package can be booked at a time.')
+    return addon_total, cleaned, chosen_package
 
 
 def _parse_iso_date(text):
@@ -549,14 +575,36 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
         discount = coupon applied to `base` (slots + add-ons only)
         amount   = max(0, base - discount) + fee   (the ₹ fee is NOT discounted)
 
+    PACKAGES REPLACE THE HOURLY CHARGE. A package is priced for a fixed block
+    of time, so charging its price AND the per-hour rate for those same hours
+    bills the customer twice for one booking. With a package the slot charge
+    is zero and the package price covers the time:
+
+        base = package price + add-ons + extra persons
+
     `rate` is the per-unit rate when given, else the listing price. Returns
     (amount, cleaned_addons, applied_offer, discount, fee) — `fee` is what was
     actually charged, stored on the booking for payout math.
     """
     if rate is None:
         rate = base_rate(listing, weekend)
-    slot_base = round(rate * total_minutes(intervals) / 60)
-    addon_total, cleaned = _addon_total(listing, requested_addons)
+    booked_minutes = total_minutes(intervals)
+    addon_total, cleaned, package = _addon_total(listing, requested_addons)
+
+    if package is None:
+        slot_base = round(rate * booked_minutes / 60)
+    else:
+        # The package price already buys the time — no hourly charge on top.
+        slot_base = 0
+        label, info, _qty = package
+        wanted = info['minutes']
+        if wanted is not None and booked_minutes != wanted:
+            hours = wanted / 60
+            raise SlotError(
+                f'"{label}" covers {hours:g} '
+                f'{"hour" if hours == 1 else "hours"} — '
+                f'please book exactly that long.'
+            )
     base = slot_base + addon_total
 
     discount, applied_offer = _apply_offer(listing, base, offer_request, user)

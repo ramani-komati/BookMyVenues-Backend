@@ -192,19 +192,21 @@ class CreateBookingTests(BookingTestBase):
 
     def test_custom_and_package_addons_accepted(self):
         # P1: packages, extra-persons and custom add-ons are folded into the
-        # addons array as priced line items. The server must accept them ALL
-        # (never reject an unrecognised name) and sum the request prices.
+        # addons array as priced line items. The server prices every one of
+        # them from the venue's own catalogue.
         response = self.book(
             addons=[
                 {'name': 'Water bottle 1L', 'qty': 4, 'price': 30},    # custom add-on
                 {'name': 'Birthday Deluxe', 'qty': 1, 'price': 5000},  # a package
                 {'name': 'Extra persons', 'qty': 4, 'price': 200},     # extra-person line
             ],
-            # 900 slot + (120 + 5000 + 800) add-ons + 20 fee
-            amount=6840,
+            # CHANGED: a package REPLACES the hourly slot charge — the ₹5000
+            # already buys the time, so billing ₹900 for the same hours on top
+            # charged the customer twice. Now: 0 slot + (120 + 5000 + 800) + 20.
+            amount=5940,
         )
         self.assertEqual(response.status_code, 201)
-        self.assertEqual(response.data['booking']['amount'], 6840)
+        self.assertEqual(response.data['booking']['amount'], 5940)
         self.assertEqual(len(response.data['booking']['addons']), 3)
 
     def test_tampered_addon_price_rejected(self):

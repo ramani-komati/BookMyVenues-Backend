@@ -338,3 +338,130 @@ class OfferPerUserLimitTests(GatewayBookingMixin, APITestCase):
         self.assertEqual(self.book(slot=0).status_code, 201)
         self._confirm_all()
         self.assertEqual(self.book(code='TWICE', discount=50, slot=1).status_code, 201)
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class PackagePricingTests(GatewayBookingMixin, APITestCase):
+    """
+    A package buys a fixed block of time, so its price REPLACES the hourly
+    slot charge. Charging both bills the customer twice for one booking.
+    """
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9300000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9300000002', name='Asha')
+        record = {
+            **RECORD, 'id': 'pkg', 'status': 'live',
+            'price': 600,                      # ₹600/hour if booked hourly
+            'detail': {
+                'addons': [{'name': 'Cake', 'price': 500}],
+                'extraPersonPrice': '200', 'maxExtraPersons': '4',
+                'packages': [
+                    # 3 hours for ₹5000 — hourly would be ₹1800.
+                    {'label': 'Birthday Deluxe', 'price': 5000, 'duration': '3'},
+                    {'label': 'Quick Hour', 'price': 900, 'duration': '1'},
+                    {'label': 'No Duration', 'price': 1500},   # legacy shape
+                ],
+            },
+        }
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='pkg-hall',
+            record=record, name='Package Hall', category='hall',
+            locality='X', pincode='560001',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, slots, addons, amount):
+        return self.gateway_book({
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': slots, 'addons': addons, 'perSlot': 600, 'amount': amount,
+        })
+
+    def test_package_price_replaces_the_hourly_charge(self):
+        """REGRESSION: this used to charge ₹5000 + ₹1800 for the same hours."""
+        r = self.book(
+            ['18:00 – 21:00'],                       # exactly 3 hours
+            [{'name': 'Package — Birthday Deluxe', 'qty': 1}],
+            5020,                                    # 5000 + ₹20 fee, NO 1800
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.amount, 5020)
+
+    def test_the_old_double_charged_total_is_now_refused(self):
+        r = self.book(
+            ['18:00 – 21:00'],
+            [{'name': 'Package — Birthday Deluxe', 'qty': 1}],
+            6820,                                    # 5000 + 1800 + 20
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(r.data['expectedAmount'], 5020)
+
+    def test_addons_and_extra_persons_stack_on_the_package(self):
+        # 5000 package + 500 cake + (2 x 200) extra persons + 20 fee
+        r = self.book(
+            ['18:00 – 21:00'],
+            [{'name': 'Package — Birthday Deluxe', 'qty': 1},
+             {'name': 'Cake', 'qty': 1},
+             {'name': 'Extra persons', 'qty': 2}],
+            5920,
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_booking_longer_than_the_package_is_refused(self):
+        """No extra hours beyond the package duration."""
+        r = self.book(
+            ['18:00 – 22:00'],                       # 4h against a 3h package
+            [{'name': 'Package — Birthday Deluxe', 'qty': 1}],
+            5020,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('3 hours', r.data['message'])
+
+    def test_booking_shorter_than_the_package_is_refused(self):
+        r = self.book(
+            ['18:00 – 20:00'],                       # 2h against a 3h package
+            [{'name': 'Package — Birthday Deluxe', 'qty': 1}],
+            5020,
+        )
+        self.assertEqual(r.status_code, 400)
+
+    def test_only_one_package_per_booking(self):
+        r = self.book(
+            ['18:00 – 21:00'],
+            [{'name': 'Package — Birthday Deluxe', 'qty': 2}],
+            10020,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('one package', r.data['message'])
+
+    def test_a_package_without_a_duration_still_drops_the_hourly_charge(self):
+        """Legacy packages carry no duration — price still replaces the rate,
+        we just cannot check the length."""
+        r = self.book(
+            ['18:00 – 20:00'],
+            [{'name': 'Package — No Duration', 'qty': 1}],
+            1520,                                    # 1500 + 20, no hourly
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_bookings_without_a_package_are_unchanged(self):
+        # 2h x 600 + 500 cake + 20 fee
+        r = self.book(['18:00 – 20:00'], [{'name': 'Cake', 'qty': 1}], 1720)
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_the_package_still_locks_the_slot(self):
+        first = self.book(
+            ['18:00 – 21:00'],
+            [{'name': 'Package — Birthday Deluxe', 'qty': 1}], 5020,
+        )
+        self.assertEqual(first.status_code, 201)
+        clash = self.book(
+            ['19:00 – 20:00'], [], 620,              # overlaps the package
+        )
+        self.assertEqual(clash.status_code, 409)
