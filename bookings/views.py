@@ -23,6 +23,7 @@ from venues.models import Listing
 
 from .models import Booking
 from .slots import (
+    CLOSE_MINUTE,
     SlotError,
     is_weekend,
     now_minutes_ist,
@@ -285,6 +286,48 @@ def _unit_rate(listing, sport, unit, weekend=False):
         if rate is not None:
             return rate
     return _price_at(detail.get('unitPrices'), unit)
+
+
+def extend_for_extra_hours(intervals, slot_texts, extra_hours):
+    """Stretch the reservation past the last slot for an HOURLY booking.
+
+    The two booking types carry the extra hour differently:
+
+      * PACKAGE — the picker already books the whole block, so the slots
+        arrive covering package time + extra hours. Reserve them as sent;
+        extending again would lock an hour nobody bought.
+      * HOURLY  — the customer picks the hours they want and the extra hour
+        sits OUTSIDE that selection, so the reservation has to grow. Without
+        this the hour is billed but never blocked, and somebody else can book
+        over time the customer has paid for.
+
+    The stored slot text grows too. Availability is derived from the stored
+    slots, so a lock that lives only in memory would vanish on the next read.
+    """
+    if not extra_hours or not intervals:
+        return intervals, slot_texts
+
+    added = extra_hours * 60
+    last_start, last_end = intervals[-1]
+    new_end = last_end + added
+    if new_end > CLOSE_MINUTE:
+        raise SlotError(
+            f'{extra_hours} extra '
+            f'{"hour takes" if extra_hours == 1 else "hours take"} '
+            f'the booking past closing time.'
+        )
+
+    grown = list(intervals[:-1]) + [(last_start, new_end)]
+    texts = list(slot_texts[:-1]) + [
+        f'{_clock(last_start)} – {_clock(new_end)}'
+    ]
+    return grown, texts
+
+
+def _clock(minute):
+    """1170 -> '19:30'. Midnight is written as 24:00 so the end of a booking
+    that runs to closing still reads as later than its start."""
+    return f'{minute // 60:02d}:{minute % 60:02d}'
 
 
 def _package_minutes(package):
@@ -651,8 +694,9 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
         base = package price + add-ons + extra persons
 
     `rate` is the per-unit rate when given, else the listing price. Returns
-    (amount, cleaned_addons, applied_offer, discount, fee) — `fee` is what was
-    actually charged, stored on the booking for payout math.
+    (amount, cleaned_addons, applied_offer, discount, fee, extra_hours,
+    has_package) — `fee` is what was actually charged, stored on the booking
+    for payout math; the last two tell the caller how much time to RESERVE.
     """
     if rate is None:
         rate = base_rate(listing, weekend)
@@ -688,7 +732,8 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     discount, applied_offer = _apply_offer(listing, base, offer_request, user)
     fee = _booking_fee()
     amount = max(0, base - discount) + fee
-    return amount, cleaned, applied_offer, discount, fee
+    return (amount, cleaned, applied_offer, discount, fee,
+            extra_hours, package is not None)
 
 
 def _slot_start(text):
@@ -823,10 +868,18 @@ def validate_booking_request(body, user=None):
         # Sat/Sun (IST), falling back to the weekday rate when unset.
         weekend = is_weekend(date)
         rate = _unit_rate(listing, sport, unit, weekend)  # None -> base rate
-        amount, addons, applied_offer, discount, fee = compute_amount(
+        (amount, addons, applied_offer, discount, fee,
+         extra_hours, has_package) = compute_amount(
             listing, intervals, body.get('addons'), rate=rate,
             offer_request=body.get('offer'), weekend=weekend, user=user,
         )
+        # A package's slots already cover its extra hours; an hourly booking's
+        # do not, so the reservation has to grow to match the bill.
+        slot_texts = [str(slot) for slot in body['slots']]
+        if not has_package:
+            intervals, slot_texts = extend_for_extra_hours(
+                intervals, slot_texts, extra_hours
+            )
         client_amount = _to_int(body.get('amount'), 'amount')
         per_slot = _to_int(
             body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'
@@ -880,7 +933,7 @@ def validate_booking_request(body, user=None):
         'sport': sport, 'unit': unit, 'unit_label': unit_label,
         'addons': addons, 'applied_offer': applied_offer,
         'discount': discount, 'fee': fee, 'amount': amount,
-        'per_slot': per_slot, 'method': method,
+        'per_slot': per_slot, 'method': method, 'slots': slot_texts,
     }, None
 
 
@@ -902,7 +955,9 @@ def build_booking_fields(user, body, data):
         unit=data['unit'],
         unit_label=data['unit_label'],
         date=data['date'],
-        slots=[str(slot) for slot in body['slots']],
+        # The RESERVED slots — an hourly booking's extra hour has been folded
+        # in, so availability blocks exactly what the customer paid for.
+        slots=data['slots'],
         per_slot=data['per_slot'],
         addons=data['addons'],
         offer=data['applied_offer'],

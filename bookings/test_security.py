@@ -782,3 +782,128 @@ class OccasionFieldTests(GatewayBookingMixin, APITestCase):
         booking = Booking.objects.get(pk=r.data['bookingId'])
         self.assertEqual(len(booking.occasion), 80)
         self.assertEqual(len(booking.occasion_note), 500)
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class ExtraHourReservationTests(GatewayBookingMixin, APITestCase):
+    """
+    The bill and the reserved time must agree — count the extra hour ONCE.
+
+    PACKAGE: the picker already books the whole block, so the slots arrive
+             covering package + extra hours. Reserve as sent.
+    HOURLY:  the extra hour sits outside the chosen slots, so the reservation
+             has to grow or the customer pays for an hour nobody blocked.
+    """
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9700000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9700000002', name='Asha')
+        self.other = User.objects.create_user(phone='9700000003', name='Ravi')
+        record = {
+            **RECORD, 'id': 'ehr', 'status': 'live', 'price': 600,
+            'detail': {
+                'addons': [],
+                'extraHourPrice': '499', 'maxExtraHours': '3',
+                'packages': [{'label': 'bday', 'price': 5000, 'duration': '2'}],
+            },
+        }
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='ehr-hall',
+            record=record, name='Reserve Hall', category='hall',
+            locality='X', pincode='560001',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, slots, addons, amount):
+        return self.gateway_book({
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': slots, 'addons': addons, 'perSlot': 600, 'amount': amount,
+        })
+
+    # ---------------- package ----------------
+
+    def test_package_slots_are_reserved_exactly_as_sent(self):
+        """2h package + 1 extra hour arrives as ONE 3-hour slot."""
+        r = self.book(
+            ['18:00 – 21:00'],
+            [{'name': 'Package — bday', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1}],
+            5000 + 499 + 20,
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.slots, ['18:00 – 21:00'])   # NOT stretched to 4h
+
+    def test_a_package_does_not_over_lock(self):
+        """The hour after a 3-hour package booking must stay bookable."""
+        self.book(
+            ['18:00 – 21:00'],
+            [{'name': 'Package — bday', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1}],
+            5000 + 499 + 20,
+        )
+        self.client.force_authenticate(user=self.other)
+        later = self.book(['21:00 – 22:00'], [], 620)
+        self.assertEqual(later.status_code, 201, later.data)
+
+    # ---------------- hourly ----------------
+
+    def test_hourly_extra_hour_extends_the_reservation(self):
+        """Billed for 3 hours, so all 3 must be blocked."""
+        r = self.book(
+            ['18:00 – 20:00'],                       # customer picked 2h
+            [{'name': 'Extra hour', 'qty': 1}],
+            1200 + 499 + 20,
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.slots, ['18:00 – 21:00'])   # grown to 3h
+
+    def test_the_extra_hour_is_actually_protected(self):
+        """The bug: the third hour was paid for but left open to anyone."""
+        self.book(
+            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 1}],
+            1200 + 499 + 20,
+        )
+        self.client.force_authenticate(user=self.other)
+        clash = self.book(['20:00 – 21:00'], [], 620)
+        self.assertEqual(clash.status_code, 409)
+
+    def test_two_extra_hours_extend_by_two(self):
+        r = self.book(
+            ['18:00 – 19:00'], [{'name': 'Extra hour', 'qty': 2}],
+            600 + 998 + 20,
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.slots, ['18:00 – 21:00'])
+
+    def test_hourly_without_extra_hours_is_untouched(self):
+        r = self.book(['18:00 – 20:00'], [], 1220)
+        self.assertEqual(r.status_code, 201, r.data)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.slots, ['18:00 – 20:00'])
+
+    def test_extending_past_closing_is_refused(self):
+        r = self.book(
+            ['22:00 – 23:00'], [{'name': 'Extra hour', 'qty': 3}],
+            600 + 1497 + 20,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('past closing time', r.data['message'])
+
+    def test_availability_reports_the_extended_block(self):
+        self.book(
+            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 1}],
+            1200 + 499 + 20,
+        )
+        Booking.objects.update(status='confirmed')
+        self.client.force_authenticate(user=None)
+        data = self.client.get(
+            f'/api/venues/{self.listing.id}/availability?date={TOMORROW}'
+        ).data
+        self.assertIn('18:00 – 21:00', data['booked'])
