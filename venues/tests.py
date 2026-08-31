@@ -1098,3 +1098,48 @@ class RepublishCacheInvalidationTests(ListingTestBase):
         stored = self._public_offers()
         self.assertEqual(stored[0]['value'], '30')
         self.assertEqual(stored[0]['perUserLimit'], '2')
+
+
+class ExtraHourFieldRoundTripTests(ListingTestBase):
+    """extraHourPrice / maxExtraHours need no new plumbing — the details
+    section takes any keys and the venue record is echoed verbatim. Pinned so
+    a future validation tightening cannot silently drop them."""
+
+    def test_draft_persists_and_returns_the_fields(self):
+        self.client.patch(
+            f'/api/venues/drafts/{self.draft.id}/sections/details',
+            {'extraHourPrice': '499', 'maxExtraHours': '3'}, format='json',
+        )
+        r = self.client.get(f'/api/venues/drafts/{self.draft.id}')
+        details = r.data['draft']['details']
+        self.assertEqual(details['extraHourPrice'], '499')
+        self.assertEqual(details['maxExtraHours'], '3')
+        # The existing extra-person pair must survive the merge.
+        self.assertIn('capacity', details)
+
+    def test_venue_detail_echoes_them_next_to_extra_persons(self):
+        from .models import Listing
+
+        record = {
+            **LISTING_RECORD,
+            'detail': {
+                **LISTING_RECORD['detail'],
+                'extraPersonPrice': '199', 'maxExtraPersons': '10',
+                'extraHourPrice': '499', 'maxExtraHours': '3',
+            },
+        }
+        self.assertIn(self.publish(record).status_code, (200, 201))
+        Listing.objects.filter(pk=self.draft.id).update(status=Listing.Status.LIVE)
+
+        detail = self.client.get(f'/api/venues/{self.draft.id}').data['detail']
+        self.assertEqual(detail['extraHourPrice'], '499')
+        self.assertEqual(detail['maxExtraHours'], '3')
+        self.assertEqual(detail['extraPersonPrice'], '199')
+
+    def test_a_venue_that_never_sets_them_is_unaffected(self):
+        from .models import Listing
+
+        self.assertIn(self.publish(LISTING_RECORD).status_code, (200, 201))
+        Listing.objects.filter(pk=self.draft.id).update(status=Listing.Status.LIVE)
+        detail = self.client.get(f'/api/venues/{self.draft.id}').data['detail']
+        self.assertNotIn('extraHourPrice', detail)   # absent, not an error

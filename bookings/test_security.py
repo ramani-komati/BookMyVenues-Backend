@@ -591,3 +591,124 @@ class PlatformPromoPerUserLimitTests(GatewayBookingMixin, APITestCase):
             'amount': 520, 'offer': {'code': 'ONESHOT'},
         })
         self.assertEqual(venue.status_code, 201, venue.data)
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class ExtraHourPricingTests(GatewayBookingMixin, APITestCase):
+    """
+    Optional per-hour extension, priced exactly like extra persons: the amount
+    comes from the venue's stored extraHourPrice, never from the request.
+    """
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9500000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9500000002', name='Asha')
+        record = {
+            **RECORD, 'id': 'eh', 'status': 'live', 'price': 600,
+            'detail': {
+                'addons': [{'name': 'Cake', 'price': 500}],
+                'extraPersonPrice': '199', 'maxExtraPersons': '10',
+                'extraHourPrice': '499', 'maxExtraHours': '3',
+                'packages': [
+                    {'label': 'Party Pack', 'price': 5000, 'duration': '3'},
+                ],
+            },
+        }
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='eh-hall',
+            record=record, name='Extra Hour Hall', category='hall',
+            locality='X', pincode='560001',
+        )
+        # A venue that never set the feature up.
+        self.plain = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='plain-hall',
+            record={**RECORD, 'id': 'plain', 'status': 'live', 'price': 600,
+                    'detail': {'addons': []}},
+            name='Plain Hall', category='hall', locality='X', pincode='560002',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, slots, addons, amount, listing=None):
+        return self.gateway_book({
+            'venueId': str((listing or self.listing).id), 'date': TOMORROW,
+            'slots': slots, 'addons': addons, 'perSlot': 600, 'amount': amount,
+        })
+
+    def test_extra_hour_priced_from_the_venue_not_the_request(self):
+        """A tampered price must not win — same rule as every other line."""
+        r = self.book(
+            ['18:00 – 20:00'],                        # 2h x 600 = 1200
+            [{'name': 'Extra hour', 'qty': 1, 'price': 1}],   # claims ₹1
+            1220 + 1,                                 # what the client hopes for
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(r.data['expectedAmount'], 1200 + 499 + 20)
+
+    def test_extra_hours_bill_at_the_venue_rate(self):
+        r = self.book(
+            ['18:00 – 20:00'],
+            [{'name': 'Extra hour', 'qty': 2}],
+            1200 + 998 + 20,
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_the_cap_is_enforced(self):
+        r = self.book(
+            ['18:00 – 20:00'],
+            [{'name': 'Extra hour', 'qty': 4}],       # cap is 3
+            1200 + 1996 + 20,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('Maximum 3 extra hours', r.data['message'])
+
+    def test_a_venue_without_the_field_refuses_the_line(self):
+        r = self.book(
+            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 1}],
+            1220 + 499, listing=self.plain,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('does not charge for extra hours', r.data['message'])
+
+    def test_extra_hours_extend_a_package_block(self):
+        """A 3h package + 1 extra hour is a 4h booking, billed 5000 + 499."""
+        r = self.book(
+            ['18:00 – 22:00'],                        # 4 hours
+            [{'name': 'Package — Party Pack', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1}],
+            5000 + 499 + 20,                          # no hourly charge at all
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_a_package_still_rejects_an_unexplained_extra_hour_of_time(self):
+        r = self.book(
+            ['18:00 – 22:00'],                        # 4h but no extra-hour line
+            [{'name': 'Package — Party Pack', 'qty': 1}],
+            5020,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('please book exactly 3 hours', r.data['message'])
+
+    def test_extra_hours_stack_with_persons_and_addons(self):
+        r = self.book(
+            ['18:00 – 20:00'],
+            [{'name': 'Extra hour', 'qty': 1},
+             {'name': 'Extra persons', 'qty': 2},
+             {'name': 'Cake', 'qty': 1}],
+            1200 + 499 + 398 + 500 + 20,
+        )
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_the_line_is_persisted_and_echoed(self):
+        r = self.book(
+            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 2}],
+            1200 + 998 + 20,
+        )
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        line = next(a for a in booking.addons if a['name'] == 'Extra hour')
+        self.assertEqual(line['qty'], 2)
+        self.assertEqual(line['price'], 499)          # server price, stored

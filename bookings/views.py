@@ -324,9 +324,15 @@ def _addon_total(listing, requested_addons):
     max_raw = str(detail.get('maxExtraPersons') or '').strip()
     max_extra = _to_int(max_raw, 'maxExtraPersons') if max_raw else 0
 
+    hour_raw = str(detail.get('extraHourPrice') or '').strip()
+    hour_price = _to_int(hour_raw, 'extraHourPrice') if hour_raw else None
+    max_hours_raw = str(detail.get('maxExtraHours') or '').strip()
+    max_hours = _to_int(max_hours_raw, 'maxExtraHours') if max_hours_raw else 0
+
     addon_total = 0
     cleaned = []
     chosen_package = None
+    extra_hours = 0
     for line in requested_addons or []:
         name = str(line.get('name') or '').strip()
         if not name:
@@ -356,6 +362,13 @@ def _addon_total(listing, requested_addons):
             if max_extra and qty > max_extra:
                 raise SlotError(f'Maximum {max_extra} extra persons allowed.')
             price = extra_price
+        elif 'extra hour' in key:
+            if hour_price is None:
+                raise SlotError('This venue does not charge for extra hours.')
+            if max_hours and qty > max_hours:
+                raise SlotError(f'Maximum {max_hours} extra hours allowed.')
+            price = hour_price
+            extra_hours = qty
         else:
             raise SlotError(f'Unknown add-on: "{name}".')
 
@@ -365,7 +378,7 @@ def _addon_total(listing, requested_addons):
     if chosen_package is not None and chosen_package[2] != 1:
         # Two of a package is not a thing — the package IS the booking.
         raise SlotError('Only one package can be booked at a time.')
-    return addon_total, cleaned, chosen_package
+    return addon_total, cleaned, chosen_package, extra_hours
 
 
 def _parse_iso_date(text):
@@ -623,7 +636,9 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     if rate is None:
         rate = base_rate(listing, weekend)
     booked_minutes = total_minutes(intervals)
-    addon_total, cleaned, package = _addon_total(listing, requested_addons)
+    addon_total, cleaned, package, extra_hours = _addon_total(
+        listing, requested_addons
+    )
 
     if package is None:
         slot_base = round(rate * booked_minutes / 60)
@@ -632,13 +647,21 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
         slot_base = 0
         label, info, _qty = package
         wanted = info['minutes']
-        if wanted is not None and booked_minutes != wanted:
-            hours = wanted / 60
-            raise SlotError(
-                f'"{label}" covers {hours:g} '
-                f'{"hour" if hours == 1 else "hours"} — '
-                f'please book exactly that long.'
-            )
+        if wanted is not None:
+            # "Extra hour" lines extend the block the package covers, and are
+            # billed at the venue's extraHourPrice rather than the slot rate.
+            allowed = wanted + extra_hours * 60
+            if booked_minutes != allowed:
+                hours = allowed / 60
+                extra_note = (
+                    f' (+{extra_hours} extra)' if extra_hours else ''
+                )
+                raise SlotError(
+                    f'"{label}" covers {wanted / 60:g} '
+                    f'{"hour" if wanted == 60 else "hours"}{extra_note} — '
+                    f'please book exactly {hours:g} '
+                    f'{"hour" if allowed == 60 else "hours"}.'
+                )
     base = slot_base + addon_total
 
     discount, applied_offer = _apply_offer(listing, base, offer_request, user)
