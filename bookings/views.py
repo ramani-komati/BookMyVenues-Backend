@@ -399,6 +399,11 @@ def _parse_iso_date(text):
         return None  # unparseable/empty -> open-ended
 
 
+# Banner types that actually discount something. Anything else is a
+# display-only announcement.
+DISCOUNT_BANNER_TYPES = {'percent', 'flat'}
+
+
 def _apply_platform_offer(base, offer_request, user=None):
     """
     A PLATFORM promo (source: "platform") validates against the ACTIVE admin
@@ -420,6 +425,11 @@ def _apply_platform_offer(base, offer_request, user=None):
     matched = None
     for banner in banners:
         if not isinstance(banner, dict):
+            continue
+        # Only percent/flat banners are coupons. 'none' and 'complimentary'
+        # are announcements — "free popcorn this weekend" — and must never be
+        # redeemable, even if someone saves one with a code by mistake.
+        if str(banner.get('type') or '').strip().lower() not in DISCOUNT_BANNER_TYPES:
             continue
         if str(banner.get('code') or '').strip().upper() != code:
             continue

@@ -1473,3 +1473,95 @@ class AdminVendorTokenTests(APITestCase):
         entry = AuditEntry.objects.order_by('-created_at').first()
         self.assertIn('vendor token issued', entry.change)
         self.assertEqual(entry.admin, self.admin.name or self.admin.phone)
+
+
+class ComplimentaryBannerTests(APITestCase):
+    """A fourth banner type: a display-only "on the house" announcement.
+
+    Shaped like a `none` banner — zero value, no code, no window — so it is
+    always active and must never behave as a coupon.
+    """
+
+    BANNER = {
+        'id': 1725190000000,
+        'title': 'Free popcorn on every theatre booking',
+        'text': 'Complimentary large popcorn this weekend',
+        'type': 'complimentary',
+        'value': 0, 'code': '', 'minAmount': 0,
+        'maxDiscount': 0, 'perUserLimit': 0, 'from': '', 'to': '',
+    }
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000009', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    def test_it_survives_the_settings_round_trip(self):
+        r = self.client.put('/api/admin/settings',
+                            {'banners': [self.BANNER]}, format='json')
+        self.assertEqual(r.status_code, 200)
+
+        boot = self.client.get('/api/admin/bootstrap').data
+        stored = boot['settings']['banners'][0]
+        self.assertEqual(stored['type'], 'complimentary')
+        self.assertEqual(stored['title'], self.BANNER['title'])
+        self.assertEqual(stored['text'], self.BANNER['text'])
+
+    def test_it_is_always_active_on_the_public_endpoint(self):
+        """Empty from/to means open-ended — it shows until removed."""
+        self.client.put('/api/admin/settings',
+                        {'banners': [self.BANNER]}, format='json')
+        self.client.force_authenticate(user=None)
+        from django.core.cache import cache
+        cache.clear()
+        banners = self.client.get('/api/banners').data['banners']
+        self.assertEqual(len(banners), 1)
+        self.assertEqual(banners[0]['type'], 'complimentary')
+
+    def test_it_can_never_be_redeemed_as_a_coupon(self):
+        """Even saved with a code by mistake, an announcement is not money."""
+        from bookings.slots import SlotError
+        from bookings.views import _apply_platform_offer
+        from adminpanel.models import Settings
+
+        settings_obj = Settings.load()
+        settings_obj.banners = [{**self.BANNER, 'code': 'FREEPOP', 'value': 50}]
+        settings_obj.save()
+
+        with self.assertRaises(SlotError):
+            _apply_platform_offer(1000, {'code': 'FREEPOP', 'source': 'platform'})
+
+    def test_a_none_banner_is_equally_unredeemable(self):
+        from bookings.slots import SlotError
+        from bookings.views import _apply_platform_offer
+        from adminpanel.models import Settings
+
+        settings_obj = Settings.load()
+        settings_obj.banners = [
+            {**self.BANNER, 'type': 'none', 'code': 'NOPE', 'value': 50}
+        ]
+        settings_obj.save()
+
+        with self.assertRaises(SlotError):
+            _apply_platform_offer(1000, {'code': 'NOPE', 'source': 'platform'})
+
+    def test_real_discount_banners_still_work(self):
+        """The guard must not break percent/flat promos."""
+        from bookings.views import _apply_platform_offer
+        from adminpanel.models import Settings
+
+        settings_obj = Settings.load()
+        settings_obj.banners = [
+            {'id': 2, 'title': 'Ten off', 'type': 'flat', 'value': 100,
+             'code': 'TEN', 'minAmount': '', 'maxDiscount': '',
+             'from': '', 'to': ''}
+        ]
+        settings_obj.save()
+
+        discount, applied = _apply_platform_offer(
+            1000, {'code': 'TEN', 'source': 'platform'}
+        )
+        self.assertEqual(discount, 100)
+        self.assertEqual(applied['source'], 'platform')
