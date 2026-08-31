@@ -76,6 +76,17 @@ def _amount_mismatch(expected):
     )
 
 
+def _text(value, limit):
+    """Optional free text, trimmed to what the column holds.
+
+    Truncating beats raising: an over-long note is a UI slip, and failing a
+    paid booking over it would be worse than losing the tail of a sentence.
+    """
+    if value is None:
+        return ''
+    return str(value).strip()[:limit]
+
+
 def _to_int(value, field):
     """Numeric form fields may arrive as strings ('120') — coerce.
 
@@ -874,6 +885,8 @@ def build_booking_fields(user, body, data):
         location=str(listing.record.get('location') or ''),
         image=str(listing.record.get('image') or ''),
         customer_name=str(body.get('customer') or user.name),
+        occasion=_text(body.get('occasion'), 80),
+        occasion_note=_text(body.get('occasionNote'), 500),
         phone=user.phone,
         sport=data['sport'],
         unit=data['unit'],

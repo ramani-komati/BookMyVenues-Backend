@@ -27,6 +27,7 @@ from .slots import (
 )
 from .views import (
     _amount_mismatch,
+    _text,
     _apply_offer,
     _booked_intervals,
     _message,
@@ -353,6 +354,8 @@ class WalkInBookingView(APIView):
                 location=str(listing.record.get('location') or ''),
                 image=str(listing.record.get('image') or ''),
                 customer_name=str(body.get('customer') or 'Walk-in'),
+                occasion=_text(body.get('occasion'), 80),
+                occasion_note=_text(body.get('occasionNote'), 500),
                 phone='',
                 sport=sport,
                 unit=unit,

@@ -290,6 +290,8 @@ def booking_row(booking, today=None):
         'offer': booking.offer or None,        # {code,title,type,value,source}
         'discountAmount': booking.discount_amount,
         'method': booking.method,   # echoed exactly as stored (upi/card/…/venue/walk-in)
+        'occasion': booking.occasion or None,
+        'occasionNote': booking.occasion_note or None,
         'collected': booking.collected,
         'collectedAt': booking.collected_at.isoformat() if booking.collected_at else None,
         'status': _booking_status(booking, today),

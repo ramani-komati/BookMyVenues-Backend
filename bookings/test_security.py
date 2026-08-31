@@ -712,3 +712,73 @@ class ExtraHourPricingTests(GatewayBookingMixin, APITestCase):
         line = next(a for a in booking.addons if a['name'] == 'Extra hour')
         self.assertEqual(line['qty'], 2)
         self.assertEqual(line['price'], 499)          # server price, stored
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class OccasionFieldTests(GatewayBookingMixin, APITestCase):
+    """`occasion` / `occasionNote` exist so the VENDOR sees what the booking
+    is for — so they must survive the round trip, not just the request."""
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9600000001', name='Vendor', email='v@example.com',
+            role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9600000002', name='Asha')
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='occ-hall',
+            record={**RECORD, 'id': 'occ', 'status': 'live'},
+            name='Occasion Hall', category='hall',
+            locality='X', pincode='560001',
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, **extra):
+        return self.gateway_book({
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': ['19:30 – 21:00'], 'addons': [], 'perSlot': 600,
+            'amount': 920, **extra,
+        })
+
+    def test_persisted_and_echoed_to_the_customer(self):
+        r = self.book(occasion='Birthday', occasionNote='Surprise — cake at 8')
+        self.assertEqual(r.status_code, 201, r.data)
+        Booking.objects.update(status='confirmed')
+
+        mine = self.client.get('/api/users/me/bookings').data['bookings'][0]
+        self.assertEqual(mine['occasion'], 'Birthday')
+        self.assertEqual(mine['occasionNote'], 'Surprise — cake at 8')
+
+    def test_the_vendor_sees_them(self):
+        """The whole reason the fields exist."""
+        self.book(occasion='Anniversary', occasionNote='Quiet corner table')
+        Booking.objects.update(status='confirmed')
+
+        self.client.force_authenticate(user=self.vendor)
+        row = self.client.get(
+            '/api/vendors/me/dashboard'
+        ).data['allBookings'][0]
+        self.assertEqual(row['occasion'], 'Anniversary')
+        self.assertEqual(row['occasionNote'], 'Quiet corner table')
+
+    def test_absent_fields_come_back_null_not_missing(self):
+        r = self.book()
+        self.assertEqual(r.status_code, 201)
+        Booking.objects.update(status='confirmed')
+        mine = self.client.get('/api/users/me/bookings').data['bookings'][0]
+        self.assertIsNone(mine['occasion'])
+        self.assertIsNone(mine['occasionNote'])
+
+    def test_null_is_accepted(self):
+        r = self.book(occasion=None, occasionNote=None)
+        self.assertEqual(r.status_code, 201, r.data)
+
+    def test_an_over_long_note_is_trimmed_not_rejected(self):
+        """Losing the tail of a sentence beats failing a paid booking."""
+        r = self.book(occasion='B' * 200, occasionNote='N' * 2000)
+        self.assertEqual(r.status_code, 201, r.data)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(len(booking.occasion), 80)
+        self.assertEqual(len(booking.occasion_note), 500)

@@ -1143,3 +1143,41 @@ class ExtraHourFieldRoundTripTests(ListingTestBase):
         Listing.objects.filter(pk=self.draft.id).update(status=Listing.Status.LIVE)
         detail = self.client.get(f'/api/venues/{self.draft.id}').data['detail']
         self.assertNotIn('extraHourPrice', detail)   # absent, not an error
+
+
+class OccasionsEchoTests(ListingTestBase):
+    """detail.occasions must reach the customer app so the dropdown shows the
+    vendor's registered occasions instead of a hardcoded fallback."""
+
+    def test_occasions_are_echoed_on_the_venue_detail(self):
+        from .models import Listing
+
+        record = {
+            **LISTING_RECORD,
+            'detail': {
+                **LISTING_RECORD['detail'],
+                'occasions': ['Wedding', 'Birthday', 'Corporate'],
+            },
+        }
+        self.assertIn(self.publish(record).status_code, (200, 201))
+        Listing.objects.filter(pk=self.draft.id).update(status=Listing.Status.LIVE)
+
+        detail = self.client.get(f'/api/venues/{self.draft.id}').data['detail']
+        self.assertEqual(detail['occasions'], ['Wedding', 'Birthday', 'Corporate'])
+
+    def test_editing_the_list_replaces_it(self):
+        from .models import Listing
+
+        def publish_with(occasions):
+            record = {**LISTING_RECORD,
+                      'detail': {**LISTING_RECORD['detail'], 'occasions': occasions}}
+            self.assertIn(self.publish(record).status_code, (200, 201))
+            Listing.objects.filter(pk=self.draft.id).update(
+                status=Listing.Status.LIVE
+            )
+            return self.client.get(
+                f'/api/venues/{self.draft.id}'
+            ).data['detail'].get('occasions')
+
+        self.assertEqual(len(publish_with(['Wedding', 'Birthday'])), 2)
+        self.assertEqual(publish_with(['Wedding']), ['Wedding'])   # not merged

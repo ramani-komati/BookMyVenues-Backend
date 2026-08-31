@@ -95,6 +95,12 @@ class Booking(models.Model):
     # derived from the date; an admin can set 'refunded' etc.
     status = models.CharField(max_length=20, default='confirmed')
     # Razorpay linkage (empty for pay-at-venue / walk-ins / legacy bookings).
+    # What the booking is for, and anything the customer wants the venue to
+    # know ("Surprise — cake at 8"). Both optional and free text; they exist
+    # so the VENDOR sees them, so they are echoed on every booking record.
+    occasion = models.CharField(max_length=80, blank=True, default='')
+    occasion_note = models.CharField(max_length=500, blank=True, default='')
+
     # Set once the confirmation actually got through, so a webhook
     # re-delivery never sends a second copy.
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
@@ -161,6 +167,8 @@ class Booking(models.Model):
             'sport': self.sport or None,
             'unit': self.unit,
             'unitLabel': self.unit_label or None,
+            'occasion': self.occasion or None,
+            'occasionNote': self.occasion_note or None,
             'perSlot': self.per_slot,
             'addons': self.addons,
             'offer': self.offer or None,
