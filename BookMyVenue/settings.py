@@ -274,6 +274,20 @@ if not DEBUG and CORS_ALLOW_ALL_ORIGINS:
     )
 
 
+# --- Admin panel session -------------------------------------------------
+# The super-admin panel authenticates with a Django session cookie (password
+# -> OTP -> session). 30 days, persistent, so an admin is not bounced to the
+# login screen while the frontend still believes they are signed in.
+#
+# NOTE: this is a long life for a session that can issue refunds and change
+# the platform fee. It is deliberate and matches the frontend, but it means a
+# stolen cookie is usable for a month — the mitigations that matter are the
+# Secure/HttpOnly/SameSite flags below and logging out on shared machines.
+SESSION_COOKIE_AGE = 30 * 24 * 60 * 60        # 30 days, in seconds
+SESSION_EXPIRE_AT_BROWSER_CLOSE = False       # persistent, not a session cookie
+SESSION_SAVE_EVERY_REQUEST = True             # sliding window: active admins stay in
+
+
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 

@@ -1661,3 +1661,40 @@ class PartPaymentAdminTests(APITestCase):
         self.client.force_authenticate(user=None)
         data = self.client.get(f'/api/venues/{self.listing.id}').data
         self.assertEqual(data['detail']['partPayment']['value'], 50)
+
+
+class AdminSessionLifetimeTests(APITestCase):
+    """The panel keeps an admin signed in for 30 days; the backend session has
+    to outlive that or they get bounced to the login screen early."""
+
+    def test_the_session_lasts_thirty_days(self):
+        from django.conf import settings
+        self.assertEqual(settings.SESSION_COOKIE_AGE, 30 * 24 * 60 * 60)
+
+    def test_the_cookie_is_persistent_not_a_session_cookie(self):
+        from django.conf import settings
+        self.assertFalse(settings.SESSION_EXPIRE_AT_BROWSER_CLOSE)
+
+    def test_verify_otp_issues_a_cookie_with_that_max_age(self):
+        """What the browser is actually told, rather than what we configured."""
+        admin = User.objects.create_user(
+            phone='9990000031', name='Anita', email='session@x.in',
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        sent = {}
+
+        def fake_send(code, phone, email=''):
+            sent[phone] = code
+
+        with patch('adminpanel.views.deliver_otp', side_effect=fake_send):
+            self.client.post('/api/admin/auth/login',
+                             {'email': 'session@x.in', 'password': ADMIN_PASSWORD},
+                             format='json')
+            r = self.client.post('/api/admin/auth/verify-otp',
+                                 {'email': 'session@x.in',
+                                  'otp': sent[admin.phone]}, format='json')
+        self.assertEqual(r.status_code, 200)
+        cookie = r.cookies['sessionid']
+        self.assertEqual(int(cookie['max-age']), 30 * 24 * 60 * 60)
+        self.assertTrue(cookie['expires'])          # persistent, not per-browser-session
+        self.assertTrue(cookie['httponly'])         # still not readable from JS
