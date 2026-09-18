@@ -1181,3 +1181,97 @@ class OccasionsEchoTests(ListingTestBase):
 
         self.assertEqual(len(publish_with(['Wedding', 'Birthday'])), 2)
         self.assertEqual(publish_with(['Wedding']), ['Wedding'])   # not merged
+
+
+class OthersCategoryTests(ListingTestBase):
+    """A vendor who picks "Others" types their own category. That free text
+    becomes the venue's real category — "Others" is a wizard choice, not
+    something a customer wants to browse."""
+
+    def _publish_others(self, custom='Rooftop Lounge', subs=None):
+        record = {
+            **LISTING_RECORD,
+            'category': 'Others',
+            'detail': {
+                **LISTING_RECORD['detail'],
+                'primaryCategory': 'Others',
+                'customCategory': custom,
+                'subCategories': subs if subs is not None
+                else {'Sunset Dining': True, 'Live Music': True},
+            },
+        }
+        r = self.publish(record)
+        self.assertIn(r.status_code, (200, 201), r.data)
+        return r
+
+    def _listing(self):
+        from .models import Listing
+        return Listing.objects.get(pk=self.draft.id)
+
+    def test_the_typed_name_becomes_the_venue_category(self):
+        self._publish_others()
+        listing = self._listing()
+        self.assertEqual(listing.category, 'Rooftop Lounge')       # indexed column
+        self.assertEqual(listing.record['category'], 'Rooftop Lounge')  # and the record
+
+    def test_customers_never_see_the_word_Others(self):
+        self._publish_others()
+        from .models import Listing
+        Listing.objects.filter(pk=self.draft.id).update(status=Listing.Status.LIVE)
+        data = self.client.get(f'/api/venues/{self.draft.id}').data
+        self.assertEqual(data['category'], 'Rooftop Lounge')
+        self.assertNotEqual(data['category'], 'Others')
+
+    def test_typed_sub_categories_are_kept(self):
+        self._publish_others()
+        from .taxonomy import sub_categories_for
+        subs = sub_categories_for(self._listing())
+        self.assertIn('Sunset Dining', subs)
+        self.assertIn('Live Music', subs)
+
+    def test_unticked_sub_categories_are_dropped(self):
+        """The map shape carries false entries — those are not selections."""
+        self._publish_others(subs={'Sunset Dining': True, 'Karaoke': False})
+        from .taxonomy import sub_categories_for
+        subs = sub_categories_for(self._listing())
+        self.assertIn('Sunset Dining', subs)
+        self.assertNotIn('Karaoke', subs)
+
+    def test_a_list_of_sub_categories_still_works(self):
+        """The fixed categories send a list — that must keep working."""
+        self._publish_others(subs=['Sunset Dining', 'Live Music'])
+        from .taxonomy import sub_categories_for
+        self.assertIn('Sunset Dining', sub_categories_for(self._listing()))
+
+    def test_a_missing_custom_name_never_publishes_as_Others(self):
+        """A half-filled draft falls back rather than categorising a venue
+        as the literal word 'Others'."""
+        record = {
+            **LISTING_RECORD, 'category': 'Party hall',
+            'detail': {**LISTING_RECORD['detail'],
+                       'primaryCategory': 'Others', 'customCategory': '   '},
+        }
+        self.assertIn(self.publish(record).status_code, (200, 201))
+        self.assertEqual(self._listing().category, 'Party hall')
+
+    def test_an_over_long_name_is_trimmed_to_the_column(self):
+        self._publish_others(custom='R' * 200)
+        self.assertEqual(len(self._listing().category), 50)
+
+    def test_the_fixed_categories_are_untouched(self):
+        self.assertIn(self.publish(LISTING_RECORD).status_code, (200, 201))
+        self.assertEqual(self._listing().category, LISTING_RECORD['category'])
+
+    def test_the_draft_persists_custom_category(self):
+        self.client.patch(
+            f'/api/venues/drafts/{self.draft.id}/sections/details',
+            {'primaryCategory': 'Others', 'customCategory': 'Rooftop Lounge',
+             'subCategories': {'Sunset Dining': True}},
+            format='json',
+        )
+        details = self.client.get(
+            f'/api/venues/drafts/{self.draft.id}'
+        ).data['draft']['details']
+        self.assertEqual(details['customCategory'], 'Rooftop Lounge')
+        self.assertEqual(details['primaryCategory'], 'Others')
+        self.assertEqual(details['subCategories'], {'Sunset Dining': True})

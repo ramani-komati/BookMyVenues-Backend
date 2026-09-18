@@ -230,10 +230,14 @@ class DraftSeedView(APIView):
 
 def _extract_listing_columns(record):
     """Pull the searchable fields out of the JSON record."""
+    from .taxonomy import resolve_category
+
     detail = record.get('detail') or {}
     return {
         'name': str(record.get('name') or '')[:200],
-        'category': str(record.get('category') or '')[:50],
+        # "Others" resolves to the vendor's own typed name — that is what
+        # customers browse and filter by.
+        'category': str(resolve_category(record) or '')[:50],
         'locality': str(record.get('locality') or '')[:120],
         'pincode': str(record.get('pincode') or detail.get('pincode') or '')[:10],
     }
@@ -366,6 +370,13 @@ class VendorListingPublishView(APIView):
         # and payout fields must never survive into it — whatever the wizard
         # happens to spread into the payload.
         record = _strip_private_keys(record)
+
+        # Keep the record's own category in step with the indexed column, so
+        # the venue page and the search results never disagree.
+        from .taxonomy import resolve_category
+        resolved_category = resolve_category(record)
+        if resolved_category:
+            record['category'] = resolved_category
 
         # Contract: "keep existing photos if update has none".
         if existing is not None and not record.get('gallery'):

@@ -137,6 +137,42 @@ def canonical_sub_category(category, raw):
     return text
 
 
+OTHERS = 'Others'
+MAX_CUSTOM_CATEGORY = 50   # matches the indexed Listing.category column
+
+
+def resolve_category(record):
+    """The category customers actually see and filter by.
+
+    A vendor who picks "Others" types their own, e.g. "Rooftop Lounge", and
+    that free text becomes the venue's real category — "Others" is a wizard
+    choice, not something anyone wants to browse. Falls back to the stored
+    category whenever the custom name is missing, so a half-filled draft can
+    never publish a venue categorised as "Others".
+    """
+    record = record or {}
+    detail = record.get('detail') or {}
+    stored = str(record.get('category') or '').strip()
+
+    primary = str(detail.get('primaryCategory') or '').strip()
+    if primary.lower() == OTHERS.lower():
+        custom = str(detail.get('customCategory') or '').strip()
+        if custom:
+            return custom[:MAX_CUSTOM_CATEGORY]
+    return stored
+
+
+def _sub_category_names(value):
+    """Sub-categories arrive either as a list or as a {name: true} map —
+    the wizard uses the map shape for vendor-typed ones. Only truthy keys
+    count, so unticking a box removes it rather than leaving it behind."""
+    if isinstance(value, dict):
+        return [name for name, on in value.items() if on]
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    return []
+
+
 def sub_categories_for(listing):
     """
     The flat, canonical sub-category list for a venue, gathered from wherever
@@ -148,12 +184,14 @@ def sub_categories_for(listing):
     """
     record = listing.record or {}
     detail = record.get('detail') or {}
-    category = canonical_category(record.get('category') or listing.category)
+    category = canonical_category(
+        resolve_category(record) or record.get('category') or listing.category
+    )
 
     raw = []
-    raw.extend(detail.get('subCategories') or [])
-    raw.extend(record.get('subCategories') or [])
-    raw.extend(detail.get('occasions') or [])
+    raw.extend(_sub_category_names(detail.get('subCategories')))
+    raw.extend(_sub_category_names(record.get('subCategories')))
+    raw.extend(_sub_category_names(detail.get('occasions')))
     raw.extend(
         entry.get('name') for entry in (detail.get('sports') or [])
         if isinstance(entry, dict)
