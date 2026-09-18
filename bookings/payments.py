@@ -84,7 +84,9 @@ class PaymentOrderView(APIView):
         # Create the gateway order BEFORE taking the lock (external call).
         # An orphaned unpaid order is harmless if the overlap check fails.
         try:
-            order_id = create_order(data['amount'], receipt=request.user.phone)
+            # Part payment charges only the online slice; without a split
+            # this IS the full amount.
+            order_id = create_order(data['pay_now'], receipt=request.user.phone)
         except RazorpayError as exc:
             return _message(str(exc), status.HTTP_502_BAD_GATEWAY)
 
@@ -108,7 +110,9 @@ class PaymentOrderView(APIView):
         return Response({
             'orderId': order_id,
             'keyId': django_settings.RAZORPAY_KEY_ID,
-            'amount': data['amount'] * 100,   # paise, as the widget expects
+            'amount': data['pay_now'] * 100,  # paise, as the widget expects
+            'payNow': data['pay_now'],
+            'atVenue': data['at_venue'],
             'bookingId': booking.id,
         }, status=status.HTTP_201_CREATED)
 
@@ -203,7 +207,9 @@ def _auto_refund(booking, payment_id):
         booking.refund_id = refund_payment(booking.razorpay_payment_id)
         booking.status = 'refunded'
         booking.refund_reason = booking.refund_reason or 'Checkout abandoned — auto-refunded'
-        booking.refund_amount = booking.amount
+        # Only what the gateway actually took — the at-venue slice was never
+        # captured, so it cannot be refunded.
+        booking.refund_amount = booking.online_amount
     except RazorpayError:
         logger.exception(
             'Auto-refund FAILED for cancelled booking %s (payment %s) — '
@@ -254,7 +260,10 @@ class RazorpayWebhookView(APIView):
             entity_amount = entity.get('amount')
             if entity_amount is not None:
                 try:
-                    if int(entity_amount) != booking.amount * 100:
+                    # Compare against the ONLINE charge, not the full total:
+                    # a part-paid booking captures only its payNow slice, and
+                    # checking against `amount` would reject every one of them.
+                    if int(entity_amount) != booking.online_amount * 100:
                         return Response({'status': 'amount-mismatch'})
                 except (TypeError, ValueError):
                     return Response({'status': 'amount-mismatch'})

@@ -222,5 +222,19 @@ class PublicVenueDetailView(APIView):
         if average is not None:
             record['rating'] = average
             record['ratingCount'] = count
+
+        # Part payment, served in BOTH places the contract names: at the top
+        # level where the admin panel writes it, and inside `detail` where the
+        # customer booking screen reads it. Normalised through read_config, so
+        # a malformed venue config reads back as null (= pay in full) rather
+        # than a shape the client has to defend against.
+        from bookings.part_payment import read_config as read_part_payment
+        part = read_part_payment(listing.record)
+        record['partPayment'] = part
+        # Copy before writing: `detail` is still the dict loaded from the row.
+        detail = dict(record.get('detail') or {})
+        detail['partPayment'] = part
+        record['detail'] = detail
+
         cache.set(cache_key, record, CACHE_SECONDS)
         return Response(record)

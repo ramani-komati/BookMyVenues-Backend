@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from accounts.models import User, vendor_accounts_q
 from bookings.models import Booking, Rating
+from bookings.part_payment import read_config as read_part_payment
 from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 from venues.completion import compute_completion
 from venues.models import Listing, VenueDraft
@@ -181,6 +182,10 @@ def venue_row(listing, ctx=None):
         'status': _venue_status(listing),
         'featured': listing.featured,
         'capacity': str(detail.get('capacity') or ''),
+        # Per-venue part payment, normalised: the panel and the customer app
+        # both read it, and a malformed config reads back as None (= off)
+        # rather than a shape either of them has to defend against.
+        'partPayment': read_part_payment(record),
         'packages': str(len(detail.get('packages') or [])),
         'hours': '06:00 – 24:00',
         'addedOn': listing.created_at.strftime('%b %Y'),
@@ -352,6 +357,10 @@ def approval_row(listing, now=None, ctx=None):
         'status': _APPROVAL_STATUS.get(listing.status, 'pending'),
         'price': _rupees(record.get('price') or 0),
         'capacity': str(detail.get('capacity') or ''),
+        # Per-venue part payment, normalised: the panel and the customer app
+        # both read it, and a malformed config reads back as None (= off)
+        # rather than a shape either of them has to defend against.
+        'partPayment': read_part_payment(record),
         'packages': str(len(detail.get('packages') or [])),
         'amenities': detail.get('amenities') or [],
         'payout': payout_mask,

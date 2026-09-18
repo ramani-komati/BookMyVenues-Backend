@@ -22,6 +22,8 @@ from rest_framework.views import APIView
 from venues.models import Listing
 
 from .models import Booking
+from .part_payment import read_config as read_part_payment
+from .part_payment import split as split_payment
 from .slots import (
     CLOSE_MINUTE,
     SlotError,
@@ -928,12 +930,19 @@ def validate_booking_request(body, user=None):
     if client_amount != amount:
         return None, _amount_mismatch(amount)
 
+    # Part payment: the venue may take a slice online and the rest in cash on
+    # arrival. `amount` remains the FULL total either way — only what the
+    # gateway charges changes.
+    part_config = read_part_payment(listing.record)
+    pay_now, at_venue = split_payment(amount, part_config, fee)
+
     return {
         'listing': listing, 'date': date, 'intervals': intervals,
         'sport': sport, 'unit': unit, 'unit_label': unit_label,
         'addons': addons, 'applied_offer': applied_offer,
         'discount': discount, 'fee': fee, 'amount': amount,
         'per_slot': per_slot, 'method': method, 'slots': slot_texts,
+        'pay_now': pay_now, 'at_venue': at_venue, 'part_payment': part_config,
     }, None
 
 
@@ -965,6 +974,9 @@ def build_booking_fields(user, body, data):
         fee=data['fee'],
         amount=data['amount'],
         method=data['method'],
+        pay_now=data['pay_now'],
+        at_venue=data['at_venue'],
+        part_payment=data['part_payment'],
     )
 
 

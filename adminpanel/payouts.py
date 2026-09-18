@@ -72,11 +72,22 @@ def generate_payouts():
             else 0
         )
         if booking.method == Booking.Method.VENUE:
-            # Vendor collected the DISCOUNTED cash; we top up the platform
-            # promo and claw back our fee.
+            # Legacy pay-at-venue (retired): vendor collected the DISCOUNTED
+            # cash; we top up the platform promo and claw back our fee.
             entry[0] += promo_topup - booking.fee
         else:
-            entry[0] += max(0, booking.amount + promo_topup - booking.fee)
+            # Only the ONLINE slice passes through us. With part payment the
+            # vendor already holds `at_venue` in cash, so transferring the
+            # full amount would pay them for it twice:
+            #
+            #     cash kept      at_venue
+            #     transferred    pay_now - fee
+            #     total          amount - fee          <- what they are owed
+            #
+            # Without a split online_amount IS the amount, so this is the same
+            # arithmetic every existing booking has always used. The split
+            # floors pay_now at the fee, so this never goes negative.
+            entry[0] += max(0, booking.online_amount + promo_topup - booking.fee)
 
     settled = {
         (row[1], row[0])  # (period_start, vendor_id) -> keyed as (week, vendor)

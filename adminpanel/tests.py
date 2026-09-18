@@ -1565,3 +1565,99 @@ class ComplimentaryBannerTests(APITestCase):
         )
         self.assertEqual(discount, 100)
         self.assertEqual(applied['source'], 'platform')
+
+
+class PartPaymentAdminTests(APITestCase):
+    """Super-admin configures part payment per venue. This decides how much
+    money we actually collect online, so the payload is validated rather than
+    stored verbatim like the vendor's display fields."""
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000021', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.vendor = User.objects.create_user(
+            phone='9990000022', name='Ravi', role=User.Role.VENDOR,
+        )
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='pp-admin',
+            record={'name': 'PP Hall', 'price': 1000, 'detail': {}},
+            name='PP Hall', category='hall', locality='X', pincode='560001',
+            status=Listing.Status.LIVE,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    def patch(self, payload):
+        return self.client.patch(
+            f'/api/admin/venues/{self.listing.id}',
+            {'partPayment': payload}, format='json',
+        )
+
+    def test_it_is_persisted_and_echoed(self):
+        r = self.patch({'enabled': True, 'mode': 'percent', 'value': 20})
+        self.assertEqual(r.status_code, 200, r.data)
+        self.assertEqual(r.data['partPayment'],
+                         {'enabled': True, 'mode': 'percent', 'value': 20})
+        self.listing.refresh_from_db()
+        self.assertEqual(self.listing.record['partPayment']['value'], 20)
+
+    def test_the_venues_list_returns_it(self):
+        self.patch({'enabled': True, 'mode': 'fixed', 'value': 500})
+        venues = self.client.get('/api/admin/bootstrap').data['venues']
+        row = next(v for v in venues if v['id'] == str(self.listing.id))
+        self.assertEqual(row['partPayment'],
+                         {'enabled': True, 'mode': 'fixed', 'value': 500})
+
+    def test_disabling_removes_it(self):
+        self.patch({'enabled': True, 'mode': 'percent', 'value': 20})
+        r = self.patch({'enabled': False})
+        self.assertEqual(r.status_code, 200)
+        self.assertIsNone(r.data['partPayment'])
+        self.listing.refresh_from_db()
+        self.assertNotIn('partPayment', self.listing.record)
+
+    def test_a_bad_config_is_REFUSED_not_silently_ignored(self):
+        """Silently dropping it would charge the customer full price while the
+        panel showed a split."""
+        for bad in ({'enabled': True, 'mode': 'half', 'value': 20},
+                    {'enabled': True, 'mode': 'percent', 'value': 0},
+                    {'enabled': True, 'mode': 'percent', 'value': 150},
+                    {'enabled': True, 'mode': 'percent', 'value': 'abc'},
+                    {'enabled': True, 'mode': 'fixed', 'value': -5}):
+            self.assertEqual(self.patch(bad).status_code, 400, bad)
+        self.listing.refresh_from_db()
+        self.assertNotIn('partPayment', self.listing.record)
+
+    def test_a_venue_without_it_reports_null(self):
+        venues = self.client.get('/api/admin/bootstrap').data['venues']
+        row = next(v for v in venues if v['id'] == str(self.listing.id))
+        self.assertIsNone(row['partPayment'])
+
+    def test_the_change_is_audited(self):
+        from adminpanel.models import AuditEntry
+        self.patch({'enabled': True, 'mode': 'percent', 'value': 25})
+        entry = AuditEntry.objects.order_by('-created_at').first()
+        self.assertEqual(entry.action, 'Updated part payment')
+        self.assertIn('percent 25', entry.change)
+
+    def test_the_public_detail_serves_it_in_both_places(self):
+        """Top level where the panel writes it, inside `detail` where the
+        customer booking screen reads it."""
+        self.patch({'enabled': True, 'mode': 'percent', 'value': 20})
+        self.client.force_authenticate(user=None)
+        data = self.client.get(f'/api/venues/{self.listing.id}').data
+        self.assertEqual(data['partPayment']['value'], 20)
+        self.assertEqual(data['detail']['partPayment']['value'], 20)
+
+    def test_the_public_detail_updates_immediately(self):
+        """The detail is cached — a stale split would quote the wrong price."""
+        self.patch({'enabled': True, 'mode': 'percent', 'value': 20})
+        self.client.force_authenticate(user=None)
+        self.client.get(f'/api/venues/{self.listing.id}')        # prime cache
+
+        self.client.force_authenticate(user=self.admin)
+        self.patch({'enabled': True, 'mode': 'percent', 'value': 50})
+        self.client.force_authenticate(user=None)
+        data = self.client.get(f'/api/venues/{self.listing.id}').data
+        self.assertEqual(data['detail']['partPayment']['value'], 50)

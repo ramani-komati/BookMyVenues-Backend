@@ -95,6 +95,15 @@ class Booking(models.Model):
     # derived from the date; an admin can set 'refunded' etc.
     status = models.CharField(max_length=20, default='confirmed')
     # Razorpay linkage (empty for pay-at-venue / walk-ins / legacy bookings).
+    # Part payment: what was charged online vs owed in cash at the venue.
+    # pay_now is NULL for every booking taken before the feature existed,
+    # which means "the whole amount was paid online" — see online_amount.
+    # Deliberately not backfilled: a nullable column degrades safely, whereas
+    # a botched backfill would corrupt payout maths for real money.
+    pay_now = models.PositiveIntegerField(null=True, blank=True)
+    at_venue = models.PositiveIntegerField(default=0)
+    part_payment = models.JSONField(null=True, blank=True)
+
     # What the booking is for, and anything the customer wants the venue to
     # know ("Surprise — cake at 8"). Both optional and free text; they exist
     # so the VENDOR sees them, so they are echoed on every booking record.
@@ -151,6 +160,17 @@ class Booking(models.Model):
         rating = getattr(self, 'rating', None)
         return rating.stars if rating else None
 
+    @property
+    def online_amount(self):
+        """What the gateway actually charged. Pre-part-payment bookings have
+        no pay_now, and for those the online charge WAS the full amount."""
+        return self.amount if self.pay_now is None else self.pay_now
+
+    @property
+    def venue_due(self):
+        """Cash the vendor collects on arrival — zero unless part-paid."""
+        return self.at_venue or 0
+
     def as_record(self):
         """The camelCase booking record shape the frontend expects."""
         return {
@@ -169,6 +189,9 @@ class Booking(models.Model):
             'unitLabel': self.unit_label or None,
             'occasion': self.occasion or None,
             'occasionNote': self.occasion_note or None,
+            'payNow': self.online_amount,
+            'atVenue': self.venue_due,
+            'partPayment': self.part_payment or None,
             'perSlot': self.per_slot,
             'addons': self.addons,
             'offer': self.offer or None,

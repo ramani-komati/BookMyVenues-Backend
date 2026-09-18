@@ -288,6 +288,36 @@ class AdminApprovalUpdateView(_AdminWriteView):
         return Response(approval_row(listing))
 
 
+def _clean_part_payment(raw):
+    """(config_or_None, error). None means "turn the feature off"."""
+    from bookings.part_payment import FIXED, MAX_PERCENT, MIN_PERCENT, PERCENT
+
+    if raw in (None, {}, False):
+        return None, None
+    if not isinstance(raw, dict):
+        return None, 'partPayment must be an object.'
+    if not raw.get('enabled'):
+        return None, None
+
+    mode = str(raw.get('mode') or '').strip().lower()
+    if mode not in (PERCENT, FIXED):
+        return None, 'partPayment.mode must be "percent" or "fixed".'
+    try:
+        value = int(float(str(raw.get('value'))))
+    except (TypeError, ValueError):
+        return None, 'partPayment.value must be a number.'
+
+    if mode == PERCENT and not (MIN_PERCENT <= value <= MAX_PERCENT):
+        return None, (
+            f'partPayment.value must be between {MIN_PERCENT} and '
+            f'{MAX_PERCENT} percent.'
+        )
+    if mode == FIXED and value <= 0:
+        return None, 'partPayment.value must be more than ₹0.'
+
+    return {'enabled': True, 'mode': mode, 'value': value}, None
+
+
 class AdminVenueUpdateView(_AdminWriteView):
     """PATCH /api/admin/venues/<id> — status (live/paused) / featured.
 
@@ -360,7 +390,33 @@ class AdminVenueUpdateView(_AdminWriteView):
         if 'featured' in data:
             listing.featured = bool(data['featured'])
 
+        if 'partPayment' in data:
+            # This decides how much money we actually collect online, so it is
+            # validated rather than stored verbatim like the vendor's own
+            # display fields. A bad shape is refused instead of silently
+            # disabling the split and over-charging the customer.
+            config, error = _clean_part_payment(data['partPayment'])
+            if error:
+                return detail(error, status.HTTP_400_BAD_REQUEST)
+            record = dict(listing.record or {})
+            if config is None:
+                record.pop('partPayment', None)
+            else:
+                record['partPayment'] = config
+            listing.record = record
+            record_audit(
+                request, 'Updated part payment', listing.name,
+                'disabled' if config is None
+                else f"{config['mode']} {config['value']}",
+                target_id=str(listing.pk), subject=listing.vendor,
+            )
+
         listing.save()
+        if 'partPayment' in data:
+            # The public venue detail is cached; without this the customer app
+            # keeps quoting the old split.
+            from venues.public_views import invalidate_listing_cache
+            invalidate_listing_cache(listing)
         if listing.status != previous:
             record_audit(
                 request,
@@ -627,11 +683,15 @@ class AdminBookingUpdateView(_AdminWriteView):
                     RazorpayError, configured, refund_payment,
                 )
                 refund_amount = _to_int(data.get('refundAmount'), 0) or None
+                # Cap at what was CAPTURED, not the booking total: a part-paid
+                # booking only ever charged its online slice, and the cash the
+                # vendor took at the venue is not ours to refund.
+                refundable = booking.online_amount
                 if refund_amount is not None and not (
-                    0 < refund_amount <= booking.amount
+                    0 < refund_amount <= refundable
                 ):
                     return detail(
-                        f'refundAmount must be between 1 and {booking.amount}.',
+                        f'refundAmount must be between 1 and {refundable}.',
                         status.HTTP_400_BAD_REQUEST,
                     )
                 if configured():
