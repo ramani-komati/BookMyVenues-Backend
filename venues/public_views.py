@@ -228,8 +228,10 @@ class PublicVenueDetailView(APIView):
         # customer booking screen reads it. Normalised through read_config, so
         # a malformed venue config reads back as null (= pay in full) rather
         # than a shape the client has to defend against.
-        from bookings.part_payment import read_config as read_part_payment
-        part = read_part_payment(listing.record)
+        from bookings.part_payment import config_for_listing
+        # A unit sibling (screen / court) inherits its parent venue's split,
+        # so the booking screen quotes the same figure the order will charge.
+        part = config_for_listing(listing)
         record['partPayment'] = part
         # Copy before writing: `detail` is still the dict loaded from the row.
         detail = dict(record.get('detail') or {})

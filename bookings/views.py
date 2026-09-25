@@ -22,7 +22,7 @@ from rest_framework.views import APIView
 from venues.models import Listing
 
 from .models import Booking
-from .part_payment import read_config as read_part_payment
+from .part_payment import config_for_listing as part_payment_for
 from .part_payment import split as split_payment
 from .slots import (
     CLOSE_MINUTE,
@@ -933,7 +933,9 @@ def validate_booking_request(body, user=None):
     # Part payment: the venue may take a slice online and the rest in cash on
     # arrival. `amount` remains the FULL total either way — only what the
     # gateway charges changes.
-    part_config = read_part_payment(listing.record)
+    # Reads the BOOKED listing, falling back to its parent venue: a theatre
+    # screen or turf court carries no config of its own.
+    part_config = part_payment_for(listing)
     pay_now, at_venue = split_payment(amount, part_config, fee)
 
     return {

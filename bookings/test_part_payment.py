@@ -167,3 +167,96 @@ class PartPaymentBookingTests(GatewayBookingMixin, APITestCase):
         self.assertEqual(booking.online_amount, 620)
         self.assertEqual(booking.as_record()['payNow'], 620)
         self.assertEqual(booking.as_record()['atVenue'], 0)
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class PartPaymentInheritanceTests(GatewayBookingMixin, APITestCase):
+    """
+    REGRESSION: part payment lives on the parent venue, but a theatre screen
+    or turf court is booked through its own sibling listing — which has no
+    config, so the order charged the FULL amount while the bill said "Pay
+    ₹100 now".
+    """
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9850000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9850000002', name='Asha')
+        self.base = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='og-theatre',
+            record={**RECORD, 'id': 'base', 'status': 'live', 'price': 600,
+                    'partPayment': {'enabled': True, 'mode': 'fixed', 'value': 100}},
+            name='OG Theatre', category='Private theatre',
+            locality='X', pincode='560001', status=Listing.Status.LIVE,
+        )
+        self.screen = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='og-theatre-screen-2',
+            record={**RECORD, 'id': 'screen', 'status': 'live', 'price': 600,
+                    'detail': {**RECORD['detail'], 'unitOf': str(self.base.id)}},
+            name='OG Theatre — Screen 2', category='Private theatre',
+            locality='X', pincode='560001', status=Listing.Status.LIVE,
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, listing):
+        return self.gateway_book({
+            'venueId': str(listing.id), 'date': TOMORROW,
+            'slots': ['19:30 – 21:00'], 'addons': [], 'perSlot': 600,
+            'amount': 920,
+        })
+
+    def test_booking_a_screen_charges_only_the_parents_slice(self):
+        """The bug: this charged ₹920 instead of ₹100."""
+        r = self.book(self.screen)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data['payNow'], 100)
+        self.assertEqual(r.data['atVenue'], 820)
+        self.assertEqual(r.data['amount'], 100 * 100)   # paise to the widget
+
+    def test_the_screen_booking_records_the_split(self):
+        r = self.book(self.screen)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.amount, 920)           # full total, unchanged
+        self.assertEqual(booking.pay_now, 100)
+        self.assertEqual(booking.at_venue, 820)
+        self.assertEqual(booking.part_payment['value'], 100)
+
+    def test_the_parent_venue_still_works(self):
+        r = self.book(self.base)
+        self.assertEqual(r.data['payNow'], 100)
+
+    def test_the_public_detail_of_a_screen_quotes_the_same_split(self):
+        """The bill and the gateway must agree — that mismatch was the bug."""
+        data = self.client.get(f'/api/venues/{self.screen.id}').data
+        self.assertEqual(data['detail']['partPayment']['value'], 100)
+        self.assertEqual(data['partPayment']['mode'], 'fixed')
+
+    def test_a_screen_with_its_OWN_config_is_not_overridden(self):
+        self.screen.record = {
+            **self.screen.record,
+            'partPayment': {'enabled': True, 'mode': 'percent', 'value': 50},
+        }
+        self.screen.save(update_fields=['record'])
+        r = self.book(self.screen)
+        self.assertEqual(r.data['payNow'], 460)        # 50% of 920, not ₹100
+
+    def test_a_screen_whose_parent_has_none_pays_in_full(self):
+        self.base.record = {k: v for k, v in self.base.record.items()
+                            if k != 'partPayment'}
+        self.base.save(update_fields=['record'])
+        r = self.book(self.screen)
+        self.assertEqual(r.data['payNow'], 920)
+        self.assertEqual(r.data['atVenue'], 0)
+
+    def test_a_broken_unitOf_does_not_crash_the_booking(self):
+        self.screen.record = {
+            **self.screen.record,
+            'detail': {**self.screen.record['detail'], 'unitOf': 'not-a-uuid'},
+        }
+        self.screen.save(update_fields=['record'])
+        r = self.book(self.screen)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data['payNow'], 920)        # falls back to full
