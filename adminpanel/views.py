@@ -729,6 +729,29 @@ class AdminBookingUpdateView(_AdminWriteView):
 # New models (Phase 3) — settings, payouts, reviews, audit.
 # ---------------------------------------------------------------
 
+# Schemes a banner image may use. The banners list is stored verbatim and
+# served to every visitor, so the one field that becomes a src on the public
+# homepage is checked — a javascript:/data: URL has no business there.
+_SAFE_IMAGE_PREFIXES = ('http://', 'https://', '/')
+
+
+def _check_banner_images(banners):
+    """Error string for an unusable banner image, else None."""
+    for banner in banners:
+        if not isinstance(banner, dict):
+            continue
+        image = str(banner.get('image') or '').strip()
+        if not image:
+            continue                    # optional — absent or blank is fine
+        if not image.lower().startswith(_SAFE_IMAGE_PREFIXES):
+            title = str(banner.get('title') or 'banner')
+            return (
+                f'"{title}" has an unusable image URL — it must start with '
+                f'https://, http:// or /.'
+            )
+    return None
+
+
 class AdminSettingsView(_AdminWriteView):
     """PUT /api/admin/settings — save the platform config; returns it."""
 
@@ -740,6 +763,11 @@ class AdminSettingsView(_AdminWriteView):
             settings_obj.booking_fee = _to_int(data['fee'], settings_obj.booking_fee)
         if 'feeDate' in data:
             settings_obj.fee_date = str(data['feeDate'] or '')
+        if isinstance(data.get('banners'), list):
+            error = _check_banner_images(data['banners'])
+            if error:
+                return detail(error, status.HTTP_400_BAD_REQUEST)
+
         for key in ('categories', 'cities', 'amenities', 'banners'):
             if isinstance(data.get(key), list):
                 setattr(settings_obj, key, data[key])

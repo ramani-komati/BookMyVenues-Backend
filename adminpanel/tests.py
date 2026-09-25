@@ -1698,3 +1698,77 @@ class AdminSessionLifetimeTests(APITestCase):
         self.assertEqual(int(cookie['max-age']), 30 * 24 * 60 * 60)
         self.assertTrue(cookie['expires'])          # persistent, not per-browser-session
         self.assertTrue(cookie['httponly'])         # still not readable from JS
+
+
+class BannerImageTests(APITestCase):
+    """Banners carry an optional image URL. The list is stored verbatim, so
+    the field needs no whitelist — pinned here so a later tightening cannot
+    silently drop it."""
+
+    BANNER = {
+        'id': 1725190001111,
+        'title': 'Monsoon offer',
+        'text': 'Flat 15% off this week',
+        'type': 'percent', 'value': 15, 'code': 'MONSOON',
+        'minAmount': 0, 'maxDiscount': 0, 'perUserLimit': 0,
+        'from': '', 'to': '',
+        'image': 'https://cdn.example.com/banners/monsoon.jpg',
+    }
+
+    def setUp(self):
+        self.admin = User.objects.create_user(
+            phone='9990000041', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    def save(self, banners):
+        return self.client.put('/api/admin/settings',
+                               {'banners': banners}, format='json')
+
+    def test_it_persists_and_reaches_the_admin_bootstrap(self):
+        self.assertEqual(self.save([self.BANNER]).status_code, 200)
+        stored = self.client.get(
+            '/api/admin/bootstrap'
+        ).data['settings']['banners'][0]
+        self.assertEqual(stored['image'], self.BANNER['image'])
+        self.assertEqual(stored['title'], 'Monsoon offer')
+
+    def test_it_is_echoed_on_the_public_endpoint(self):
+        self.save([self.BANNER])
+        self.client.force_authenticate(user=None)
+        from django.core.cache import cache
+        cache.clear()
+        banner = self.client.get('/api/banners').data['banners'][0]
+        self.assertEqual(banner['image'], self.BANNER['image'])
+
+    def test_a_banner_without_an_image_still_works(self):
+        plain = {k: v for k, v in self.BANNER.items() if k != 'image'}
+        self.assertEqual(self.save([plain]).status_code, 200)
+        stored = self.client.get(
+            '/api/admin/bootstrap'
+        ).data['settings']['banners'][0]
+        self.assertNotIn('image', stored)
+
+    def test_a_blank_image_is_accepted(self):
+        self.assertEqual(self.save([{**self.BANNER, 'image': ''}]).status_code, 200)
+
+    def test_relative_paths_are_accepted(self):
+        r = self.save([{**self.BANNER, 'image': '/assets/monsoon.png'}])
+        self.assertEqual(r.status_code, 200)
+
+    def test_a_dangerous_scheme_is_refused(self):
+        """This string becomes a src on the public homepage."""
+        for bad in ('javascript:alert(1)', 'data:text/html;base64,PHNjcmlwdD4=',
+                    'vbscript:msgbox', 'file:///etc/passwd'):
+            r = self.save([{**self.BANNER, 'image': bad}])
+            self.assertEqual(r.status_code, 400, bad)
+            self.assertIn('unusable image URL', r.data['detail'])
+
+    def test_a_refused_save_changes_nothing(self):
+        self.save([self.BANNER])
+        self.save([{**self.BANNER, 'image': 'javascript:alert(1)'}])
+        stored = self.client.get(
+            '/api/admin/bootstrap'
+        ).data['settings']['banners'][0]
+        self.assertEqual(stored['image'], self.BANNER['image'])   # unchanged
