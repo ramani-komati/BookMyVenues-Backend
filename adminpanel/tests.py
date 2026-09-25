@@ -1772,3 +1772,106 @@ class BannerImageTests(APITestCase):
             '/api/admin/bootstrap'
         ).data['settings']['banners'][0]
         self.assertEqual(stored['image'], self.BANNER['image'])   # unchanged
+
+
+class AdminUploadTests(APITestCase):
+    """POST /api/admin/uploads — multipart image in, hosted https URL out."""
+
+    URL = '/api/admin/uploads'
+    JPEG = b'\xff\xd8\xff\xe0' + b'pretend jpeg bytes'
+    HEADER = {'HTTP_X_REQUESTED_WITH': 'XMLHttpRequest'}
+
+    def setUp(self):
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.upload_file = SimpleUploadedFile
+        self.admin = User.objects.create_user(
+            phone='9990000051', name='Anita', email=ADMIN_EMAIL,
+            role=User.Role.ADMIN, password=ADMIN_PASSWORD,
+        )
+        self.client.force_authenticate(user=self.admin)
+
+    def post(self, content=None, name='banner.jpg',
+             content_type='image/jpeg', field='image', **extra):
+        f = self.upload_file(name, self.JPEG if content is None else content,
+                             content_type=content_type)
+        return self.client.post(self.URL, {field: f}, format='multipart',
+                                **{**self.HEADER, **extra})
+
+    def test_it_returns_a_hosted_https_url(self):
+        with patch('adminpanel.views.upload_photo',
+                   return_value='https://cdn.example/storage/abc.jpg') as up:
+            r = self.post()
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertTrue(r.data['url'].startswith('https://'))
+        # Stored under an unguessable name, not the user's filename.
+        path = up.call_args[0][0]
+        self.assertTrue(path.startswith('admin/'))
+        self.assertNotIn('banner.jpg', path)
+
+    def test_the_file_field_is_also_accepted(self):
+        with patch('adminpanel.views.upload_photo',
+                   return_value='https://cdn.example/x.jpg'):
+            self.assertEqual(self.post(field='file').status_code, 201)
+
+    def test_a_non_image_is_refused(self):
+        r = self.post(content=b'%PDF-1.4 not an image',
+                      name='doc.pdf', content_type='application/pdf')
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_non_image_DISGUISED_as_a_jpeg_is_refused(self):
+        """content_type is a client label — the bytes decide."""
+        r = self.post(content=b'<html>not an image</html>')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('not a valid', r.data['detail'])
+
+    def test_an_oversized_file_is_refused(self):
+        big = self.JPEG + b'x' * (7 * 1024 * 1024)
+        r = self.post(content=big)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('too large', r.data['detail'])
+
+    def test_no_file_is_refused(self):
+        r = self.client.post(self.URL, {}, format='multipart', **self.HEADER)
+        self.assertEqual(r.status_code, 400)
+
+    def test_a_storage_failure_is_a_502_not_a_crash(self):
+        from venues.storage import StorageError
+        with patch('adminpanel.views.upload_photo',
+                   side_effect=StorageError('supabase down')):
+            r = self.post()
+        self.assertEqual(r.status_code, 502)
+
+    def test_it_requires_an_admin(self):
+        self.client.force_authenticate(user=None)
+        self.assertIn(self.post().status_code, (401, 403))
+
+        customer = User.objects.create_user(phone='9990000052', name='Asha')
+        self.client.force_authenticate(user=customer)
+        self.assertEqual(self.post().status_code, 403)
+
+    def test_without_the_custom_header_it_is_refused(self):
+        """A multipart POST is CORS-simple and never preflights, so the header
+        is what forces the browser to check the origin allowlist."""
+        f = self.upload_file('b.jpg', self.JPEG, content_type='image/jpeg')
+        r = self.client.post(self.URL, {'image': f}, format='multipart')
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('X-Requested-With', r.data['detail'])
+
+    def test_the_upload_is_audited(self):
+        from adminpanel.models import AuditEntry
+        with patch('adminpanel.views.upload_photo',
+                   return_value='https://cdn.example/x.jpg'):
+            self.post()
+        entry = AuditEntry.objects.order_by('-created_at').first()
+        self.assertEqual(entry.action, 'Uploaded an image')
+
+    def test_the_url_satisfies_the_banner_image_guard(self):
+        """The whole point: this URL gets saved as a banner image."""
+        with patch('adminpanel.views.upload_photo',
+                   return_value='https://cdn.example/storage/abc.jpg'):
+            url = self.post().data['url']
+        r = self.client.put('/api/admin/settings', {'banners': [
+            {'id': 1, 'title': 'Uploaded', 'type': 'none', 'value': 0,
+             'code': '', 'from': '', 'to': '', 'image': url},
+        ]}, format='json')
+        self.assertEqual(r.status_code, 200, r.data)

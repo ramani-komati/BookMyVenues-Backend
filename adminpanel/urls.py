@@ -20,6 +20,7 @@ urlpatterns = [
     path('users/<int:user_id>', views.AdminUserUpdateView.as_view(), name='admin-user'),
     path('bookings/<str:booking_id>', views.AdminBookingUpdateView.as_view(), name='admin-booking'),
     # New models (Phase 3)
+    path('uploads', views.AdminUploadView.as_view(), name='admin-upload'),
     path('settings', views.AdminSettingsView.as_view(), name='admin-settings'),
     path('payouts/<int:payout_id>', views.AdminPayoutUpdateView.as_view(), name='admin-payout'),
     path('reviews/<int:review_id>/resolve', views.AdminReviewResolveView.as_view(), name='admin-review-resolve'),

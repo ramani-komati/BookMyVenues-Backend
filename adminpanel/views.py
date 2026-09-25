@@ -8,14 +8,16 @@ Phase 1: auth + the aggregate `bootstrap` read. Writes and the new models
 (payouts / reviews / audit / settings persistence) come in later phases.
 """
 import datetime
+import logging
 import re
+import uuid
 
 from django.contrib.auth import login, logout
 from django.db import transaction
 from django.contrib.auth.hashers import check_password, make_password
 from django.utils import timezone
 from rest_framework import status
-from rest_framework.parsers import JSONParser
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -26,6 +28,8 @@ from accounts.models import PhoneOTP, User, vendor_accounts_q
 from accounts.otp import OTPSendError, deliver_otp, generate_code
 from bookings.models import Booking
 from venues.models import Listing, VenueDraft
+from venues.storage import ALLOWED_TYPES, StorageError, upload_photo
+from venues.views import _looks_like_image as looks_like_image
 
 from .auth import CsrfExemptSessionAuthentication, IsAdmin, detail
 from .payouts import generate_payouts
@@ -42,6 +46,8 @@ from .formatters import (
     venue_row,
 )
 from .models import AuditEntry, Payout, Review, Settings
+
+logger = logging.getLogger(__name__)
 
 REVIEW_STATUSES = {'pending', 'approved', 'changes', 'rejected'}
 BOOKING_STATUSES = {'confirmed', 'completed', 'refund_pending', 'refunded', 'cancelled'}
@@ -750,6 +756,75 @@ def _check_banner_images(banners):
                 f'https://, http:// or /.'
             )
     return None
+
+
+class AdminUploadView(APIView):
+    """
+    POST /api/admin/uploads — multipart image in, hosted URL out.
+
+        {"url": "https://<project>.supabase.co/storage/v1/object/public/..."}
+
+    Stored in the same Supabase bucket as venue photos, so the returned URL is
+    permanent and already https — which satisfies the banner image guard.
+
+    SECURITY, and why the X-Requested-With header is required: every other
+    admin write is JSON-only precisely BECAUSE admin writes are CSRF-exempt
+    with a SameSite=None cookie, and a multipart POST is CORS-"simple" — the
+    browser sends it cross-site with the admin's cookie and never preflights,
+    so the origin allowlist is never consulted. An upload cannot be JSON, so
+    it asks for a custom header instead: any custom header makes the request
+    non-simple, which forces the preflight back and restores the allowlist.
+    Without it, any website an admin visited could push files into our bucket.
+    """
+
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [IsAdmin]
+    parser_classes = [MultiPartParser, FormParser]
+
+    MAX_BYTES = 6 * 1024 * 1024        # ~6 MB
+
+    def post(self, request):
+        if not request.headers.get('X-Requested-With'):
+            return detail(
+                'Uploads must send an X-Requested-With header.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        upload = request.FILES.get('image') or request.FILES.get('file')
+        if upload is None:
+            return detail('No file uploaded.', status.HTTP_400_BAD_REQUEST)
+
+        extension = ALLOWED_TYPES.get(upload.content_type)
+        if extension is None:
+            return detail(
+                'Only JPEG, PNG or WebP images are allowed.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        if upload.size > self.MAX_BYTES:
+            return detail(
+                f'Image is too large (max {self.MAX_BYTES // (1024 * 1024)} MB).',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        # content_type is a client-supplied label; the bytes decide.
+        if not looks_like_image(upload):
+            return detail(
+                'That file is not a valid JPEG, PNG or WebP image.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+
+        path = f'admin/{uuid.uuid4().hex}.{extension}'
+        try:
+            url = upload_photo(path, upload.read(), upload.content_type)
+        except StorageError as error:
+            logger.warning('Admin upload failed: %s', error)
+            return detail(
+                'Could not store the image right now. Please try again.',
+                status.HTTP_502_BAD_GATEWAY,
+            )
+
+        record_audit(request, 'Uploaded an image', upload.name or 'image',
+                     f'{upload.size // 1024} KB')
+        return Response({'url': url}, status=status.HTTP_201_CREATED)
 
 
 class AdminSettingsView(_AdminWriteView):
