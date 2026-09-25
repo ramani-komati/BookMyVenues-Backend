@@ -260,3 +260,112 @@ class PartPaymentInheritanceTests(GatewayBookingMixin, APITestCase):
         r = self.book(self.screen)
         self.assertEqual(r.status_code, 201, r.data)
         self.assertEqual(r.data['payNow'], 920)        # falls back to full
+
+
+@override_settings(
+    RAZORPAY_KEY_ID='rzp_test_key', RAZORPAY_KEY_SECRET='test_key_secret',
+)
+class PayFullOptOutTests(GatewayBookingMixin, APITestCase):
+    """
+    A customer at a part-payment venue may choose to settle the whole bill
+    online. Unlike payNow, this flag is trusted — it can only move the charge
+    UP to the full total, so tampering can do nothing worse than make someone
+    overpay their own booking.
+    """
+
+    def setUp(self):
+        self.vendor = User.objects.create_user(
+            phone='9860000001', name='Vendor', role=User.Role.VENDOR,
+        )
+        self.customer = User.objects.create_user(phone='9860000002', name='Asha')
+        self.listing = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='pf-hall',
+            record={**RECORD, 'id': 'pf', 'status': 'live', 'price': 600,
+                    'partPayment': {'enabled': True, 'mode': 'percent',
+                                    'value': 20}},
+            name='Pay Full Hall', category='hall',
+            locality='X', pincode='560001', status=Listing.Status.LIVE,
+        )
+        self.client.force_authenticate(user=self.customer)
+
+    def book(self, **extra):
+        return self.gateway_book({
+            'venueId': str(self.listing.id), 'date': TOMORROW,
+            'slots': ['19:30 – 21:00'], 'addons': [], 'perSlot': 600,
+            'amount': 920, **extra,
+        })
+
+    def test_pay_full_charges_the_whole_bill(self):
+        r = self.book(payFull=True)
+        self.assertEqual(r.status_code, 201, r.data)
+        self.assertEqual(r.data['payNow'], 920)
+        self.assertEqual(r.data['atVenue'], 0)
+        self.assertEqual(r.data['amount'], 920 * 100)     # paise to the widget
+
+    def test_the_booking_records_no_split(self):
+        """Paid in full IS no split — the record should not claim otherwise."""
+        r = self.book(payFull=True)
+        booking = Booking.objects.get(pk=r.data['bookingId'])
+        self.assertEqual(booking.amount, 920)
+        self.assertEqual(booking.pay_now, 920)
+        self.assertEqual(booking.at_venue, 0)
+        self.assertIsNone(booking.part_payment)
+
+    def test_without_the_flag_the_split_still_applies(self):
+        r = self.book()
+        self.assertEqual(r.data['payNow'], 184)           # 20% of 920
+        self.assertEqual(r.data['atVenue'], 736)
+
+    # Each case needs its own slot, or the second booking hits the overlap
+    # guard and we would be asserting against a 409 instead of an order.
+    SLOTS = ['08:00 – 09:30', '10:00 – 11:30', '12:00 – 13:30',
+             '14:00 – 15:30', '16:00 – 17:30', '18:00 – 19:30',
+             '20:00 – 21:30', '22:00 – 23:30']
+
+    def test_pay_full_false_keeps_the_split(self):
+        for i, falsey in enumerate((False, 'false', 'False', 0, '0', '', None, 'no')):
+            r = self.book(payFull=falsey, slots=[self.SLOTS[i]])
+            self.assertEqual(r.status_code, 201, r.data)
+            self.assertEqual(r.data['payNow'], 184, f'payFull={falsey!r}')
+
+    def test_the_string_true_is_accepted(self):
+        """JSON from some clients sends booleans as strings."""
+        for i, truthy in enumerate((True, 'true', 'True', 1, '1', 'yes')):
+            r = self.book(payFull=truthy, slots=[self.SLOTS[i]])
+            self.assertEqual(r.status_code, 201, r.data)
+            self.assertEqual(r.data['payNow'], 920, f'payFull={truthy!r}')
+
+    def test_the_amount_is_still_recomputed(self):
+        """payFull does not let a client name its own total."""
+        r = self.book(payFull=True, amount=1)
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data['code'], 'AMOUNT_MISMATCH')
+        self.assertEqual(r.data['expectedAmount'], 920)
+
+    def test_pay_full_on_a_venue_without_part_payment_is_a_no_op(self):
+        plain = Listing.objects.create(
+            id=uuid.uuid4(), vendor=self.vendor, slug='plain-pf',
+            record={**RECORD, 'id': 'plain', 'status': 'live', 'price': 600},
+            name='Plain', category='hall', locality='X', pincode='560002',
+            status=Listing.Status.LIVE,
+        )
+        r = self.gateway_book({
+            'venueId': str(plain.id), 'date': TOMORROW,
+            'slots': ['19:30 – 21:00'], 'addons': [], 'perSlot': 600,
+            'amount': 920, 'payFull': True,
+        })
+        self.assertEqual(r.data['payNow'], 920)
+        self.assertEqual(r.data['atVenue'], 0)
+
+    def test_the_vendor_is_owed_the_same_either_way(self):
+        """Payout + cash must reconcile to amount - fee on both paths."""
+        from bookings.vendor_views import booking_net
+
+        split_booking = Booking.objects.get(pk=self.book().data['bookingId'])
+        full_booking = Booking.objects.get(
+            pk=self.book(payFull=True, slots=['21:00 – 22:30']).data['bookingId']
+        )
+        for booking in (split_booking, full_booking):
+            payout = max(0, booking.online_amount - booking.fee)
+            self.assertEqual(payout + booking.at_venue,
+                             booking.amount - booking.fee)

@@ -79,6 +79,14 @@ def _amount_mismatch(expected):
     )
 
 
+def _is_true(value):
+    """Strict boolean from JSON. Deliberately not plain truthiness: the string
+    "false" is truthy in Python and would silently charge the full amount."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ('true', '1', 'yes')
+
+
 def _text(value, limit):
     """Optional free text, trimmed to what the column holds.
 
@@ -937,6 +945,15 @@ def validate_booking_request(body, user=None):
     # screen or turf court carries no config of its own.
     part_config = part_payment_for(listing)
     pay_now, at_venue = split_payment(amount, part_config, fee)
+
+    # ...unless the customer chooses to settle the whole bill online. This one
+    # client flag IS trusted, unlike payNow: it can only move the charge UP to
+    # the full total, so tampering with it can do nothing worse than make
+    # someone overpay their own booking. The amount is still recomputed
+    # server-side, and a declined split is recorded as no split at all — the
+    # booking then reads exactly like any other fully-paid one.
+    if _is_true(body.get('payFull')):
+        pay_now, at_venue, part_config = amount, 0, None
 
     return {
         'listing': listing, 'date': date, 'intervals': intervals,
