@@ -27,10 +27,14 @@ class MyEventOrdersView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Unpaid holds are checkout plumbing, not tickets.
+        # Every order the customer started, with its real outcome — paid,
+        # awaiting payment, failed, cancelled, refunded — so a failed attempt
+        # is never mistaken for a ticket. Only admin-removed rows are hidden.
+        # Each record's `status` (display_status) says which it is; the
+        # frontend shows a gate-ready ticket for confirmed/completed only.
         queryset = EventOrder.objects.filter(user=request.user).exclude(
-            status='payment_pending'
-        )
+            status='removed'
+        ).select_related('event')     # as_record reads the event's address
 
         wanted = request.query_params.get('status')
         if wanted == 'upcoming':
@@ -77,7 +81,9 @@ class CancelEventOrderView(APIView):
         if order is None:
             return _message('Order not found.', status.HTTP_404_NOT_FOUND)
 
-        if order.status == 'cancelled':
+        if order.status in ('cancelled', 'failed'):
+            # Already released. A FAILED attempt stays 'failed' — dismissing
+            # the widget afterwards must not relabel it as a cancellation.
             return Response({'cancelled': True, 'id': order_id})   # idempotent
 
         if order.status != 'payment_pending':

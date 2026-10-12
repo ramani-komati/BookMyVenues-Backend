@@ -233,7 +233,7 @@ class VendorEventOrdersView(APIView):
             return _message('Event not found.', status.HTTP_404_NOT_FOUND)
 
         orders = EventOrder.objects.filter(event=event).exclude(
-            status='payment_pending'
+            status__in=('payment_pending', 'removed')
         )
         raw_date = request.query_params.get('date')
         if raw_date:

@@ -36,6 +36,11 @@ urlpatterns = [
         event_admin_views.AdminEventOrdersView.as_view(),
         name='admin-event-orders',
     ),
+    path(
+        'events/<uuid:event_id>/orders/<str:order_id>',
+        event_admin_views.AdminEventOrderDetailView.as_view(),
+        name='admin-event-order',
+    ),
     # New models (Phase 3)
     path('uploads', views.AdminUploadView.as_view(), name='admin-upload'),
     path('settings', views.AdminSettingsView.as_view(), name='admin-settings'),

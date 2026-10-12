@@ -28,24 +28,65 @@ def _ticket_lines(order):
     )
 
 
+def _venue_text(order):
+    """The full place, one part per line, without repeats: the venue name,
+    street address, locality and city from the EVENT when it still exists,
+    else the location string frozen on the order at purchase."""
+    event = order.event
+    parts = []
+    if event is not None:
+        parts = [event.venue_name, event.address, event.locality, event.city]
+    seen, lines = set(), []
+    for part in parts:
+        for segment in str(part or '').split(','):
+            segment = segment.strip()
+            if segment and segment.lower() not in seen:
+                seen.add(segment.lower())
+                lines.append(segment)
+    return ', '.join(lines) or order.location
+
+
+def _ticket_rows(order):
+    """'2 × Adult @ ₹500 = ₹1,000' — one line per ticket type bought."""
+    lines = []
+    for item in order.items or []:
+        if not item.get('qty'):
+            continue
+        price = int(item.get('price') or 0)
+        subtotal = int(item.get('subtotal') or price * int(item['qty']))
+        lines.append(
+            f'{item["qty"]} × {item.get("label")} @ ₹{price:,} = ₹{subtotal:,}'
+        )
+    return '\n'.join(lines)
+
+
 def notify_tickets_confirmed(order):
     """Tell the CUSTOMER their tickets are booked and the VENDOR they sold
-    some. Returns True when at least one message got through, so the caller
-    can mark it sent and a later catch-up run can retry the rest."""
+    some. Only ever called for a VERIFIED payment (events/payments.
+    _notify_confirmed), which also guarantees it runs once per order.
+    Returns True when at least one message got through."""
+    from BookMyVenue.emails import render_tickets_email
+
     when = _when(order)
     tickets = _ticket_lines(order)
     sent = False
 
-    customer_text = (
-        f'Your tickets are confirmed.\n\n'
-        f'{order.event_name}\n{when}\n{order.location}\n\n'
-        f'Tickets: {tickets}\nPaid: ₹{order.amount:,}\n'
-        f'Order ID: {order.id}\n\n'
-        f'Show this order ID at the entry gate.'
+    rows = [
+        ('Date & time', when),
+        ('Venue', _venue_text(order)),
+        ('Tickets', _ticket_rows(order) or tickets),
+        ('Subtotal', f'₹{order.subtotal:,}'),
+        ('Booking fee', f'₹{order.fee:,}'),
+        ('Order ID', order.id),
+    ]
+    maps_link = getattr(order.event, 'maps_link', '') or ''
+    subject, html, text = render_tickets_email(
+        event_name=order.event_name, rows=rows, amount=order.amount,
+        maps_link=maps_link,
     )
     sent |= _send(
-        'email', getattr(order.user, 'email', '') or '', customer_text,
-        subject=f'Tickets confirmed — {order.event_name}',
+        'email', getattr(order.user, 'email', '') or '', text,
+        subject=subject, html=html,
     )
     sent |= _send(
         'sms', order.phone,

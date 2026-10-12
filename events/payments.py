@@ -152,7 +152,9 @@ def build_order_fields(user, body, data):
         user=user,
         event_name=event.name,
         event_category=event.category,
-        location=event.location,
+        # The FULL place, so the ticket still says where to go if the event is
+        # later edited or removed. Capped at the column width.
+        location=event.full_address[:250],
         image=event.poster_url,
         date=data['event_date'].date,
         start_time=event.start_time,
@@ -256,30 +258,58 @@ class EventPaymentOrderView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+# Statuses a VERIFIED payment may still confirm. 'failed' is included on
+# purpose: Razorpay keeps an order payable after a failed attempt, so a retry
+# inside the same checkout can succeed — refusing it (the old behaviour)
+# turned a paying customer into an auto-refund.
+CONFIRMABLE_STATUSES = ('payment_pending', 'failed')
+
+
+def _locked_order(**filters):
+    """The order row, locked for the rest of the transaction. Verify and the
+    webhook can arrive at the same instant; without the lock both read
+    'payment_pending' and both confirm (and both send the email)."""
+    return EventOrder.objects.select_for_update().filter(**filters).first()
+
+
 def _confirm_order(order, payment_id):
-    """Move a pending order to confirmed. Idempotent — a webhook redelivery
-    and the checkout callback both land here and only one sends the email."""
-    already_confirmed = order.status == 'confirmed'
+    """Move an unpaid order to confirmed. Call inside transaction.atomic()
+    with the order row LOCKED. The email is queued for after commit, so a
+    rolled-back confirmation never emails anyone."""
     order.status = 'confirmed'
     order.razorpay_payment_id = payment_id or order.razorpay_payment_id
     order.save(update_fields=['status', 'razorpay_payment_id'])
     if order.user_id and not order.user.is_customer:
         order.user.is_customer = True
         order.user.save(update_fields=['is_customer'])
-    if not already_confirmed and order.confirmation_sent_at is None:
-        _notify_confirmed(order)
+    order_pk = order.pk
+    transaction.on_commit(lambda: _notify_confirmed(order_pk))
 
 
-def _notify_confirmed(order):
+def _notify_confirmed(order_pk):
+    """Send the confirmation at most once per order.
+
+    The send is CLAIMED first with a conditional UPDATE — only the caller that
+    flips confirmation_sent_at from NULL gets to send, however many verify
+    calls and webhook redeliveries race here. A send that fails releases the
+    claim so a later retry can try again.
+    """
     from django.utils import timezone as _tz
 
     from .notifications import notify_tickets_confirmed
+
+    claimed = EventOrder.objects.filter(
+        pk=order_pk, status='confirmed', confirmation_sent_at__isnull=True,
+    ).update(confirmation_sent_at=_tz.now())
+    if not claimed:
+        return
+    sent = False
     try:
-        if notify_tickets_confirmed(order):
-            order.confirmation_sent_at = _tz.now()
-            order.save(update_fields=['confirmation_sent_at'])
+        sent = notify_tickets_confirmed(EventOrder.objects.get(pk=order_pk))
     except Exception:                      # never break a paid order
         logger.exception('Event ticket confirmation notification failed')
+    if not sent:
+        EventOrder.objects.filter(pk=order_pk).update(confirmation_sent_at=None)
 
 
 class EventPaymentVerifyView(APIView):
@@ -310,11 +340,12 @@ class EventPaymentVerifyView(APIView):
             return _message('Invalid payment signature.', status.HTTP_400_BAD_REQUEST)
 
         with transaction.atomic():
-            order.refresh_from_db()
+            order = _locked_order(pk=order.pk)
             if order.status == 'confirmed':
                 return Response({'order': order.as_record()})   # idempotent
-            if order.status != 'payment_pending':
-                # cancelled/refunded — a replayed signature must NEVER revive it.
+            if order.status not in CONFIRMABLE_STATUSES:
+                # cancelled/refunded/removed — a replayed signature must NEVER
+                # revive it (a capture for it is auto-refunded by the webhook).
                 return _message(
                     'This order can no longer be confirmed.', status.HTTP_409_CONFLICT
                 )
@@ -399,20 +430,32 @@ def handle_event_webhook(event_name, entity):
             except (TypeError, ValueError):
                 return True
         with transaction.atomic():
-            order.refresh_from_db()
-            if order.status in EventOrder.DEAD_STATUSES:
-                # Customer abandoned the widget but the UPI collect landed
-                # anyway. NEVER resurrect the order — refund the capture.
-                _auto_refund(order, payment_id)
-            elif order.status == 'payment_pending':
+            order = _locked_order(pk=order.pk)
+            if order.status in CONFIRMABLE_STATUSES:
                 if not _still_has_room(order):
                     order.status = 'refund_pending'
                     order.razorpay_payment_id = payment_id
                     order.save(update_fields=['status', 'razorpay_payment_id'])
                 else:
                     _confirm_order(order, payment_id)
+            elif order.status in ('cancelled', 'removed'):
+                # Customer abandoned the widget (or an admin removed the
+                # unpaid order) but a UPI collect landed anyway. NEVER
+                # resurrect it — refund the capture.
+                _auto_refund(order, payment_id)
+            # confirmed / refund_pending / refunded: this capture is already
+            # accounted for — a redelivery must not refund or email twice.
     elif event_name == 'payment.failed':
-        if order.status == 'payment_pending':
-            order.status = 'cancelled'    # releases the held seats
-            order.save(update_fields=['status'])
+        # One failed ATTEMPT. Recorded as 'failed' (releases the seats), not
+        # 'cancelled': the order stays confirmable, because the customer may
+        # retry inside the same checkout and succeed. A dismissed checkout
+        # whose attempt failed is a failure too, so 'cancelled' is upgraded —
+        # but never a row that has a captured payment against it.
+        with transaction.atomic():
+            order = _locked_order(pk=order.pk)
+            if order.status == 'payment_pending' or (
+                order.status == 'cancelled' and not order.razorpay_payment_id
+            ):
+                order.status = 'failed'
+                order.save(update_fields=['status'])
     return True

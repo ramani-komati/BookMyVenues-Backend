@@ -113,6 +113,16 @@ class Event(models.Model):
     contact_phone = models.CharField(max_length=10, blank=True, default='')
     terms = models.TextField(blank=True, default='')
 
+    # Homepage promotion, set by the super admin. Deliberately SEPARATE from
+    # `status`: publishing makes an event visible, promoting gives a published
+    # one featured placement. Only a LIVE event can carry it — save() clears
+    # it whenever the event leaves LIVE, so an unpublished, rejected or
+    # deleted event can never be promoted publicly. The cap is enforced by
+    # the admin endpoint (MAX_FEATURED_EVENTS).
+    featured = models.BooleanField(default=False)
+    # When it was promoted — orders the featured row (newest promotion first).
+    featured_at = models.DateTimeField(null=True, blank=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -123,8 +133,18 @@ class Event(models.Model):
             models.Index(fields=['vendor']),
         ]
 
+    # How many events may be promoted at once. Enforced by the admin
+    # endpoint; the customer page simply renders whatever is promoted.
+    MAX_FEATURED = 6
+
     def save(self, *args, **kwargs):
         self.category = canonical_event_category(self.category)
+        if self.featured and self.status != self.Status.LIVE:
+            self.featured = False
+            self.featured_at = None
+            update_fields = kwargs.get('update_fields')
+            if update_fields is not None:
+                kwargs['update_fields'] = {*update_fields, 'featured', 'featured_at'}
         super().save(*args, **kwargs)
 
     @property
@@ -143,9 +163,15 @@ class Event(models.Model):
 
     @property
     def location(self):
-        """The one-line place string the cards show."""
-        parts = [p for p in (self.venue_name, self.locality, self.city) if p]
-        return ', '.join(parts)
+        """The one-line place string the cards show (venue, locality, city)."""
+        from .location import short_location
+        return short_location(self)
+
+    @property
+    def full_address(self):
+        """Venue, street address, locality and city, without repeats."""
+        from .location import full_address
+        return full_address(self)
 
     def __str__(self):
         return f'{self.name} [{self.status}]'
@@ -233,9 +259,21 @@ class EventOrder(models.Model):
     about a row type it has no business seeing.
     """
 
-    # Same lifecycle vocabulary as Booking.status, so the admin panel and the
-    # Razorpay webhook treat both kinds of row identically.
-    DEAD_STATUSES = ('cancelled', 'refunded')
+    # Lifecycle (status is a plain CharField — no migration for new values):
+    #   payment_pending → confirmed                  verified payment only
+    #   payment_pending → failed                     Razorpay payment.failed
+    #   payment_pending → cancelled                  customer dismissed checkout
+    #   failed          → confirmed                  a RETRY in the same checkout
+    #                                                 succeeded (verified)
+    #   confirmed       → refund_pending → refunded  refund workflow
+    #   unpaid          → removed                    super-admin soft delete
+    # DEAD rows hold no seats. 'failed' and 'removed' are dead too, otherwise
+    # an abandoned attempt would keep its seats off sale for ever.
+    DEAD_STATUSES = ('cancelled', 'refunded', 'failed', 'removed')
+    # Money was captured and has not (yet) gone back — never removable.
+    PAID_STATUSES = ('confirmed', 'refund_pending')
+    # Unpaid outcomes a super admin may soft-remove.
+    REMOVABLE_STATUSES = ('payment_pending', 'failed', 'cancelled')
 
     id = models.CharField(
         max_length=20, primary_key=True, default=make_order_id, editable=False
@@ -301,11 +339,30 @@ class EventOrder(models.Model):
         ]
 
     @property
+    def hold_expired(self):
+        """An unpaid order whose seat hold has lapsed. Still payment_pending
+        in the database (a late verified capture can confirm it), but nobody
+        should be told it is still "awaiting payment"."""
+        import datetime
+
+        from django.utils import timezone
+
+        from bookings.views import PENDING_HOLD_MINUTES
+
+        if self.status != 'payment_pending' or self.created_at is None:
+            return False
+        cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+        return self.created_at < cutoff
+
+    @property
     def display_status(self):
         """'confirmed' becomes 'completed' once the show has ended (IST) —
-        the same derivation Booking.display_status does for slots."""
+        the same derivation Booking.display_status does for slots — and an
+        unpaid order whose hold lapsed reads 'expired'."""
         from bookings.slots import now_minutes_ist, today_ist
 
+        if self.hold_expired:
+            return 'expired'
         if self.status and self.status != 'confirmed':
             return self.status
         today = today_ist()
@@ -330,6 +387,12 @@ class EventOrder(models.Model):
             'eventName': self.event_name,
             'eventCategory': self.event_category,
             'location': self.location,
+            # The full place for the ticket: the live event's venue, address,
+            # locality and city when the event still exists (orders bought
+            # before addresses were captured still read fully), else the
+            # place frozen on the order at purchase.
+            'address': (self.event.full_address if self.event_id and self.event else '')
+            or self.location,
             'image': self.image,
             'date': self.date.isoformat(),
             'startTime': self.start_time.strftime('%H:%M') if self.start_time else None,

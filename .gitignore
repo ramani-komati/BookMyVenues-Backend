@@ -22,3 +22,4 @@ __pycache__/
 # Code review graph
 .code-review-graph/
 staticfiles/
+demo-events-backup.json

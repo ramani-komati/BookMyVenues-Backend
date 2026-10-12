@@ -1199,9 +1199,12 @@ class PaymentVerificationTests(EventTestCase):
         order = EventOrder.objects.get(pk=self.order_id)
         self.assertEqual(order.status, 'refund_pending')   # never 'confirmed'
 
-    def test_tickets_appear_in_my_orders_only_once_paid(self):
+    def test_an_unpaid_order_is_listed_as_pending_until_paid(self):
+        # Listed with its REAL status (never as a ticket) so a customer can
+        # see an attempt that has not gone through yet.
         before = self.client.get(reverse('my-event-orders'))
-        self.assertEqual(before.data['total'], 0)
+        self.assertEqual(before.data['total'], 1)
+        self.assertEqual(before.data['orders'][0]['status'], 'payment_pending')
         self.verify()
         after = self.client.get(reverse('my-event-orders'))
         self.assertEqual(after.data['total'], 1)
@@ -1307,7 +1310,7 @@ class EventWebhookTests(EventTestCase):
             }}},
         })
         self.order.refresh_from_db()
-        self.assertEqual(self.order.status, 'cancelled')
+        self.assertEqual(self.order.status, 'failed')   # a failure, not a cancel
         self.assertEqual(seats_remaining(self.date), 50)
 
     def test_a_capture_for_a_cancelled_order_is_auto_refunded_not_revived(self):

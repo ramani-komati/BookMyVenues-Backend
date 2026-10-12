@@ -20,6 +20,7 @@ from bookings.slots import SlotError, parse_date, today_ist
 
 from .catalog import canonical_event_category, event_categories_payload
 from .inventory import availability, date_is_sellable, seats_remaining
+from .location import place_q, search_q
 from .models import Event, EventDate
 
 CACHE_SECONDS = 60
@@ -92,8 +93,12 @@ def event_summary(event):
         # does — one poster was never enough to show what a night looks like.
         'gallery': list(event.gallery or []),
         'location': event.location,
+        'venueName': event.venue_name,
+        'address': event.address,
+        'fullAddress': event.full_address,
         'locality': event.locality,
         'city': event.city,
+        'featured': event.featured,
         'startTime': _hhmm(event.start_time),
         'endTime': _hhmm(event.end_time),
         'dates': dates,
@@ -120,8 +125,6 @@ def event_record(event):
     record = event_summary(event)
     record.update({
         'description': event.description,
-        'venueName': event.venue_name,
-        'address': event.address,
         'mapsLink': event.maps_link,
         'contactPhone': event.contact_phone,
         'terms': event.terms,
@@ -151,9 +154,18 @@ def live_events():
 
 @method_decorator(cache_page(CACHE_SECONDS), name='get')
 class PublicEventListView(APIView):
-    """GET /api/events?q=&category=&city=&locality=&page=&limit=
+    """GET /api/events?q=&category=&city=&locality=&featured=&page=&limit=
 
     Only LIVE events, newest first. Cached ~60s like /api/venues.
+
+    Place matching (q / city / locality) goes through events/location.py:
+    spellings are interchangeable (Hanamkonda = Hanumakonda) and an area
+    name covers the localities inside it (Warangal ⊃ Hanamkonda, Kazipet),
+    checked across venue name, address, locality and city — so an event is
+    found however the organiser typed its place.
+
+    featured=1 returns only promoted events that still have a date to sell,
+    most recently promoted first — the home page's featured row.
     """
 
     permission_classes = [AllowAny]
@@ -178,21 +190,26 @@ class PublicEventListView(APIView):
 
         q = params.get('q', '').strip()
         if q:
-            from django.db.models import Q
-            queryset = queryset.filter(
-                Q(name__icontains=q)
-                | Q(category__icontains=q)
-                | Q(venue_name__icontains=q)
-                | Q(locality__icontains=q)
-            )
+            queryset = queryset.filter(search_q(q))
         if params.get('category'):
             queryset = queryset.filter(
                 category__iexact=canonical_event_category(params['category'])
             )
-        if params.get('city'):
-            queryset = queryset.filter(city__icontains=params['city'])
-        if params.get('locality'):
-            queryset = queryset.filter(locality__icontains=params['locality'])
+        if params.get('city', '').strip():
+            queryset = queryset.filter(place_q(params['city']))
+        if params.get('locality', '').strip():
+            queryset = queryset.filter(place_q(params['locality']))
+        if params.get('featured') in ('1', 'true', 'yes'):
+            # A promoted event whose run is over has nothing to sell; it
+            # drops out of the row on its own rather than waiting for the
+            # admin to notice.
+            queryset = queryset.filter(
+                featured=True,
+                dates__date__gte=today_ist(),
+                dates__is_available=True,
+            ).order_by('-featured_at', '-created_at')
+        # The place filters span joins (featured) — never repeat an event.
+        queryset = queryset.distinct()
 
         total = queryset.count()
         rows = list(queryset[(page - 1) * limit:page * limit])

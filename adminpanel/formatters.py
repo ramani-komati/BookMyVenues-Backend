@@ -508,6 +508,9 @@ def event_row(event, sold_by_date=None, order_stats=None):
         'poster': event.poster_url,
         'location': event.location,
         'city': event.city,
+        # Homepage promotion — separate from `status` (see Event.featured).
+        'featured': event.featured,
+        'featuredAt': event.featured_at.isoformat() if event.featured_at else None,
         'startTime': event.start_time.strftime('%H:%M') if event.start_time else '',
         'endTime': event.end_time.strftime('%H:%M') if event.end_time else '',
         'dates': rows,
@@ -577,6 +580,25 @@ def format_events():
     return [event_row(e, dict(sold_by_date), frozen) for e in events]
 
 
+def format_event_orders():
+    """Every event ticket order for the main Bookings page.
+
+    Kept as its OWN key rather than mixed into `bookings`: the dashboard,
+    payouts and venue/user drawers all sum `bookings` as venue revenue, and
+    an event ticket must not leak into those figures. Soft-removed orders are
+    left out exactly as the per-event list leaves them out; every other
+    status (pending, failed, cancelled, refunds) is listed as persisted.
+    """
+    from events.admin_views import admin_order_record
+    from events.models import EventOrder
+
+    orders = (
+        EventOrder.objects.exclude(status='removed')
+        .select_related('event', 'user')
+    )
+    return [admin_order_record(order) for order in orders]
+
+
 def settings_row(settings):
     # No 'commission' — the platform's only revenue is the flat booking fee.
     return {
@@ -607,4 +629,7 @@ def build_bootstrap():
         # super admin — see events/admin_views.py. Legacy vendor-submitted
         # rows still appear here so their moderation queue can be cleared.
         'events': format_events(),
+        # Event ticket orders, listed beside venue bookings on the Bookings
+        # page. Separate from 'bookings' on purpose — see format_event_orders.
+        'eventOrders': format_event_orders(),
     }
