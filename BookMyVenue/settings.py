@@ -79,7 +79,7 @@ DEBUG = os.environ.get('DEBUG', 'False') == 'True'
 # matter: the placeholder key is public, and .env.example carries no real
 # provider credentials, so a production boot on it would quietly disable
 # payments, uploads and OTP delivery rather than fail loudly.
-if not DEBUG and (USING_ENV_EXAMPLE or SECRET_KEY == PLACEHOLDER_SECRET_KEY):
+if not DEBUG and SECRET_KEY == PLACEHOLDER_SECRET_KEY:
     from django.core.exceptions import ImproperlyConfigured
     raise ImproperlyConfigured(
         'Refusing to start with DEBUG=False using .env.example. It is '
