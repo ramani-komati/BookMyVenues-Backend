@@ -128,7 +128,11 @@ class VendorRatingsView(APIView):
         queryset = (
             Rating.objects.filter(listing__vendor=request.user)
             .select_related('listing', 'user', 'booking')
-            .order_by('-created_at')
+            # `-id` is the tiebreaker, not decoration: two ratings submitted
+            # in the same clock tick (auto_now_add has no sub-tick ordering)
+            # otherwise come back in an arbitrary order, so paging over them
+            # could show or skip the same row twice.
+            .order_by('-created_at', '-id')
         )
 
         venue_id = str(request.query_params.get('venueId') or '').strip()

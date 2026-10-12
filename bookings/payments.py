@@ -253,6 +253,14 @@ class RazorpayWebhookView(APIView):
         payment_id = str(entity.get('id') or '')
         booking = Booking.objects.filter(razorpay_order_id=order_id).first()
         if booking is None:
+            # Not a venue booking — it may be an EVENT ticket order. Both
+            # products share this one webhook URL on purpose: adding a second
+            # one would be a Razorpay dashboard change in production, whereas
+            # this fall-through is a code change we can test. Imported locally
+            # so the bookings app never depends on events at load time.
+            from events.payments import handle_event_webhook
+            if handle_event_webhook(event, entity):
+                return Response({'status': 'ok'})
             return Response({'status': 'ignored'})  # not one of ours
 
         if event == 'payment.captured':

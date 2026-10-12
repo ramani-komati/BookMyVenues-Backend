@@ -435,6 +435,148 @@ def audit_row(entry):
     }
 
 
+# --- Events ------------------------------------------------------
+
+def _paid_seats_for_date(event_date):
+    """Capacity units taken by PAID orders on one date (no unpaid holds)."""
+    from django.db.models import Sum
+
+    from events.models import EventOrder
+
+    return EventOrder.objects.filter(event_date=event_date).exclude(
+        status__in=(*EventOrder.DEAD_STATUSES, 'payment_pending')
+    ).aggregate(total=Sum('seats'))['total'] or 0
+
+
+def event_row(event, sold_by_date=None, order_stats=None):
+    """One event for the admin Events page.
+
+    `sold_by_date` / `order_stats` are the precomputed maps from
+    format_events — pass them when rendering a LIST, or every row costs a
+    query per date. Omitted (single-row echo after a write) they are counted
+    on the spot, which is one extra query for one event.
+
+    "Sold" here means PAID, not held: unpaid Razorpay holds are checkout
+    plumbing and would make the admin's numbers jump around. The customer's
+    availability read counts them (see events/inventory.seats_sold) because
+    a held seat genuinely is not buyable — the two answer different
+    questions on purpose.
+    """
+    dates = list(event.dates.all())
+    rows = []
+    for event_date in dates:
+        sold = (
+            sold_by_date.get(event_date.id, 0)
+            if sold_by_date is not None
+            else _paid_seats_for_date(event_date)
+        )
+        rows.append({
+            'id': event_date.id,
+            'date': event_date.date.isoformat(),
+            'capacity': event_date.capacity,
+            'sold': sold,
+            'remaining': max(0, event_date.capacity - sold),
+            'isAvailable': event_date.is_available,
+        })
+
+    if order_stats is not None:
+        tickets, revenue, orders = order_stats.get(str(event.id), (0, 0, 0))
+    else:
+        from events.models import EventOrder
+        confirmed = EventOrder.objects.filter(event=event, status='confirmed')
+        tickets = sum(o.ticket_count for o in confirmed)
+        revenue = sum(o.subtotal for o in confirmed)
+        orders = confirmed.count()
+
+    prices = [t.price for t in event.ticket_types.all() if t.is_active]
+    return {
+        'id': str(event.id),
+        'slug': event.slug,
+        'name': event.name,
+        'category': event.category,
+        'status': event.status,
+        # Events are admin-created now and carry NO vendor. `vendor` stays in
+        # the payload (the panel renders a "who runs it" column) but reads the
+        # admin-entered organiser, falling back to the vendor account only on
+        # the legacy rows that still have one.
+        'vendor': event.organizer,
+        'organizer': event.organizer_name,
+        'organizerPhone': event.organizer_phone,
+        'vendorId': event.vendor_id,
+        'vendorPhone': event.vendor.phone if event.vendor_id else '',
+        'managedBy': 'vendor' if event.vendor_id else 'admin',
+        'poster': event.poster_url,
+        'location': event.location,
+        'city': event.city,
+        'startTime': event.start_time.strftime('%H:%M') if event.start_time else '',
+        'endTime': event.end_time.strftime('%H:%M') if event.end_time else '',
+        'dates': rows,
+        'datesCount': len(rows),
+        'capacity': sum(r['capacity'] for r in rows),
+        'ticketsSold': tickets,
+        'ordersNum': orders,
+        'revenueNum': revenue,
+        'fromPriceNum': min(prices) if prices else 0,
+        'ticketTypes': [t.as_record() for t in event.ticket_types.all()],
+        'reviewNotes': event.review_notes,
+        'createdAt': event.created_at.isoformat(),
+        'submitted': event.created_at.strftime('%d %b %Y'),
+        # The rest of the editable record. The admin Events page is now a full
+        # editor, so the row has to carry everything the form binds to —
+        # without these a reopened event would silently blank its own
+        # description, address and terms on the next save.
+        'description': event.description,
+        'slugValue': event.slug,
+        'venueId': str(event.listing_id) if event.listing_id else None,
+        'venueName': event.venue_name,
+        'address': event.address,
+        'locality': event.locality,
+        'mapsLink': event.maps_link,
+        'contactPhone': event.contact_phone,
+        'terms': event.terms,
+        'gallery': list(event.gallery or []),
+        'bookingOpensOn': (
+            event.booking_opens_on.isoformat() if event.booking_opens_on else None
+        ),
+        'bookingClosesOn': (
+            event.booking_closes_on.isoformat() if event.booking_closes_on else None
+        ),
+    }
+
+
+def format_events():
+    """Every non-deleted event, with sold counts gathered in two queries."""
+    from events.models import Event, EventOrder
+
+    events = list(
+        Event.objects.exclude(status=Event.Status.DELETED)
+        .select_related('vendor')
+        .prefetch_related('dates', 'ticket_types')
+    )
+    if not events:
+        return []
+
+    # Seats held per date, and per-event confirmed totals — one pass each,
+    # mirroring how BootstrapContext avoids a query per row.
+    sold_by_date = defaultdict(int)
+    order_stats = defaultdict(lambda: [0, 0, 0])
+    live = EventOrder.objects.exclude(
+        status__in=EventOrder.DEAD_STATUSES
+    ).values_list('event_id', 'event_date_id', 'status', 'seats',
+                  'ticket_count', 'subtotal')
+    for event_id, date_id, order_status, seats, tickets, subtotal in live:
+        if date_id and order_status != 'payment_pending':
+            sold_by_date[date_id] += seats or 0
+        if event_id and order_status == 'confirmed':
+            stats = order_stats[str(event_id)]
+            stats[0] += tickets or 0
+            stats[1] += subtotal or 0
+            stats[2] += 1
+
+    frozen = {key: tuple(value) for key, value in order_stats.items()}
+    return [event_row(e, dict(sold_by_date), frozen) for e in events]
+
+
 def settings_row(settings):
     # No 'commission' — the platform's only revenue is the flat booking fee.
     return {
@@ -461,4 +603,8 @@ def build_bootstrap():
         ],
         'audit': [audit_row(a) for a in AuditEntry.objects.all()[:AUDIT_LIMIT]],
         'settings': settings_row(Settings.load()),
+        # Ticketed events (Navaratri, Dandiya…). CREATED AND OWNED by the
+        # super admin — see events/admin_views.py. Legacy vendor-submitted
+        # rows still appear here so their moderation queue can be cleared.
+        'events': format_events(),
     }

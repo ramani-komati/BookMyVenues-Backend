@@ -907,6 +907,15 @@ class AdminReviewResolveView(_AdminWriteView):
         return Response(review_row(review))
 
 
+# Ticketed events are managed in events/admin_views.py (AdminEventsView /
+# AdminEventDetailView / AdminEventOrdersView, mounted at /api/admin/events).
+# They moved there when the client made events a super-admin product: the
+# admin now creates and edits the whole event, and every rule that does so —
+# capacity, ticket types, slugs, the protections for already-sold tickets —
+# already lives in the events app. A second copy here would be the thing that
+# eventually disagreed with it.
+
+
 class AdminAuditView(_AdminWriteView):
     """POST /api/admin/audit — legacy panel-written entry.
 
