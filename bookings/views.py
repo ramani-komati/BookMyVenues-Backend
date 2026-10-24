@@ -1010,9 +1010,11 @@ class MyBookingsView(APIView):
     def get(self, request):
         # Unpaid Razorpay holds are checkout plumbing, not bookings.
         # select_related('rating') so userRating costs no extra query per row.
+        # Admin-removed rows are gone for the customer too (they were never
+        # paid — see adminpanel.formatters.booking_removal_block).
         queryset = Booking.objects.filter(user=request.user).select_related(
             'rating'
-        ).exclude(status='payment_pending')
+        ).exclude(status__in=('payment_pending', 'removed'))
 
         wanted = request.query_params.get('status')
         if wanted == 'upcoming':
@@ -1066,7 +1068,9 @@ class CancelBookingView(APIView):
 
     def delete(self, request, booking_id):
         # Owner-only: someone else's booking id looks like it doesn't exist.
-        booking = Booking.objects.filter(pk=booking_id, user=request.user).first()
+        booking = Booking.objects.filter(pk=booking_id, user=request.user).exclude(
+            status='removed'
+        ).first()
         if booking is None:
             return _message('Booking not found.', status.HTTP_404_NOT_FOUND)
 

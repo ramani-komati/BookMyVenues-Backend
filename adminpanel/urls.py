@@ -20,6 +20,8 @@ urlpatterns = [
     path('vendors/token', views.AdminVendorTokenView.as_view(), name='admin-vendor-token'),
     path('vendors/<int:vendor_id>', views.AdminVendorUpdateView.as_view(), name='admin-vendor'),
     path('users/<int:user_id>', views.AdminUserUpdateView.as_view(), name='admin-user'),
+    # Must precede bookings/<str:booking_id> so 'export' is never read as an id.
+    path('bookings/export', views.AdminBookingsExportView.as_view(), name='admin-bookings-export'),
     path('bookings/<str:booking_id>', views.AdminBookingUpdateView.as_view(), name='admin-booking'),
     # Ticketed events — the SUPER ADMIN owns these outright (create, edit,
     # publish/unpublish, delete). Vendors have no write path; see
@@ -40,6 +42,13 @@ urlpatterns = [
         'events/<uuid:event_id>/orders/<str:order_id>',
         event_admin_views.AdminEventOrderDetailView.as_view(),
         name='admin-event-order',
+    ),
+    # Remove an unpaid event order from the main Bookings page — keyed on
+    # the order alone, so it works after its event was deleted.
+    path(
+        'event-orders/<str:order_id>',
+        event_admin_views.AdminEventOrderRemoveView.as_view(),
+        name='admin-event-order-remove',
     ),
     # New models (Phase 3)
     path('uploads', views.AdminUploadView.as_view(), name='admin-upload'),

@@ -23,3 +23,5 @@ __pycache__/
 .code-review-graph/
 staticfiles/
 demo-events-backup.json
+test_bmv_suite
+test_bmv_suite-journal

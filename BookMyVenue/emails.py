@@ -87,6 +87,6 @@ def render_tickets_email(*, event_name, rows, amount, maps_link=''):
         lines.append(f'Map: {maps_link}')
     lines += [
         f'View your tickets any time under My bookings: {bookings_url}',
-        'Show the order ID at the entry gate.',
+        'Show the booking ID at the entry gate.',
     ]
     return f'Tickets confirmed — {event_name}', html, '\n'.join(lines)

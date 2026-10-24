@@ -176,8 +176,10 @@ class PaymentVerifyView(APIView):
             booking.refresh_from_db()
             if booking.status == 'confirmed':
                 return Response({'booking': booking.as_record()})  # idempotent
-            if booking.status != 'payment_pending':
-                # refunded/cancelled — a replayed signature must NEVER revive it.
+            if booking.status not in Booking.CONFIRMABLE_STATUSES:
+                # refunded/cancelled/removed — a replayed signature must
+                # NEVER revive it. ('failed' stays confirmable: a retry in
+                # the same checkout can still succeed.)
                 return _message(
                     'This booking can no longer be confirmed.',
                     status.HTTP_409_CONFLICT,
@@ -279,13 +281,16 @@ class RazorpayWebhookView(APIView):
                 if booking.listing_id:
                     Listing.objects.select_for_update().get(pk=booking.listing_id)
                 booking.refresh_from_db()
-                if booking.status in ('cancelled', 'refunded'):
-                    # The customer abandoned/cancelled the checkout but the
-                    # payment landed anyway (UPI-collect: approved in the UPI
-                    # app after closing the widget). NEVER resurrect the
-                    # booking — refund the capture instead.
+                if booking.status in ('cancelled', 'refunded', 'removed'):
+                    # The customer abandoned/cancelled the checkout (or an
+                    # admin removed the unpaid booking) but the payment landed
+                    # anyway (UPI-collect: approved in the UPI app after
+                    # closing the widget). NEVER resurrect the booking —
+                    # refund the capture instead.
                     _auto_refund(booking, payment_id)
-                elif booking.status == 'payment_pending':
+                elif booking.status in Booking.CONFIRMABLE_STATUSES:
+                    # payment_pending, or 'failed' then retried successfully
+                    # inside the same checkout.
                     if booking.listing_id and _conflicts_excluding_self(booking):
                         # Late capture after the hold expired and the slot was
                         # re-sold — same rule as verify: queue for refund.
@@ -295,8 +300,17 @@ class RazorpayWebhookView(APIView):
                     else:
                         _confirm_booking(booking, payment_id)
         elif event == 'payment.failed':
-            if booking.status == 'payment_pending':
-                booking.status = 'cancelled'  # releases the held slot
-                booking.save(update_fields=['status'])
+            # One failed ATTEMPT. Recorded as 'failed' (releases the held
+            # slot), not 'cancelled': the booking stays confirmable because
+            # the customer may retry inside the same checkout and succeed.
+            # Only a pending row moves — a confirmed/refunded/cancelled one
+            # is never overwritten by a stale failure.
+            with transaction.atomic():
+                if booking.listing_id:
+                    Listing.objects.select_for_update().get(pk=booking.listing_id)
+                booking.refresh_from_db()
+                if booking.status == 'payment_pending':
+                    booking.status = 'failed'
+                    booking.save(update_fields=['status'])
 
         return Response({'status': 'ok'})

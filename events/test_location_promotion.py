@@ -13,6 +13,7 @@ LIVE loses its promotion so it can never be featured publicly.
 import datetime
 
 from django.urls import reverse
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from bookings.slots import today_ist
@@ -317,6 +318,13 @@ class EventPromotionTests(EventTestCase):
         first = make_event(name='First')
         second = make_event(name='Second')
         self.promote(first)
+        # Two promotions in one test land within the same clock tick on
+        # Windows (15.6 ms resolution), tying featured_at AND created_at and
+        # leaving the order to chance. Real promotions are seconds apart;
+        # make that explicit so the test checks the ordering rule, not luck.
+        Event.objects.filter(pk=first.pk).update(
+            featured_at=timezone.now() - datetime.timedelta(minutes=1)
+        )
         self.promote(second)
         self.assertEqual(self.featured_names(), ['Second', 'First'])
 

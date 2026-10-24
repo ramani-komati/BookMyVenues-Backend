@@ -54,7 +54,11 @@ class BootstrapContext:
 
         self.bookings_by_listing = defaultdict(list)
         self.bookings_by_user = defaultdict(list)
-        self.bookings = list(Booking.objects.select_related('rating').all())
+        # Soft-removed bookings are gone as far as the panel is concerned:
+        # no row, no booking count, no revenue.
+        self.bookings = list(
+            Booking.objects.exclude(status='removed').select_related('rating')
+        )
         for booking in self.bookings:
             if booking.listing_id:
                 self.bookings_by_listing[str(booking.listing_id)].append(booking)
@@ -165,7 +169,7 @@ def venue_row(listing, ctx=None):
         average, _count = ctx.rating_for(listing)
     else:
         from bookings.ratings import venue_rating
-        bookings = list(listing.bookings.all())
+        bookings = list(listing.bookings.exclude(status='removed'))
         average, _count = venue_rating(listing)
     district, city = _district_and_city(listing, ctx)
     return {
@@ -216,7 +220,10 @@ def vendor_row(vendor, ctx=None):
         )
     else:
         listings = list(vendor.listings.all())
-        earnings = sum(b.amount for listing in listings for b in listing.bookings.all())
+        earnings = sum(
+            b.amount for listing in listings
+            for b in listing.bookings.exclude(status='removed')
+        )
     return {
         'id': vendor.id,
         'name': vendor.name or '',
@@ -240,7 +247,7 @@ def format_vendors(ctx):
 def user_row(user, ctx=None):
     bookings = (
         ctx.bookings_by_user.get(user.id, []) if ctx is not None
-        else list(user.bookings.all())
+        else list(user.bookings.exclude(status='removed'))
     )
     return {
         'id': user.id,
@@ -274,8 +281,37 @@ def _booking_status(booking, today=None):
     return booking.display_status
 
 
+def booking_removal_block(booking):
+    """(code, message) when this venue booking must NOT be removed, else None.
+
+    The same financial rule event orders follow (events.admin_views.
+    removal_block): only a booking that never took money may go.
+      * confirmed / refund_pending — it holds a slot and money may be held;
+        refunding is a separate, deliberate act.
+      * refunded — the money moved twice; that row IS the financial record.
+      * any row carrying a captured payment id — a customer can cancel a
+        PAID booking, and that row must stay until the refund is settled.
+      * payment_pending inside its hold — the customer may be paying now.
+    """
+    if booking.status in ('confirmed', 'refund_pending'):
+        return ('ACTIVE', 'This booking is confirmed or paid, so it cannot be '
+                          'deleted. Refund it first.')
+    if booking.status == 'refunded':
+        return ('REFUNDED', 'Refunded bookings are kept as a financial record.')
+    if booking.status not in Booking.REMOVABLE_STATUSES:
+        return ('NOT_REMOVABLE', 'This booking cannot be deleted.')
+    if booking.razorpay_payment_id:
+        return ('PAID', 'A payment is recorded against this booking, so it '
+                        'cannot be deleted.')
+    if booking.status == 'payment_pending' and not booking.hold_expired:
+        return ('IN_CHECKOUT', 'The customer may still be paying. Try again '
+                               'once the 30-minute payment hold has expired.')
+    return None
+
+
 def booking_row(booking, today=None):
     today = today or today_ist()
+    blocked = booking_removal_block(booking)
     return {
         'id': booking.id,
         'customer': booking.customer_name,
@@ -300,6 +336,14 @@ def booking_row(booking, today=None):
         'collected': booking.collected,
         'collectedAt': booking.collected_at.isoformat() if booking.collected_at else None,
         'status': _booking_status(booking, today),
+        # The raw persisted lifecycle value, as event orders report it:
+        # `status` derives 'completed' from the clock, this never guesses.
+        'paymentStatus': booking.status,
+        'razorpayPaymentId': booking.razorpay_payment_id,
+        # An unpaid hold past its window is an abandoned checkout.
+        'holdExpired': booking.hold_expired,
+        'removable': blocked is None,
+        'removeBlockedReason': blocked[1] if blocked else '',
         'slotsDesc': ', '.join(booking.slots),
         'slotsAmt': _rupees(booking.amount),
         'addons': ', '.join(str(a.get('name', '')) for a in (booking.addons or [])),

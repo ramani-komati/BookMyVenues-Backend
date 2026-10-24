@@ -77,7 +77,7 @@ def notify_tickets_confirmed(order):
         ('Tickets', _ticket_rows(order) or tickets),
         ('Subtotal', f'₹{order.subtotal:,}'),
         ('Booking fee', f'₹{order.fee:,}'),
-        ('Order ID', order.id),
+        ('Booking ID', order.id),
     ]
     maps_link = getattr(order.event, 'maps_link', '') or ''
     subject, html, text = render_tickets_email(
@@ -91,7 +91,7 @@ def notify_tickets_confirmed(order):
     sent |= _send(
         'sms', order.phone,
         f'Tickets confirmed: {order.event_name}, {when}. '
-        f'{order.ticket_count} ticket(s). ID {order.id}',
+        f'{order.ticket_count} ticket(s). Booking ID {order.id}',
     )
 
     # Who runs the door on the night, and therefore wants to know a ticket
@@ -108,7 +108,7 @@ def notify_tickets_confirmed(order):
         vendor_text = (
             f'{who} booked tickets for {order.event_name}.\n\n'
             f'{when}\nTickets: {tickets}\nAmount: ₹{order.amount:,}\n'
-            f'Phone: {order.phone}\nOrder ID: {order.id}'
+            f'Phone: {order.phone}\nBooking ID: {order.id}'
         )
         sent |= _send(
             'email', vendor.email or '', vendor_text,
@@ -117,6 +117,6 @@ def notify_tickets_confirmed(order):
         sent |= _send(
             'sms', vendor.phone,
             f'New ticket sale: {order.event_name}, {when}, '
-            f'{order.ticket_count} ticket(s), {who}. ID {order.id}',
+            f'{order.ticket_count} ticket(s), {who}. Booking ID {order.id}',
         )
     return sent

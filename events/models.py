@@ -12,17 +12,44 @@ endpoints, and venue booking logic is untouched.
 Money is whole rupees (PositiveIntegerField) throughout — the same convention
 Booking.amount uses, so the Razorpay paise conversion is identical.
 """
+import secrets
 import uuid
 
 from django.conf import settings
-from django.db import models
+from django.db import IntegrityError, models, transaction
 
 from .catalog import canonical_event_category
 
 
+# Event order primary keys — the booking ID the customer reads out at the
+# gate ("K7M2QX"). Six uppercase letters/digits, minus the look-alikes 0/O
+# and 1/I/L.
+ORDER_ID_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
+ORDER_ID_LENGTH = 6
+# Never confusable with another booking's ID:
+#   * a venue booking shows as the last 6 HEX characters of its id
+#     ("bk_…3f8a92" -> "#3F8A92", the admin panel's bookingRef) — requiring
+#     at least one letter outside 0-9A-F means no event ID can ever equal one;
+#   * orders created before short IDs keep their 15-character 'eo_…' ids,
+#     which a 6-character id can never equal either.
+_NON_HEX = frozenset(ORDER_ID_ALPHABET) - frozenset('0123456789ABCDEF')
+ORDER_ID_ATTEMPTS = 10
+
+
 def make_order_id():
-    """Contract-style ids, e.g. 'eo_3f8a92c1d04e' (cf. bookings' 'bk_…')."""
-    return 'eo_' + uuid.uuid4().hex[:12]
+    """A new event order's primary key: 6 random characters (never all-hex),
+    from the OS's secure generator.
+
+    Existing orders keep the ids they were created with ('eo_3f8a92c1d04e');
+    only NEW orders get one of these. The function keeps its original name
+    because the migrations reference it as the field default.
+    """
+    while True:
+        code = ''.join(
+            secrets.choice(ORDER_ID_ALPHABET) for _ in range(ORDER_ID_LENGTH)
+        )
+        if not _NON_HEX.isdisjoint(code):
+            return code
 
 
 class Event(models.Model):
@@ -338,6 +365,40 @@ class EventOrder(models.Model):
             models.Index(fields=['event', 'date']),
         ]
 
+    def __init__(self, *args, **kwargs):
+        # Rows loaded from the database arrive positionally (Model.from_db);
+        # only a brand-new order built without an explicit id gets a
+        # GENERATED one — the only kind save() may swap on a clash.
+        generated = not args and 'id' not in kwargs and 'pk' not in kwargs
+        super().__init__(*args, **kwargs)
+        self._generated_id = generated
+
+    def save(self, *args, **kwargs):
+        """Insert a new order under a collision-safe short id.
+
+        Uniqueness is the PRIMARY KEY's own database constraint. A generated
+        id already in use is skipped up front; one taken by a concurrent
+        request between that check and the insert makes the INSERT fail
+        (Django inserts a new row with a default pk — it never UPDATEs an
+        existing one), so the insert runs in a savepoint and is retried with
+        a fresh id. An explicit id, an update of an existing order, and any
+        other integrity error behave exactly as Django normally does.
+        """
+        if not (self._state.adding and getattr(self, '_generated_id', False)):
+            return super().save(*args, **kwargs)
+        for _ in range(ORDER_ID_ATTEMPTS):
+            if EventOrder.objects.filter(pk=self.id).exists():
+                self.id = make_order_id()
+                continue
+            try:
+                with transaction.atomic():
+                    return super().save(*args, **kwargs)
+            except IntegrityError:
+                if not EventOrder.objects.filter(pk=self.id).exists():
+                    raise   # not an id clash
+                self.id = make_order_id()
+        raise IntegrityError('Could not allocate a unique event order id.')
+
     @property
     def hold_expired(self):
         """An unpaid order whose seat hold has lapsed. Still payment_pending
@@ -380,6 +441,9 @@ class EventOrder(models.Model):
     def as_record(self):
         """The camelCase record the frontend expects (cf. Booking.as_record)."""
         return {
+            # The booking ID itself — 6 characters for new orders, the original
+            # 'eo_…' id for older ones. Shown to customers, the gate and the
+            # admin, and the key for every API call.
             'id': self.id,
             'kind': 'event',          # lets shared UI tell tickets from bookings
             'status': self.display_status,

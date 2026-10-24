@@ -468,6 +468,35 @@ def removal_block(order):
     return None
 
 
+def remove_order(request, **filters):
+    """Soft-remove one UNPAID event order matched by `filters`, under a row
+    lock, and audit it. Shared by both admin delete routes."""
+    with transaction.atomic():
+        order = EventOrder.objects.select_for_update().filter(**filters).first()
+        if order is None or order.status == 'removed':
+            return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
+        blocked = removal_block(order)
+        if blocked is not None:
+            code, message = blocked
+            return Response(
+                {'detail': message, 'code': code},
+                status=status.HTTP_409_CONFLICT,
+            )
+        previous = order.status
+        order.status = 'removed'
+        order.save(update_fields=['status'])
+
+    from adminpanel.views import record_audit
+    body = request.data if isinstance(request.data, dict) else {}
+    record_audit(
+        request, 'Removed event booking',
+        f'#{order.id} · {order.event_name}',
+        change=f'status: {previous} → removed',
+        target_id=order.id, reason=body.get('reason'),
+    )
+    return Response({'removed': True, 'id': order.id})
+
+
 class AdminEventOrderDetailView(_AdminEventView):
     """DELETE /api/admin/events/<event_id>/orders/<order_id> — remove an
     UNPAID booking (failed, cancelled, or an abandoned checkout).
@@ -481,29 +510,14 @@ class AdminEventOrderDetailView(_AdminEventView):
     """
 
     def delete(self, request, event_id, order_id):
-        with transaction.atomic():
-            order = (
-                EventOrder.objects.select_for_update()
-                .filter(pk=order_id, event_id=event_id).first()
-            )
-            if order is None or order.status == 'removed':
-                return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
-            blocked = removal_block(order)
-            if blocked is not None:
-                code, message = blocked
-                return Response(
-                    {'detail': message, 'code': code},
-                    status=status.HTTP_409_CONFLICT,
-                )
-            previous = order.status
-            order.status = 'removed'
-            order.save(update_fields=['status'])
+        return remove_order(request, pk=order_id, event_id=event_id)
 
-        from adminpanel.views import record_audit
-        record_audit(
-            request, 'Removed event booking',
-            f'#{order.id} · {order.event_name}',
-            change=f'status: {previous} → removed',
-            target_id=order.id, reason=self._body(request).get('reason'),
-        )
-        return Response({'removed': True, 'id': order.id})
+
+class AdminEventOrderRemoveView(_AdminEventView):
+    """DELETE /api/admin/event-orders/<order_id> — the same removal, for the
+    main Bookings page. Keyed on the order alone, so an order whose event
+    has since been deleted (event_id is NULL) can still be removed; every
+    other rule is identical."""
+
+    def delete(self, request, order_id):
+        return remove_order(request, pk=order_id)
