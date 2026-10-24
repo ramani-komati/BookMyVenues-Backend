@@ -1,13 +1,17 @@
 # Secrets — never commit!
 .env
+.env.*
+!.env.example
 
 # Virtual environment
 env/
+venv/
+.venv/
 
 # Local database
 db.sqlite3
 
-# Python cache files
+# Python cache
 __pycache__/
 *.pyc
 
@@ -15,6 +19,9 @@ __pycache__/
 .vscode/
 .DS_Store
 
-# Code review graph (local tooling data)
+# Code review graph
 .code-review-graph/
 staticfiles/
+demo-events-backup.json
+test_bmv_suite
+test_bmv_suite-journal

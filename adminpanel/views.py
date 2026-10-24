@@ -15,6 +15,7 @@ import uuid
 from django.contrib.auth import login, logout
 from django.db import transaction
 from django.contrib.auth.hashers import check_password, make_password
+from django.http import HttpResponse
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
@@ -31,11 +32,14 @@ from venues.models import Listing, VenueDraft
 from venues.storage import ALLOWED_TYPES, StorageError, upload_photo
 from venues.views import _looks_like_image as looks_like_image
 
+from . import exports
+from .exports import booking_ref
 from .auth import CsrfExemptSessionAuthentication, IsAdmin, detail
 from .payouts import generate_payouts
 from .formatters import (
     approval_row,
     audit_row,
+    booking_removal_block,
     booking_row,
     build_bootstrap,
     payout_row,
@@ -209,6 +213,50 @@ class AdminBootstrapView(APIView):
     def get(self, request):
         generate_payouts()  # fill the Payouts page for completed weeks
         return Response(build_bootstrap())
+
+
+class AdminBookingsExportView(APIView):
+    """GET /api/admin/bookings/export -> .xlsx of the Bookings page's rows.
+
+    Takes the page's filters as query params (see adminpanel/exports.py) and
+    applies them on the server, so only the matching bookings ever leave it.
+    Read-only: no booking, payment or refund state is touched. The export
+    itself is audited — it carries customer names and phone numbers.
+    """
+
+    authentication_classes = [CsrfExemptSessionAuthentication]
+    permission_classes = [IsAdmin]
+
+    def get(self, request):
+        try:
+            filters = exports.parse_filters(request.query_params)
+        except exports.ExportFilterError as exc:
+            return detail(str(exc), status.HTTP_400_BAD_REQUEST)
+        rows, total = exports.matching_rows(filters)
+        if total > exports.MAX_EXPORT_ROWS:
+            return detail(
+                f'More than {exports.MAX_EXPORT_ROWS:,} bookings match. '
+                'Narrow the filters (for example a date range) and export again.',
+                status.HTTP_400_BAD_REQUEST,
+            )
+        content = exports.build_workbook(rows)
+        summary = ', '.join(
+            f'{name}={filters[name]}' for name in ('type', 'status', 'date', 'basis')
+        )
+        if filters['date'] == 'range':
+            summary += f", from={filters['from'] or '…'}, to={filters['to'] or '…'}"
+        if filters['q']:
+            summary += f", search={filters['q']!r}"
+        record_audit(request, 'Exported bookings', f'{total} bookings', summary)
+        response = HttpResponse(
+            content,
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = (
+            f'attachment; filename="{exports.export_filename()}"'
+        )
+        response['Cache-Control'] = 'no-store'   # customer data — never cache
+        return response
 
 
 # ---------------------------------------------------------------
@@ -448,8 +496,10 @@ def _vendor_has_active_bookings(vendor):
     from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 
     today = today_ist()
+    # Dead rows (cancelled, refunded, failed attempts, admin-removed) hold
+    # nothing — the same set availability ignores.
     base = Booking.objects.filter(listing__vendor=vendor).exclude(
-        status__in=('refunded', 'cancelled')
+        status__in=Booking.DEAD_STATUSES
     )
     if base.filter(date__gt=today).exists():
         return True
@@ -652,7 +702,50 @@ class AdminUserUpdateView(_AdminWriteView):
 
 
 class AdminBookingUpdateView(_AdminWriteView):
-    """PATCH /api/admin/bookings/<id> — status (e.g. refunded)."""
+    """PATCH  /api/admin/bookings/<id> — status (e.g. refunded).
+    DELETE /api/admin/bookings/<id> — soft-remove an UNPAID venue booking."""
+
+    def delete(self, request, booking_id):
+        """Remove a venue booking from the panel — the venue twin of
+        events.admin_views.remove_order.
+
+        A SOFT remove: status becomes 'removed', so the row leaves the
+        Bookings list, totals, availability and the customer's list, while
+        the database keeps it — for the audit trail, and so a late
+        payment.captured webhook still finds it and auto-refunds instead of
+        stranding the money. Only bookings that never took money qualify
+        (booking_removal_block); everything else is refused with 409.
+
+        Locks the venue row and then the booking — the order verify and the
+        webhook lock in — so a removal can never interleave with a capture.
+        """
+        with transaction.atomic():
+            found = Booking.objects.filter(pk=booking_id).only('listing_id').first()
+            if found is None:
+                return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
+            if found.listing_id:
+                Listing.objects.select_for_update().filter(pk=found.listing_id).first()
+            booking = Booking.objects.select_for_update().get(pk=found.pk)
+            if booking.status == 'removed':
+                return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
+            blocked = booking_removal_block(booking)
+            if blocked is not None:
+                code, message = blocked
+                return Response(
+                    {'detail': message, 'code': code},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            previous = booking.status
+            booking.status = 'removed'
+            booking.save(update_fields=['status'])
+
+        record_audit(
+            request, 'Removed venue booking',
+            f'{booking_ref(booking.id)} · {booking.venue_name or "venue"}',
+            change=f'status: {previous} → removed',
+            target_id=booking.id, reason=self._body(request).get('reason'),
+        )
+        return Response({'removed': True, 'id': booking.id})
 
     def patch(self, request, booking_id):
         # Lock the row for the whole read-check-refund-write sequence: two
@@ -665,7 +758,9 @@ class AdminBookingUpdateView(_AdminWriteView):
         booking = (
             Booking.objects.select_for_update().filter(pk=booking_id).first()
         )
-        if booking is None:
+        # A removed booking is gone as far as the panel is concerned — it
+        # cannot be edited back to life.
+        if booking is None or booking.status == 'removed':
             return detail('Booking not found.', status.HTTP_404_NOT_FOUND)
         data = self._body(request)
         previous_status = booking.status
@@ -905,6 +1000,15 @@ class AdminReviewResolveView(_AdminWriteView):
             review.venue, '', target_id=str(review.pk), reason=review.reason,
         )
         return Response(review_row(review))
+
+
+# Ticketed events are managed in events/admin_views.py (AdminEventsView /
+# AdminEventDetailView / AdminEventOrdersView, mounted at /api/admin/events).
+# They moved there when the client made events a super-admin product: the
+# admin now creates and edits the whole event, and every rule that does so —
+# capacity, ticket types, slugs, the protections for already-sold tickets —
+# already lives in the events app. A second copy here would be the thing that
+# eventually disagreed with it.
 
 
 class AdminAuditView(_AdminWriteView):

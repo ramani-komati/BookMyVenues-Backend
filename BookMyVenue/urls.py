@@ -30,6 +30,8 @@ urlpatterns = [
     # bookings BEFORE venues: availability must win over the public
     # venue-detail catch-all route.
     path('api/', include('bookings.urls')),
+    # Event ticketing (its own /events/* namespace — no overlap with venues).
+    path('api/', include('events.urls')),
     path('api/', include('venues.urls')),
     # Super-admin panel (cookie-session auth, {"detail"} errors) — /api/admin/
     path('api/admin/', include('adminpanel.urls')),

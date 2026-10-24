@@ -68,3 +68,25 @@ def render_booking_email(*, venue, when, amount, booking_id,
     subject = (f'New booking — {venue}' if is_vendor
                else f'Booking confirmed — {venue}')
     return subject, html, '\n'.join(lines)
+
+
+def render_tickets_email(*, event_name, rows, amount, maps_link=''):
+    """(subject, html, text) for confirmed event tickets — sent only after the
+    payment is verified. `rows` is [(label, value)], already in reading order."""
+    context = _shell_context()
+    bookings_url = f'{context["site_url"].rstrip("/")}/bookings'
+    html = render_to_string('emails/tickets_confirmed.html', {
+        **context, 'event_name': event_name, 'rows': rows,
+        'amount': f'{int(amount):,}', 'maps_link': maps_link,
+        'bookings_url': bookings_url, 'eyebrow': 'Tickets confirmed',
+    })
+    lines = ['Your tickets are confirmed.', '', event_name, '']
+    lines += [f'{label}: {value}' for label, value in rows]
+    lines += [f'Amount paid: Rs {int(amount):,}', '']
+    if maps_link:
+        lines.append(f'Map: {maps_link}')
+    lines += [
+        f'View your tickets any time under My bookings: {bookings_url}',
+        'Show the booking ID at the entry gate.',
+    ]
+    return f'Tickets confirmed — {event_name}', html, '\n'.join(lines)

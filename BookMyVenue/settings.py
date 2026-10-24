@@ -20,9 +20,34 @@ from dotenv import load_dotenv
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load variables from the .env file (in the project root) into the
-# environment, so os.environ can read them below.
-load_dotenv(BASE_DIR / '.env')
+# Config comes from an env file in the project root.
+#
+# `.env` is used when it exists. When it does not, we fall back to
+# `.env.example` so the project still runs from a fresh clone with no setup
+# step — which is the whole reason this fallback exists.
+#
+# THE FALLBACK IS FOR LOCAL DEVELOPMENT ONLY, because `.env.example` is
+# committed to git. Two consequences follow, and both are enforced below
+# rather than left to a comment:
+#
+#   * its SECRET_KEY is a placeholder every reader of the repo can see, so
+#     running on it with DEBUG=False is refused outright;
+#   * anything secret written into it would be published the next time the
+#     repo is pushed. Real keys belong in `.env` (which .gitignore excludes)
+#     or in the host's own environment variables, never in the example.
+#
+# Real environment variables always win: load_dotenv does not overwrite a
+# variable that is already set, so a platform like Render that injects its
+# config directly is unaffected by either file.
+ENV_FILE = BASE_DIR / '.env'
+ENV_EXAMPLE = BASE_DIR / '.env.example'
+USING_ENV_EXAMPLE = not ENV_FILE.exists() and ENV_EXAMPLE.exists()
+
+load_dotenv(ENV_FILE if ENV_FILE.exists() else ENV_EXAMPLE)
+
+# The exact placeholder shipped in .env.example. Known to anyone with the
+# repo, therefore worthless as a signing key.
+PLACEHOLDER_SECRET_KEY = 'replace-me-with-a-random-50-char-string'
 
 
 # ---------------------------------------------------------------
@@ -34,11 +59,46 @@ load_dotenv(BASE_DIR / '.env')
 AUTH_USER_MODEL = 'accounts.User'
 
 # Crash immediately at startup if SECRET_KEY is missing — better than
-# silently running with an insecure default.
-SECRET_KEY = os.environ['SECRET_KEY']
+# silently running with an insecure default. The message names the fix,
+# because the raw KeyError this used to raise did not.
+SECRET_KEY = os.environ.get('SECRET_KEY')
+if not SECRET_KEY:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        'SECRET_KEY is not set. Put it in a .env file in the project root '
+        '(copy .env.example and fill it in), or set it as a real environment '
+        'variable. Generate one with: python -c "from '
+        'django.core.management.utils import get_random_secret_key; '
+        'print(get_random_secret_key())"'
+    )
 
 # Env vars are always strings, so "True"/"False" text -> Python bool.
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
+
+# Refuse to serve a deployment on the committed example config. Both halves
+# matter: the placeholder key is public, and .env.example carries no real
+# provider credentials, so a production boot on it would quietly disable
+# payments, uploads and OTP delivery rather than fail loudly.
+if not DEBUG and SECRET_KEY == PLACEHOLDER_SECRET_KEY:
+    from django.core.exceptions import ImproperlyConfigured
+    raise ImproperlyConfigured(
+        'Refusing to start with DEBUG=False using .env.example. It is '
+        'committed to git, so its SECRET_KEY is public and it holds no real '
+        'credentials. Create a real .env (or set the variables in the '
+        "host's environment) before deploying."
+    )
+
+# Running on the example file is fine locally, but it should never be a
+# surprise — say so once, at startup.
+if USING_ENV_EXAMPLE:
+    import warnings
+    warnings.warn(
+        'No .env found — running on .env.example. Fine for local '
+        'development; provider keys (Razorpay, Supabase, Resend, SMS) are '
+        'blank there, so payments, image uploads and OTP delivery are '
+        'disabled. Create a .env to enable them.',
+        stacklevel=2,
+    )
 
 # "localhost,127.0.0.1" -> ['localhost', '127.0.0.1']
 ALLOWED_HOSTS = [
@@ -64,6 +124,7 @@ INSTALLED_APPS = [
     'accounts',
     'venues',
     'bookings',
+    'events',
     'adminpanel',
 ]
 

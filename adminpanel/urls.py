@@ -4,6 +4,8 @@ customer/vendor app, cookie-session auth, {"detail"} error shape).
 """
 from django.urls import path
 
+from events import admin_views as event_admin_views
+
 from . import views
 
 urlpatterns = [
@@ -18,7 +20,36 @@ urlpatterns = [
     path('vendors/token', views.AdminVendorTokenView.as_view(), name='admin-vendor-token'),
     path('vendors/<int:vendor_id>', views.AdminVendorUpdateView.as_view(), name='admin-vendor'),
     path('users/<int:user_id>', views.AdminUserUpdateView.as_view(), name='admin-user'),
+    # Must precede bookings/<str:booking_id> so 'export' is never read as an id.
+    path('bookings/export', views.AdminBookingsExportView.as_view(), name='admin-bookings-export'),
     path('bookings/<str:booking_id>', views.AdminBookingUpdateView.as_view(), name='admin-booking'),
+    # Ticketed events — the SUPER ADMIN owns these outright (create, edit,
+    # publish/unpublish, delete). Vendors have no write path; see
+    # events/vendor_views.py. Static 'events' route first so the list/create
+    # endpoint is never read as an event id.
+    path('events', event_admin_views.AdminEventsView.as_view(), name='admin-events'),
+    path(
+        'events/<uuid:event_id>',
+        event_admin_views.AdminEventDetailView.as_view(),
+        name='admin-event',
+    ),
+    path(
+        'events/<uuid:event_id>/orders',
+        event_admin_views.AdminEventOrdersView.as_view(),
+        name='admin-event-orders',
+    ),
+    path(
+        'events/<uuid:event_id>/orders/<str:order_id>',
+        event_admin_views.AdminEventOrderDetailView.as_view(),
+        name='admin-event-order',
+    ),
+    # Remove an unpaid event order from the main Bookings page — keyed on
+    # the order alone, so it works after its event was deleted.
+    path(
+        'event-orders/<str:order_id>',
+        event_admin_views.AdminEventOrderRemoveView.as_view(),
+        name='admin-event-order-remove',
+    ),
     # New models (Phase 3)
     path('uploads', views.AdminUploadView.as_view(), name='admin-upload'),
     path('settings', views.AdminSettingsView.as_view(), name='admin-settings'),

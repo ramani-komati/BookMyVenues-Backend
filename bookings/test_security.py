@@ -73,9 +73,32 @@ class GatewayBookingMixin:
 
     Without this, these tests would post to the retired direct endpoint and
     get a 400 about payment — passing for entirely the wrong reason.
+
+    It also RESETS THE SHARED CACHE around every test. DRF keeps its throttle
+    counters in django.core.cache, the payments scope is 20/min, and a file
+    like this one posts far more orders per wall-clock minute than any real
+    customer — so without the reset the 21st test in the process starts
+    getting 429 instead of the 400/409 it is asserting, and the failure has
+    nothing to do with the behaviour under test. events/tests.py carries the
+    same mixin for the same reason.
+
+    The hook is `_pre_setup` rather than `setUp` deliberately: none of the
+    classes below call `super().setUp()`, so a `setUp` here would simply
+    never run. `_pre_setup` is Django's own per-test hook and is always
+    invoked through the MRO.
     """
 
     _seq = 0
+
+    def _pre_setup(self):
+        from django.core.cache import cache
+        cache.clear()
+        super()._pre_setup()
+
+    def _post_teardown(self):
+        from django.core.cache import cache
+        cache.clear()
+        super()._post_teardown()
 
     def gateway_book(self, body):
         from unittest.mock import MagicMock, patch

@@ -90,9 +90,16 @@ class Booking(models.Model):
     # door (and spot no-shows).
     collected = models.BooleanField(default=False)
     collected_at = models.DateTimeField(null=True, blank=True)
-    # Lifecycle state. 'payment_pending' = created for a Razorpay order,
-    # holds the slot for PENDING_HOLD_MINUTES until paid; 'completed' is
-    # derived from the date; an admin can set 'refunded' etc.
+    # Lifecycle state (plain CharField — no migration for new values):
+    #   payment_pending → confirmed               verified payment only
+    #   payment_pending → failed                  Razorpay payment.failed
+    #   payment_pending → cancelled               customer dismissed checkout
+    #   failed          → confirmed               a RETRY in the same checkout
+    #                                              succeeded (verified)
+    #   confirmed       → refund_pending → refunded
+    #   unpaid          → removed                 super-admin soft delete
+    # 'payment_pending' holds the slot for PENDING_HOLD_MINUTES until paid;
+    # 'completed' is derived from the date (display_status).
     status = models.CharField(max_length=20, default='confirmed')
     # Razorpay linkage (empty for pay-at-venue / walk-ins / legacy bookings).
     # Part payment: what was charged online vs owed in cash at the venue.
@@ -132,7 +139,35 @@ class Booking(models.Model):
     # Rows that neither hold a slot nor count as revenue. Availability and
     # the vendor dashboard both exclude these, so they can never disagree
     # about whether a booking "exists".
-    DEAD_STATUSES = ('cancelled', 'refunded')
+    # 'failed' and 'removed' are dead too, otherwise a failed attempt or an
+    # admin-removed row would keep its slot off sale for ever.
+    DEAD_STATUSES = ('cancelled', 'refunded', 'failed', 'removed')
+    # Statuses a VERIFIED payment may still confirm. 'failed' is included on
+    # purpose: Razorpay keeps an order payable after a failed attempt, so a
+    # retry inside the same checkout can succeed (cf. events.payments).
+    CONFIRMABLE_STATUSES = ('payment_pending', 'failed')
+    # Unpaid outcomes a super admin may soft-remove — the same set events use
+    # (EventOrder.REMOVABLE_STATUSES). Never confirmed / refund_pending /
+    # refunded: those rows are financial records. See
+    # adminpanel.formatters.booking_removal_block for the full rule.
+    REMOVABLE_STATUSES = ('payment_pending', 'failed', 'cancelled')
+
+    @property
+    def hold_expired(self):
+        """An unpaid booking whose slot hold has lapsed — an abandoned
+        checkout. The SAME cutoff _active_bookings uses to stop the hold
+        blocking the slot (bookings.views.PENDING_HOLD_MINUTES), so the panel
+        calls a hold abandoned exactly when availability frees it."""
+        import datetime
+
+        from django.utils import timezone
+
+        from .views import PENDING_HOLD_MINUTES
+
+        if self.status != 'payment_pending' or self.created_at is None:
+            return False
+        cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+        return self.created_at < cutoff
 
     @property
     def display_status(self):

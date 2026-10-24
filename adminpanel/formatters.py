@@ -54,7 +54,11 @@ class BootstrapContext:
 
         self.bookings_by_listing = defaultdict(list)
         self.bookings_by_user = defaultdict(list)
-        self.bookings = list(Booking.objects.select_related('rating').all())
+        # Soft-removed bookings are gone as far as the panel is concerned:
+        # no row, no booking count, no revenue.
+        self.bookings = list(
+            Booking.objects.exclude(status='removed').select_related('rating')
+        )
         for booking in self.bookings:
             if booking.listing_id:
                 self.bookings_by_listing[str(booking.listing_id)].append(booking)
@@ -165,7 +169,7 @@ def venue_row(listing, ctx=None):
         average, _count = ctx.rating_for(listing)
     else:
         from bookings.ratings import venue_rating
-        bookings = list(listing.bookings.all())
+        bookings = list(listing.bookings.exclude(status='removed'))
         average, _count = venue_rating(listing)
     district, city = _district_and_city(listing, ctx)
     return {
@@ -216,7 +220,10 @@ def vendor_row(vendor, ctx=None):
         )
     else:
         listings = list(vendor.listings.all())
-        earnings = sum(b.amount for listing in listings for b in listing.bookings.all())
+        earnings = sum(
+            b.amount for listing in listings
+            for b in listing.bookings.exclude(status='removed')
+        )
     return {
         'id': vendor.id,
         'name': vendor.name or '',
@@ -240,7 +247,7 @@ def format_vendors(ctx):
 def user_row(user, ctx=None):
     bookings = (
         ctx.bookings_by_user.get(user.id, []) if ctx is not None
-        else list(user.bookings.all())
+        else list(user.bookings.exclude(status='removed'))
     )
     return {
         'id': user.id,
@@ -274,8 +281,37 @@ def _booking_status(booking, today=None):
     return booking.display_status
 
 
+def booking_removal_block(booking):
+    """(code, message) when this venue booking must NOT be removed, else None.
+
+    The same financial rule event orders follow (events.admin_views.
+    removal_block): only a booking that never took money may go.
+      * confirmed / refund_pending — it holds a slot and money may be held;
+        refunding is a separate, deliberate act.
+      * refunded — the money moved twice; that row IS the financial record.
+      * any row carrying a captured payment id — a customer can cancel a
+        PAID booking, and that row must stay until the refund is settled.
+      * payment_pending inside its hold — the customer may be paying now.
+    """
+    if booking.status in ('confirmed', 'refund_pending'):
+        return ('ACTIVE', 'This booking is confirmed or paid, so it cannot be '
+                          'deleted. Refund it first.')
+    if booking.status == 'refunded':
+        return ('REFUNDED', 'Refunded bookings are kept as a financial record.')
+    if booking.status not in Booking.REMOVABLE_STATUSES:
+        return ('NOT_REMOVABLE', 'This booking cannot be deleted.')
+    if booking.razorpay_payment_id:
+        return ('PAID', 'A payment is recorded against this booking, so it '
+                        'cannot be deleted.')
+    if booking.status == 'payment_pending' and not booking.hold_expired:
+        return ('IN_CHECKOUT', 'The customer may still be paying. Try again '
+                               'once the 30-minute payment hold has expired.')
+    return None
+
+
 def booking_row(booking, today=None):
     today = today or today_ist()
+    blocked = booking_removal_block(booking)
     return {
         'id': booking.id,
         'customer': booking.customer_name,
@@ -300,6 +336,14 @@ def booking_row(booking, today=None):
         'collected': booking.collected,
         'collectedAt': booking.collected_at.isoformat() if booking.collected_at else None,
         'status': _booking_status(booking, today),
+        # The raw persisted lifecycle value, as event orders report it:
+        # `status` derives 'completed' from the clock, this never guesses.
+        'paymentStatus': booking.status,
+        'razorpayPaymentId': booking.razorpay_payment_id,
+        # An unpaid hold past its window is an abandoned checkout.
+        'holdExpired': booking.hold_expired,
+        'removable': blocked is None,
+        'removeBlockedReason': blocked[1] if blocked else '',
         'slotsDesc': ', '.join(booking.slots),
         'slotsAmt': _rupees(booking.amount),
         'addons': ', '.join(str(a.get('name', '')) for a in (booking.addons or [])),
@@ -435,6 +479,170 @@ def audit_row(entry):
     }
 
 
+# --- Events ------------------------------------------------------
+
+def _paid_seats_for_date(event_date):
+    """Capacity units taken by PAID orders on one date (no unpaid holds)."""
+    from django.db.models import Sum
+
+    from events.models import EventOrder
+
+    return EventOrder.objects.filter(event_date=event_date).exclude(
+        status__in=(*EventOrder.DEAD_STATUSES, 'payment_pending')
+    ).aggregate(total=Sum('seats'))['total'] or 0
+
+
+def event_row(event, sold_by_date=None, order_stats=None):
+    """One event for the admin Events page.
+
+    `sold_by_date` / `order_stats` are the precomputed maps from
+    format_events — pass them when rendering a LIST, or every row costs a
+    query per date. Omitted (single-row echo after a write) they are counted
+    on the spot, which is one extra query for one event.
+
+    "Sold" here means PAID, not held: unpaid Razorpay holds are checkout
+    plumbing and would make the admin's numbers jump around. The customer's
+    availability read counts them (see events/inventory.seats_sold) because
+    a held seat genuinely is not buyable — the two answer different
+    questions on purpose.
+    """
+    dates = list(event.dates.all())
+    rows = []
+    for event_date in dates:
+        sold = (
+            sold_by_date.get(event_date.id, 0)
+            if sold_by_date is not None
+            else _paid_seats_for_date(event_date)
+        )
+        rows.append({
+            'id': event_date.id,
+            'date': event_date.date.isoformat(),
+            'capacity': event_date.capacity,
+            'sold': sold,
+            'remaining': max(0, event_date.capacity - sold),
+            'isAvailable': event_date.is_available,
+        })
+
+    if order_stats is not None:
+        tickets, revenue, orders = order_stats.get(str(event.id), (0, 0, 0))
+    else:
+        from events.models import EventOrder
+        confirmed = EventOrder.objects.filter(event=event, status='confirmed')
+        tickets = sum(o.ticket_count for o in confirmed)
+        revenue = sum(o.subtotal for o in confirmed)
+        orders = confirmed.count()
+
+    prices = [t.price for t in event.ticket_types.all() if t.is_active]
+    return {
+        'id': str(event.id),
+        'slug': event.slug,
+        'name': event.name,
+        'category': event.category,
+        'status': event.status,
+        # Events are admin-created now and carry NO vendor. `vendor` stays in
+        # the payload (the panel renders a "who runs it" column) but reads the
+        # admin-entered organiser, falling back to the vendor account only on
+        # the legacy rows that still have one.
+        'vendor': event.organizer,
+        'organizer': event.organizer_name,
+        'organizerPhone': event.organizer_phone,
+        'vendorId': event.vendor_id,
+        'vendorPhone': event.vendor.phone if event.vendor_id else '',
+        'managedBy': 'vendor' if event.vendor_id else 'admin',
+        'poster': event.poster_url,
+        'location': event.location,
+        'city': event.city,
+        # Homepage promotion — separate from `status` (see Event.featured).
+        'featured': event.featured,
+        'featuredAt': event.featured_at.isoformat() if event.featured_at else None,
+        'startTime': event.start_time.strftime('%H:%M') if event.start_time else '',
+        'endTime': event.end_time.strftime('%H:%M') if event.end_time else '',
+        'dates': rows,
+        'datesCount': len(rows),
+        'capacity': sum(r['capacity'] for r in rows),
+        'ticketsSold': tickets,
+        'ordersNum': orders,
+        'revenueNum': revenue,
+        'fromPriceNum': min(prices) if prices else 0,
+        'ticketTypes': [t.as_record() for t in event.ticket_types.all()],
+        'reviewNotes': event.review_notes,
+        'createdAt': event.created_at.isoformat(),
+        'submitted': event.created_at.strftime('%d %b %Y'),
+        # The rest of the editable record. The admin Events page is now a full
+        # editor, so the row has to carry everything the form binds to —
+        # without these a reopened event would silently blank its own
+        # description, address and terms on the next save.
+        'description': event.description,
+        'slugValue': event.slug,
+        'venueId': str(event.listing_id) if event.listing_id else None,
+        'venueName': event.venue_name,
+        'address': event.address,
+        'locality': event.locality,
+        'mapsLink': event.maps_link,
+        'contactPhone': event.contact_phone,
+        'terms': event.terms,
+        'gallery': list(event.gallery or []),
+        'bookingOpensOn': (
+            event.booking_opens_on.isoformat() if event.booking_opens_on else None
+        ),
+        'bookingClosesOn': (
+            event.booking_closes_on.isoformat() if event.booking_closes_on else None
+        ),
+    }
+
+
+def format_events():
+    """Every non-deleted event, with sold counts gathered in two queries."""
+    from events.models import Event, EventOrder
+
+    events = list(
+        Event.objects.exclude(status=Event.Status.DELETED)
+        .select_related('vendor')
+        .prefetch_related('dates', 'ticket_types')
+    )
+    if not events:
+        return []
+
+    # Seats held per date, and per-event confirmed totals — one pass each,
+    # mirroring how BootstrapContext avoids a query per row.
+    sold_by_date = defaultdict(int)
+    order_stats = defaultdict(lambda: [0, 0, 0])
+    live = EventOrder.objects.exclude(
+        status__in=EventOrder.DEAD_STATUSES
+    ).values_list('event_id', 'event_date_id', 'status', 'seats',
+                  'ticket_count', 'subtotal')
+    for event_id, date_id, order_status, seats, tickets, subtotal in live:
+        if date_id and order_status != 'payment_pending':
+            sold_by_date[date_id] += seats or 0
+        if event_id and order_status == 'confirmed':
+            stats = order_stats[str(event_id)]
+            stats[0] += tickets or 0
+            stats[1] += subtotal or 0
+            stats[2] += 1
+
+    frozen = {key: tuple(value) for key, value in order_stats.items()}
+    return [event_row(e, dict(sold_by_date), frozen) for e in events]
+
+
+def format_event_orders():
+    """Every event ticket order for the main Bookings page.
+
+    Kept as its OWN key rather than mixed into `bookings`: the dashboard,
+    payouts and venue/user drawers all sum `bookings` as venue revenue, and
+    an event ticket must not leak into those figures. Soft-removed orders are
+    left out exactly as the per-event list leaves them out; every other
+    status (pending, failed, cancelled, refunds) is listed as persisted.
+    """
+    from events.admin_views import admin_order_record
+    from events.models import EventOrder
+
+    orders = (
+        EventOrder.objects.exclude(status='removed')
+        .select_related('event', 'user')
+    )
+    return [admin_order_record(order) for order in orders]
+
+
 def settings_row(settings):
     # No 'commission' — the platform's only revenue is the flat booking fee.
     return {
@@ -461,4 +669,11 @@ def build_bootstrap():
         ],
         'audit': [audit_row(a) for a in AuditEntry.objects.all()[:AUDIT_LIMIT]],
         'settings': settings_row(Settings.load()),
+        # Ticketed events (Navaratri, Dandiya…). CREATED AND OWNED by the
+        # super admin — see events/admin_views.py. Legacy vendor-submitted
+        # rows still appear here so their moderation queue can be cleared.
+        'events': format_events(),
+        # Event ticket orders, listed beside venue bookings on the Bookings
+        # page. Separate from 'bookings' on purpose — see format_event_orders.
+        'eventOrders': format_event_orders(),
     }
