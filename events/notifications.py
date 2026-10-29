@@ -110,12 +110,14 @@ def notify_tickets_confirmed(order):
             f'{when}\nTickets: {tickets}\nAmount: ₹{order.amount:,}\n'
             f'Phone: {order.phone}\nBooking ID: {order.id}'
         )
+        from accounts.vendor_settings import alert_targets
+        vendor_email, vendor_phone = alert_targets(vendor, 'ticket')
         sent |= _send(
-            'email', vendor.email or '', vendor_text,
+            'email', vendor_email, vendor_text,
             subject=f'New ticket sale — {order.event_name}',
         )
         sent |= _send(
-            'sms', vendor.phone,
+            'sms', vendor_phone,
             f'New ticket sale: {order.event_name}, {when}, '
             f'{order.ticket_count} ticket(s), {who}. Booking ID {order.id}',
         )

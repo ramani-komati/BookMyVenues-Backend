@@ -1,51 +1,81 @@
 """
-Vendor event access — READ-ONLY.
+Vendor events — vendors SUBMIT events; a super admin approves them.
 
-Events are a SUPER-ADMIN product (see events/admin_views.py). The client
-removed them from the vendor workflow entirely: a vendor cannot create,
-edit, publish, unpublish or delete an event, and no vendor onboarding, bank
-account or payout setup is involved in an event existing.
+    GET    /api/vendors/me/events                 events this vendor may see
+    POST   /api/vendors/me/events                 submit a new event → PENDING
+    GET    /api/vendors/me/events/<id>
+    PATCH  /api/vendors/me/events/<id>            edit OWN event → back to PENDING
+    DELETE /api/vendors/me/events/<id>            withdraw OWN event (no sales only)
+    POST   /api/vendors/me/event-images           upload a poster/gallery image → {url}
+    POST   /api/vendors/me/events/<id>/poster     same upload, for an existing own event
+    GET    /api/vendors/me/events/<id>/orders     who bought tickets (unchanged)
 
-Why these routes still exist rather than being deleted outright:
+The approval lifecycle reuses the statuses events already had:
 
-  * Vendors who created events BEFORE the change still own rows, and those
-    rows carry customers' paid tickets. Hiding them would leave a vendor
-    unable to see who is turning up to their own ground.
-  * An admin-created event may be hosted AT one of the vendor's listed
-    venues. The vendor needs to know a published event is happening there.
-  * A removed route 404s, which reads as "broken" to a client still on an
-    older bundle. An explicit 403 with a reason reads as "not yours", which
-    is the truth and is what the portal now renders.
+    vendor submits ─► PENDING ──admin approves──► LIVE (public, bookable)
+                         │                         │
+                         └──admin rejects──► REJECTED (reason in review_notes)
+    any vendor edit of their event (pending / rejected / live / paused)
+                    ─► PENDING again — an approved event can never be changed
+                       into something the admin did not approve.
 
-SECURITY: every read is scoped — a vendor sees an event only if they own it
-(legacy) or it is published at one of their own listings. Another vendor's
-event id is a 404 and never reveals that it exists, the same posture
-venues/views.get_vendor_draft takes for drafts. Every write method returns
-403 regardless of ownership, so the permission does not depend on the
-frontend hiding a button.
+STATUS IS SERVER-OWNED: a vendor can never set status, featured, organiser or
+review fields, and the owner is the token's account — any vendor / owner id in
+the body is ignored. Only the admin endpoint (events/admin_views.py, session +
+IsAdmin) can approve, publish or promote. Public listing, detail and checkout
+already serve LIVE events only (events/public_views.live_events and
+Event.BOOKABLE_STATUSES), so a pending or rejected event is invisible and
+unbookable however it is addressed.
+
+Field parsing and the rules that protect existing ticket holders (a date with
+sales cannot be removed or shrunk; a sold ticket type is deactivated, never
+deleted) are the SAME code the admin uses — events/writes.py.
+
+SECURITY: reads are scoped (own events, plus published events hosted at the
+vendor's own venues — visible_events); writes require OWNERSHIP (event.vendor
+is the caller). Another vendor's event is a 404 and an admin event at the
+vendor's venue is a 403.
 """
 import logging
+import uuid
 
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import status
+from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from bookings.slots import SlotError, parse_date
-from venues.views import IsVendor
+from venues.storage import ALLOWED_TYPES, MAX_FILE_SIZE, StorageError, upload_photo
+from venues.views import IsVendor, _looks_like_image
 
 from .inventory import seats_sold
 from .models import Event, EventOrder
 from .public_views import _hhmm, date_rows
+from .writes import (
+    apply_core_fields,
+    has_sold_tickets,
+    parse_dates,
+    parse_ticket_types,
+    sync_dates,
+    sync_ticket_types,
+    unique_slug,
+)
 
 logger = logging.getLogger(__name__)
 
-# One message, one code — the portal branches on the code, not the text.
-EVENTS_ARE_ADMIN_MANAGED = (
-    'Events are managed by the TheBookMyVenues team. Contact support to list, '
-    'change or cancel an event.'
+# Keys a vendor may never set — status / promotion / review are the admin's,
+# the organiser is the vendor's own account, and ownership comes from the token.
+ADMIN_ONLY_KEYS = (
+    'status', 'publish', 'featured', 'reviewNotes', 'organizerName', 'organizerPhone',
+    'vendor', 'vendorId', 'createdBy', 'created_by', 'id', 'slug',
 )
-ADMIN_MANAGED_CODE = 'ADMIN_MANAGED'
+SUBMITTED_NOTICE = (
+    'Events you submit are reviewed by the TheBookMyVenues team before they go '
+    'live. Editing a live event sends it back for review.'
+)
+NOT_YOUR_EVENT = 'Only the vendor who submitted this event can change it.'
 
 
 def _message(text, http_status, code=''):
@@ -55,20 +85,33 @@ def _message(text, http_status, code=''):
     return Response(body, status=http_status)
 
 
-def _forbidden():
-    """THE refusal for every vendor event write. Enforced server-side so it
-    holds for curl, an old bundle and a hand-rolled request alike."""
-    return _message(
-        EVENTS_ARE_ADMIN_MANAGED, status.HTTP_403_FORBIDDEN, code=ADMIN_MANAGED_CODE
-    )
+def _vendor_body(request):
+    """The request body minus every field a vendor is not allowed to set."""
+    body = dict(request.data) if isinstance(request.data, dict) else {}
+    for key in ADMIN_ONLY_KEYS:
+        body.pop(key, None)
+    return body
+
+
+def _check_image_urls(body):
+    """Vendor-supplied image URLs must be plain http(s) — never javascript:/
+    data: — because the customer site renders them as image sources."""
+    urls = [body.get('posterUrl'), body.get('poster')]
+    gallery = body.get('gallery')
+    if isinstance(gallery, list):
+        urls += gallery
+    for url in urls:
+        text = str(url or '').strip()
+        if text and not text.lower().startswith(('https://', 'http://')):
+            raise SlotError('Images must be web addresses starting with https://.')
 
 
 def visible_events(user):
     """Events this vendor may READ.
 
-    Their own legacy events, plus PUBLISHED events hosted at one of their
-    venues. Deleted rows are excluded; drafts of other people's events are
-    not the vendor's business.
+    Their own events (any state except deleted — including pending and
+    rejected, so they can follow the review), plus PUBLISHED events hosted at
+    one of their venues.
     """
     return (
         Event.objects.filter(
@@ -86,14 +129,50 @@ def get_vendor_event(request, event_id):
     return visible_events(request.user).filter(pk=event_id).first()
 
 
-def vendor_event_record(event):
-    """What the vendor portal shows: the event as published, plus the
-    per-date sold counts for their own door planning.
+def _owned(request, event_id):
+    """(event, error Response) — the caller's OWN event, for writes."""
+    event = get_vendor_event(request, event_id)
+    if event is None:
+        return None, _message('Event not found.', status.HTTP_404_NOT_FOUND)
+    if event.vendor_id != request.user.id:
+        return None, _message(NOT_YOUR_EVENT, status.HTTP_403_FORBIDDEN, code='NOT_OWNER')
+    return event, None
 
-    `canEdit` is False on every row — it is sent so the portal renders the
-    read-only state from the server's answer rather than from a hard-coded
-    assumption that could drift from what the API actually allows.
-    """
+
+def sales_status(event, dates, today=None):
+    """Where ticket sales stand, in the order a vendor would ask:
+
+      not_live      not approved/published (pending, rejected, paused…)
+      ended         every date is in the past
+      not_open_yet  the selling window opens later
+      closed        the selling window has closed
+      sold_out      no seats left on any upcoming open date
+      on_sale       otherwise
+
+    Read-only: the checkout applies the same rules itself
+    (inventory.date_is_sellable)."""
+    from bookings.slots import today_ist
+
+    today = today or today_ist()
+    if event.status not in Event.BOOKABLE_STATUSES:
+        return 'not_live'
+    upcoming = [d for d in dates if d['date'] >= today.isoformat()]
+    if not upcoming:
+        return 'ended'
+    if event.booking_opens_on and today < event.booking_opens_on:
+        return 'not_open_yet'
+    if event.booking_closes_on and today > event.booking_closes_on:
+        return 'closed'
+    if not any(d['isAvailable'] and d['remaining'] > 0 for d in upcoming):
+        return 'sold_out'
+    return 'on_sale'
+
+
+def vendor_event_record(event, user=None):
+    """What the vendor portal shows: the event, its review state, and the
+    per-date sold counts for their own door planning. `canEdit` is the
+    SERVER's answer (own, non-deleted event), so the portal never offers a
+    control the API would refuse."""
     dates = []
     for event_date in event.dates.all():
         sold = seats_sold(event_date)
@@ -105,7 +184,20 @@ def vendor_event_record(event):
             'remaining': max(0, event_date.capacity - sold),
             'isAvailable': event_date.is_available,
         })
-    confirmed = EventOrder.objects.filter(event=event, status='confirmed')
+    confirmed = list(EventOrder.objects.filter(event=event, status='confirmed'))
+    own = bool(user is not None and event.vendor_id == user.id)
+    # Tickets sold per ticket type (orders freeze each line's type key).
+    sold_by_type = {}
+    for order in confirmed:
+        for item in order.items or []:
+            if isinstance(item, dict):
+                key = str(item.get('key') or item.get('label') or '')
+                sold_by_type[key] = sold_by_type.get(key, 0) + int(item.get('qty') or 0)
+    ticket_types = []
+    for ticket_type in event.ticket_types.all():
+        row = ticket_type.as_record()
+        row['sold'] = sold_by_type.get(str(ticket_type.key), 0)
+        ticket_types.append(row)
     return {
         'id': str(event.id),
         'slug': event.slug,
@@ -132,51 +224,65 @@ def vendor_event_record(event):
             event.booking_closes_on.isoformat() if event.booking_closes_on else None
         ),
         'status': event.status,
+        # The admin's rejection reason, shown to the vendor on a rejected event.
         'reviewNotes': event.review_notes,
         'dates': dates,
-        'ticketTypes': [t.as_record() for t in event.ticket_types.all()],
-        'ordersCount': confirmed.count(),
+        'ticketTypes': ticket_types,
+        'salesStatus': sales_status(event, dates),
+        'ordersCount': len(confirmed),
         'ticketsSold': sum(o.ticket_count for o in confirmed),
         'revenue': sum(o.subtotal for o in confirmed),
         'createdAt': event.created_at.isoformat(),
         'updatedAt': event.updated_at.isoformat(),
-        # Events are admin-managed — the portal shows no write controls.
-        'canEdit': False,
-        'managedBy': 'admin',
+        'canEdit': own and event.status != Event.Status.DELETED,
+        'managedBy': 'vendor' if event.vendor_id else 'admin',
     }
 
 
 class VendorEventsView(APIView):
-    """
-    GET  /api/vendors/me/events — events the vendor may see (read-only)
-    POST /api/vendors/me/events — 403, events are admin-managed
-    """
+    """GET the vendor's events; POST submits a new one for approval."""
 
     permission_classes = [IsVendor]
 
     def get(self, request):
         events = visible_events(request.user)
         return Response({
-            'events': [vendor_event_record(e) for e in events],
-            'canCreate': False,
-            'managedBy': 'admin',
-            'notice': EVENTS_ARE_ADMIN_MANAGED,
+            'events': [vendor_event_record(e, request.user) for e in events],
+            'canCreate': True,
+            'managedBy': 'vendor',
+            'notice': SUBMITTED_NOTICE,
         })
 
     def post(self, request):
-        logger.info(
-            'Vendor %s attempted to create an event — refused (admin-managed)',
-            request.user.phone,
+        body = _vendor_body(request)
+        # Owner = the token's account. Never the body's.
+        event = Event(vendor=request.user, created_by=request.user)
+        try:
+            _check_image_urls(body)
+            apply_core_fields(event, body, creating=True, listing_owner=request.user)
+            dates = parse_dates(body.get('dates'))
+            ticket_types = parse_ticket_types(body.get('ticketTypes'))
+        except SlotError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+
+        event.status = Event.Status.PENDING      # server-owned: awaits approval
+        with transaction.atomic():
+            event.slug = unique_slug(event.name, event.pk)
+            event.save()
+            sync_dates(event, dates)
+            sync_ticket_types(event, ticket_types)
+
+        event.refresh_from_db()
+        logger.info('Vendor %s submitted event %s (%s) for approval',
+                    request.user.pk, event.name, event.pk)
+        return Response(
+            {'event': vendor_event_record(event, request.user)},
+            status=status.HTTP_201_CREATED,
         )
-        return _forbidden()
 
 
 class VendorEventDetailView(APIView):
-    """
-    GET    /api/vendors/me/events/<id> — read-only
-    PATCH  /api/vendors/me/events/<id> — 403
-    DELETE /api/vendors/me/events/<id> — 403
-    """
+    """GET one event; PATCH / DELETE the vendor's OWN event."""
 
     permission_classes = [IsVendor]
 
@@ -184,37 +290,132 @@ class VendorEventDetailView(APIView):
         event = get_vendor_event(request, event_id)
         if event is None:
             return _message('Event not found.', status.HTTP_404_NOT_FOUND)
-        return Response({'event': vendor_event_record(event)})
+        return Response({'event': vendor_event_record(event, request.user)})
 
     def patch(self, request, event_id):
-        logger.info(
-            'Vendor %s attempted to edit event %s — refused (admin-managed)',
-            request.user.phone, event_id,
-        )
-        return _forbidden()
+        event, error = _owned(request, event_id)
+        if error is not None:
+            return error
+        body = _vendor_body(request)
+        if not body:
+            return Response({'event': vendor_event_record(event, request.user)})
+        try:
+            _check_image_urls(body)
+            apply_core_fields(event, body, creating=False, listing_owner=request.user)
+            existing_dates = [d.date for d in event.dates.all()]
+            dates = (
+                parse_dates(body.get('dates'), require=False, existing=existing_dates)
+                if 'dates' in body else None
+            )
+            ticket_types = (
+                parse_ticket_types(body.get('ticketTypes'), require=False)
+                if 'ticketTypes' in body else None
+            )
+        except SlotError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+
+        previous = event.status
+        with transaction.atomic():
+            if 'name' in body:
+                event.slug = unique_slug(event.name, event.pk)
+            # Any change goes back through review — an approved event can never
+            # be edited into something the admin did not approve. Tickets
+            # already sold stay valid (orders never depend on the event being
+            # LIVE); new sales pause until the admin approves again.
+            event.status = Event.Status.PENDING
+            event.review_notes = ''
+            event.save()                    # Event.save drops any promotion
+            if dates is not None:
+                date_error = sync_dates(event, dates)
+                if date_error:
+                    transaction.set_rollback(True)
+                    return _message(date_error, status.HTTP_409_CONFLICT)
+            if ticket_types is not None:
+                sync_ticket_types(event, ticket_types)
+
+        event.refresh_from_db()
+        logger.info('Vendor %s edited event %s: %s → pending review',
+                    request.user.pk, event.pk, previous)
+        return Response({
+            'event': vendor_event_record(event, request.user),
+            'resubmitted': previous != Event.Status.PENDING,
+        })
 
     def put(self, request, event_id):
-        return _forbidden()
+        return self.patch(request, event_id)
 
     def delete(self, request, event_id):
-        logger.info(
-            'Vendor %s attempted to delete event %s — refused (admin-managed)',
-            request.user.phone, event_id,
-        )
-        return _forbidden()
+        event, error = _owned(request, event_id)
+        if error is not None:
+            return error
+        # Tickets that were paid for must keep resolving and the sales history
+        # must stay attached — the same rule the admin delete follows.
+        if has_sold_tickets(event):
+            return _message(
+                'This event has sold tickets, so it cannot be deleted. Contact '
+                'the TheBookMyVenues team to cancel it.',
+                status.HTTP_409_CONFLICT, code='HAS_SALES',
+            )
+        event.status = Event.Status.DELETED
+        event.save(update_fields=['status', 'updated_at'])
+        logger.info('Vendor %s withdrew event %s', request.user.pk, event.pk)
+        return Response({'deleted': True, 'id': str(event.pk)})
+
+
+def _upload_event_image(request, folder):
+    """Store one image and return {url} — the same checks venue photos get:
+    type allowlist, size cap, and a real image signature (not just a label)."""
+    file = request.FILES.get('file')
+    if file is None:
+        return _message('No file uploaded.', status.HTTP_400_BAD_REQUEST)
+    if file.content_type not in ALLOWED_TYPES:
+        return _message('Only JPEG, PNG or WebP images are allowed.', status.HTTP_400_BAD_REQUEST)
+    if file.size > MAX_FILE_SIZE:
+        return _message('Image is too large (max 5 MB).', status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+    if not _looks_like_image(file):
+        return _message('That file is not a valid JPEG, PNG or WebP image.', status.HTTP_400_BAD_REQUEST)
+    # Pixel checks (venues/image_specs.py, "poster" rule): too small or
+    # absurdly large is refused; shape is advice only.
+    from venues.image_specs import listing_image_check
+    data = file.read()
+    problem, image_info = listing_image_check(data, 'poster')
+    if problem:
+        return _message(problem, status.HTTP_400_BAD_REQUEST)
+    path = f'events/{folder}/{uuid.uuid4().hex[:12]}.{ALLOWED_TYPES[file.content_type]}'
+    try:
+        url = upload_photo(path, data, file.content_type)
+    except StorageError:
+        logger.exception('Event image upload failed for vendor %s', request.user.pk)
+        return _message('Could not store the image right now. Please try again.',
+                        status.HTTP_502_BAD_GATEWAY)
+    return Response({'url': url, 'image': image_info}, status=status.HTTP_201_CREATED)
+
+
+class VendorEventImageUploadView(APIView):
+    """POST /api/vendors/me/event-images (multipart `file`) → {url}. The URL
+    is then sent as posterUrl / gallery on create or edit — so an image only
+    reaches customers after the admin approves the event carrying it."""
+
+    permission_classes = [IsVendor]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def post(self, request):
+        return _upload_event_image(request, f'vendor-{request.user.pk}')
 
 
 class VendorEventPosterView(APIView):
-    """POST /api/vendors/me/events/<id>/poster — 403.
-
-    The poster is event content, and event content is the admin's. Kept as a
-    route so an older vendor bundle gets the reason instead of a 404.
-    """
+    """POST /api/vendors/me/events/<id>/poster — the same upload for one of
+    the vendor's own events. Returns {url}; the event changes only when the
+    vendor saves it (which sends it for review)."""
 
     permission_classes = [IsVendor]
+    parser_classes = [MultiPartParser, FormParser]
 
     def post(self, request, event_id):
-        return _forbidden()
+        event, error = _owned(request, event_id)
+        if error is not None:
+            return error
+        return _upload_event_image(request, str(event.pk))
 
 
 class VendorEventOrdersView(APIView):

@@ -371,6 +371,12 @@ class Listing(models.Model):
     category = models.CharField(max_length=50, blank=True, default='')
     locality = models.CharField(max_length=120, blank=True, default='')
     pincode = models.CharField(max_length=10, blank=True, default='')
+    # The venue's map pin, DERIVED from the vendor's own maps link on every
+    # save (venues/geo.py) — never typed in, never guessed. Null when the
+    # link carries no exact pin (e.g. an unresolved short link). Columns
+    # rather than JSON so the distance search can prefilter with an index.
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.LIVE)
     # Admin can spotlight a venue on the home page (P-admin Phase 2).
@@ -396,7 +402,118 @@ class Listing(models.Model):
             models.Index(fields=['category']),
             models.Index(fields=['locality']),
             models.Index(fields=['pincode']),
+            # The distance search's bounding-box prefilter.
+            models.Index(fields=['latitude', 'longitude']),
         ]
+
+    def sync_coordinates(self):
+        """Set latitude/longitude from the record's maps link.
+
+        A unit sibling ("— Pitch 2") whose own record has no pin takes its
+        base venue's: they are one physical place. Anything else without an
+        exact pin is cleared to None rather than kept stale — a vendor who
+        replaces their link must not keep the old location.
+        """
+        from .geo import record_pin
+
+        point = record_pin(self.record)
+        if point is None:
+            detail = (self.record or {}).get('detail') or {}
+            base_id = str(detail.get('unitOf') or '').strip() if isinstance(detail, dict) else ''
+            if base_id and base_id != str(self.pk):
+                try:
+                    base = (
+                        Listing.objects.filter(pk=uuid.UUID(base_id))
+                        .values_list('latitude', 'longitude')
+                        .first()
+                    )
+                except (ValueError, TypeError):
+                    base = None
+                if base and base[0] is not None and base[1] is not None:
+                    point = base
+        self.latitude, self.longitude = point if point else (None, None)
+
+    def save(self, *args, **kwargs):
+        self.sync_coordinates()
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            kwargs['update_fields'] = {*update_fields, 'latitude', 'longitude'}
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return f'{self.name or self.slug} [{self.status}]'
+
+
+class VenueBusinessSettings(models.Model):
+    """The vendor's business controls for ONE venue: opening hours, special
+    dates, closures, time/day/date price rules and booking instructions.
+
+    Kept in its own table, NOT in Listing.record: the vendor portal rewrites
+    the record wholesale from the wizard draft on every republish (and the
+    dashboard self-heals by republishing), which would silently wipe anything
+    stored only there. Keyed to the BASE listing; a venue's pitch / screen
+    listings (detail.unitOf) share it, exactly like part payment.
+
+    Every rule is validated and enforced in venues/business.py. An absent row
+    (or `hours` = null) means the platform default the booking code has always
+    used — open 06:00–24:00 every day, no price rules — so venues that never
+    touch these controls behave exactly as before.
+    """
+
+    listing = models.OneToOneField(
+        Listing, on_delete=models.CASCADE, related_name='business_settings'
+    )
+    # {"0": [{"start": "09:00", "end": "22:00"}], ..., "6": []} — Monday = "0".
+    # An empty list closes that weekday. null = the default 06:00–24:00 daily.
+    hours = models.JSONField(null=True, blank=True)
+    # [{"date": "2026-11-12", "periods": [...], "note": "Diwali"}] — replaces
+    # the weekly hours on that one date; empty periods = closed all day.
+    special_hours = models.JSONField(default=list, blank=True)
+    # [{"from": "2026-12-01", "to": "2026-12-03", "reason": "Turf relaying"}]
+    closures = models.JSONField(default=list, blank=True)
+    # See business.validate_price_rules for the shape and the overlap rules.
+    price_rules = models.JSONField(default=list, blank=True)
+    # Shown to customers on the venue page and before payment.
+    booking_instructions = models.TextField(blank=True, default='')
+    # Optimistic concurrency: a save must name the revision it was based on,
+    # so two open tabs can never silently overwrite each other.
+    revision = models.PositiveIntegerField(default=0)
+    updated_at = models.DateTimeField(auto_now=True)
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+    )
+
+    def __str__(self):
+        return f'Business settings of {self.listing_id}'
+
+
+class SlotBlock(models.Model):
+    """A time range the vendor took off sale on one date (maintenance, a
+    private booking…). Belongs to the BASE listing; `resources` names the
+    pitch / screen listings it covers, empty = every resource of the venue.
+
+    A block never overlaps an active booking — business.create_block refuses
+    it — and the booking paths refuse a block's time, so the two can never
+    disagree. Deleting the row reopens the time.
+    """
+
+    listing = models.ForeignKey(Listing, on_delete=models.CASCADE, related_name='slot_blocks')
+    resources = models.JSONField(default=list, blank=True)
+    date = models.DateField()
+    start_minute = models.PositiveSmallIntegerField()
+    end_minute = models.PositiveSmallIntegerField()
+    # Private to the vendor: customers only ever see "unavailable".
+    reason = models.CharField(max_length=200, blank=True, default='')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['date', 'start_minute', 'id']
+        indexes = [models.Index(fields=['listing', 'date'])]
+
+    def __str__(self):
+        return f'Block {self.date} {self.start_minute}-{self.end_minute} @ {self.listing_id}'

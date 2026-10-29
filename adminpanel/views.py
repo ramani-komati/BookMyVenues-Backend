@@ -339,6 +339,8 @@ class AdminApprovalUpdateView(_AdminWriteView):
                 else 'Updated review checklist',
                 listing.name, '', target_id=str(listing.pk),
             )
+        # A venue going live or leaving it changes the homepage's venue rows.
+        Settings.bump_public_version()
         return Response(approval_row(listing))
 
 
@@ -487,6 +489,9 @@ class AdminVenueUpdateView(_AdminWriteView):
                 f"homepage feature: {'on' if listing.featured else 'off'}",
                 target_id=str(listing.pk),
             )
+        if listing.featured != was_featured or listing.status != previous:
+            # Featured venues lead the homepage Spotlight (adminpanel/homepage.py).
+            Settings.bump_public_version()
         return Response(venue_row(listing))
 
 
@@ -826,6 +831,30 @@ class AdminBookingUpdateView(_AdminWriteView):
         return Response(booking_row(booking))
 
 
+class AdminBookingVerifyView(_AdminWriteView):
+    """POST /api/admin/check-ins/verify {bookingId} — look up ANY booking ID
+    (venue booking or event ticket) across every venue and event: whether it
+    exists, its payment / refund / cancellation state, where it is for, and
+    its check-in record.
+
+    READ-ONLY by design. It never checks anyone in — entry is recorded only by
+    the venue's own vendor (bookings/checkin.vendor_check_in). POST with a
+    JSON body (not a GET URL) so the ID stays out of access logs and the
+    request is preflighted like every other admin call.
+    """
+
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'checkin'
+
+    def post(self, request):
+        from bookings.checkin import MAX_INPUT, admin_verify
+
+        raw = str(self._body(request).get('bookingId') or '').strip()
+        if not raw or len(raw) > MAX_INPUT:
+            return detail('Enter a booking ID.', status.HTTP_400_BAD_REQUEST)
+        return Response(admin_verify(raw, admin=request.user))
+
+
 # ---------------------------------------------------------------
 # New models (Phase 3) — settings, payouts, reviews, audit.
 # ---------------------------------------------------------------
@@ -907,9 +936,17 @@ class AdminUploadView(APIView):
                 status.HTTP_400_BAD_REQUEST,
             )
 
+        # The admin's uploads are event photos (SuperAdmin EventPhotos):
+        # the same pixel rules vendors get (venues/image_specs.py).
+        from venues.image_specs import listing_image_check
+        data = upload.read()
+        problem, image_info = listing_image_check(data, 'poster')
+        if problem:
+            return detail(problem, status.HTTP_400_BAD_REQUEST)
+
         path = f'admin/{uuid.uuid4().hex}.{extension}'
         try:
-            url = upload_photo(path, upload.read(), upload.content_type)
+            url = upload_photo(path, data, upload.content_type)
         except StorageError as error:
             logger.warning('Admin upload failed: %s', error)
             return detail(
@@ -919,7 +956,7 @@ class AdminUploadView(APIView):
 
         record_audit(request, 'Uploaded an image', upload.name or 'image',
                      f'{upload.size // 1024} KB')
-        return Response({'url': url}, status=status.HTTP_201_CREATED)
+        return Response({'url': url, 'image': image_info}, status=status.HTTP_201_CREATED)
 
 
 class AdminSettingsView(_AdminWriteView):
@@ -937,6 +974,22 @@ class AdminSettingsView(_AdminWriteView):
             error = _check_banner_images(data['banners'])
             if error:
                 return detail(error, status.HTTP_400_BAD_REQUEST)
+            # This replaces the WHOLE banner list (the older Settings form).
+            # A panel that says which homepage revision it loaded is refused
+            # when another admin has saved homepage content since, instead
+            # of silently overwriting it. Banners are now edited one at a
+            # time on the Homepage page (adminpanel/homepage.py).
+            if 'homepageRevision' in data and                     str(data.get('homepageRevision')) != str(settings_obj.homepage_revision):
+                return Response(
+                    {
+                        'detail': 'Homepage banners were changed by another admin. '
+                                  'Reload the page before saving banners here.',
+                        'code': 'STALE_HOMEPAGE',
+                    },
+                    status=status.HTTP_409_CONFLICT,
+                )
+            settings_obj.homepage_revision += 1
+            settings_obj.public_version += 1
 
         for key in ('categories', 'cities', 'amenities', 'banners'):
             if isinstance(data.get(key), list):

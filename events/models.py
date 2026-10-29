@@ -12,11 +12,13 @@ endpoints, and venue booking logic is untouched.
 Money is whole rupees (PositiveIntegerField) throughout — the same convention
 Booking.amount uses, so the Razorpay paise conversion is identical.
 """
-import secrets
 import uuid
 
 from django.conf import settings
-from django.db import IntegrityError, models, transaction
+from django.db import models
+
+from bookings.booking_codes import ALPHABET, LENGTH
+from bookings.payment_record import payment_time_fields
 
 from .catalog import canonical_event_category
 
@@ -24,32 +26,26 @@ from .catalog import canonical_event_category
 # Event order primary keys — the booking ID the customer reads out at the
 # gate ("K7M2QX"). Six uppercase letters/digits, minus the look-alikes 0/O
 # and 1/I/L.
-ORDER_ID_ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789'
-ORDER_ID_LENGTH = 6
-# Never confusable with another booking's ID:
-#   * a venue booking shows as the last 6 HEX characters of its id
-#     ("bk_…3f8a92" -> "#3F8A92", the admin panel's bookingRef) — requiring
-#     at least one letter outside 0-9A-F means no event ID can ever equal one;
-#   * orders created before short IDs keep their 15-character 'eo_…' ids,
-#     which a 6-character id can never equal either.
-_NON_HEX = frozenset(ORDER_ID_ALPHABET) - frozenset('0123456789ABCDEF')
-ORDER_ID_ATTEMPTS = 10
+# The shared, platform-wide booking ID format (bookings/booking_codes.py).
+ORDER_ID_ALPHABET = ALPHABET
+ORDER_ID_LENGTH = LENGTH
+# Never confusable with an OLDER booking's reference: a legacy venue booking
+# ('bk_…3f8a92') shows as "#3F8A92" on invoices and in the admin panel, and a
+# new ID always contains a letter outside 0-9A-F, so it can never equal one.
+# Orders created before short IDs keep their 15-character 'eo_…' ids.
 
 
 def make_order_id():
     """A new event order's primary key: 6 random characters (never all-hex),
-    from the OS's secure generator.
+    from the OS's secure generator — the platform-wide booking ID format that
+    venue bookings now share (bookings/booking_codes.py).
 
     Existing orders keep the ids they were created with ('eo_3f8a92c1d04e');
     only NEW orders get one of these. The function keeps its original name
     because the migrations reference it as the field default.
     """
-    while True:
-        code = ''.join(
-            secrets.choice(ORDER_ID_ALPHABET) for _ in range(ORDER_ID_LENGTH)
-        )
-        if not _NON_HEX.isdisjoint(code):
-            return code
+    from bookings.booking_codes import new_code
+    return new_code()
 
 
 class Event(models.Model):
@@ -123,6 +119,12 @@ class Event(models.Model):
     locality = models.CharField(max_length=120, blank=True, default='')
     city = models.CharField(max_length=100, blank=True, default='')
     maps_link = models.URLField(max_length=500, blank=True, default='')
+    # The event's map pin, DERIVED on every save: the exact pin in maps_link,
+    # else the pin of the listed venue it is held at (the event already
+    # inherits that venue's address for display). Never typed in or guessed —
+    # null when neither carries an exact pin. See venues/geo.py.
+    latitude = models.FloatField(null=True, blank=True)
+    longitude = models.FloatField(null=True, blank=True)
 
     # Daily show time, applied to every date (an event that runs 6–10 PM runs
     # 6–10 PM on each of its nights).
@@ -149,6 +151,16 @@ class Event(models.Model):
     featured = models.BooleanField(default=False)
     # When it was promoted — orders the featured row (newest promotion first).
     featured_at = models.DateTimeField(null=True, blank=True)
+    # Super admin's Homepage page (adminpanel/homepage.py). All three are
+    # OPTIONAL and only refine an existing promotion: `featured_order` is the
+    # admin's position in the Top Events row (lower first; null = after the
+    # ordered ones, newest promotion first as before), and the from/until
+    # window (IST dates, inclusive) schedules when a promoted event appears.
+    # A null window side is open-ended, so every event promoted before these
+    # existed keeps showing exactly as it did.
+    featured_order = models.PositiveIntegerField(null=True, blank=True)
+    featured_from = models.DateField(null=True, blank=True)
+    featured_until = models.DateField(null=True, blank=True)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -162,16 +174,49 @@ class Event(models.Model):
 
     # How many events may be promoted at once. Enforced by the admin
     # endpoint; the customer page simply renders whatever is promoted.
-    MAX_FEATURED = 6
+    # Raised from 6 when promotions became schedulable: an admin lining up
+    # next month's events must not have to unpromote this week's first. How
+    # many the homepage actually SHOWS is a separate, admin-set display limit
+    # (adminpanel/homepage.py, Top Events section), 6 by default.
+    MAX_FEATURED = 12
+
+    def sync_coordinates(self):
+        """Set latitude/longitude from maps_link, else the linked venue."""
+        from venues.geo import pin_from_maps_link
+
+        point = pin_from_maps_link(self.maps_link)
+        if point is None and self.listing_id:
+            from venues.models import Listing
+            venue = (
+                Listing.objects.filter(pk=self.listing_id)
+                .values_list('latitude', 'longitude')
+                .first()
+            )
+            if venue and venue[0] is not None and venue[1] is not None:
+                point = venue
+        self.latitude, self.longitude = point if point else (None, None)
 
     def save(self, *args, **kwargs):
         self.category = canonical_event_category(self.category)
+        self.sync_coordinates()
+        update_fields = kwargs.get('update_fields')
+        if update_fields is not None:
+            update_fields = {*update_fields, 'latitude', 'longitude'}
         if self.featured and self.status != self.Status.LIVE:
             self.featured = False
             self.featured_at = None
-            update_fields = kwargs.get('update_fields')
+            # The schedule belongs to the promotion and goes with it, so a
+            # re-promotion later starts from a clean slate.
+            self.featured_order = None
+            self.featured_from = None
+            self.featured_until = None
             if update_fields is not None:
-                kwargs['update_fields'] = {*update_fields, 'featured', 'featured_at'}
+                update_fields |= {
+                    'featured', 'featured_at', 'featured_order',
+                    'featured_from', 'featured_until',
+                }
+        if update_fields is not None:
+            kwargs['update_fields'] = update_fields
         super().save(*args, **kwargs)
 
     @property
@@ -354,7 +399,26 @@ class EventOrder(models.Model):
     refund_amount = models.PositiveIntegerField(null=True, blank=True)
 
     confirmation_sent_at = models.DateTimeField(null=True, blank=True)
+    # Entry at the gate — the WHOLE order (every ticket on it) enters at once:
+    # tickets have no IDs of their own, so they cannot be admitted one by one.
+    # Written once by bookings/checkin.py (row lock + conditional UPDATE).
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_in_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='checked_in_event_orders',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    # Same meaning and rules as on bookings.Booking — ONE invoice series for
+    # both products (bookings/invoices.py), issued once on insert, never
+    # changed, and no proof of payment. Nullable only for the live-table
+    # migration; the bookings 0022 data migration numbered existing orders.
+    invoice_number = models.CharField(
+        max_length=24, unique=True, null=True, blank=True, editable=False
+    )
+    # When the successful payment happened, and where that time came from
+    # (bookings/payment_record.py). Never the creation time.
+    paid_at = models.DateTimeField(null=True, blank=True)
+    paid_at_source = models.CharField(max_length=10, blank=True, default='')
 
     class Meta:
         ordering = ['-created_at']
@@ -376,28 +440,25 @@ class EventOrder(models.Model):
     def save(self, *args, **kwargs):
         """Insert a new order under a collision-safe short id.
 
-        Uniqueness is the PRIMARY KEY's own database constraint. A generated
-        id already in use is skipped up front; one taken by a concurrent
-        request between that check and the insert makes the INSERT fail
-        (Django inserts a new row with a default pk — it never UPDATEs an
-        existing one), so the insert runs in a savepoint and is retried with
-        a fresh id. An explicit id, an update of an existing order, and any
-        other integrity error behave exactly as Django normally does.
+        The id must be unique across ALL booking types — venue bookings use
+        the same 6-character format — so the insert goes through
+        bookings.booking_codes.insert_with_code: an id in use anywhere is
+        skipped, and the order row is written in one savepoint with its
+        BookingCode registry row, whose primary key makes a cross-table clash
+        impossible (a clash is retried with a fresh id). An explicit id, an
+        update of an existing order, and any other integrity error behave
+        exactly as Django normally does.
+
+        The new order also gets its invoice number in the same transaction
+        (bookings/invoices.py); an existing one is never replaced.
         """
-        if not (self._state.adding and getattr(self, '_generated_id', False)):
+        if not self._state.adding:
             return super().save(*args, **kwargs)
-        for _ in range(ORDER_ID_ATTEMPTS):
-            if EventOrder.objects.filter(pk=self.id).exists():
-                self.id = make_order_id()
-                continue
-            try:
-                with transaction.atomic():
-                    return super().save(*args, **kwargs)
-            except IntegrityError:
-                if not EventOrder.objects.filter(pk=self.id).exists():
-                    raise   # not an id clash
-                self.id = make_order_id()
-        raise IntegrityError('Could not allocate a unique event order id.')
+        from bookings.booking_codes import insert_with_code
+        from bookings.invoices import insert_with_invoice
+        return insert_with_invoice(self, lambda: insert_with_code(
+            self, 'event', lambda: super(EventOrder, self).save(*args, **kwargs)
+        ))
 
     @property
     def hold_expired(self):
@@ -469,8 +530,41 @@ class EventOrder(models.Model):
             'subtotal': self.subtotal,
             'fee': self.fee,
             'amount': self.amount,
+            'checkedInAt': self.checked_in_at.isoformat() if self.checked_in_at else None,
             'createdAt': self.created_at.isoformat(),
+            # Booking Info only — served to the order's own customer, the
+            # event's vendor and the admin, never on a public endpoint.
+            'invoiceNumber': self.invoice_number or None,
+            **payment_time_fields(self),
         }
+
+    def rating_fields(self):
+        """Rating keys for the CUSTOMER's ticket history — the same contract
+        as Booking.rating_fields: the SERVER decides when a ticket may be
+        reviewed (after the show, verified-paid only)."""
+        return {
+            'ratingStatus': self.rating_status,
+            'userRating': self.user_rating,
+            'userReview': self.user_review,
+        }
+
+    @property
+    def user_rating(self):
+        """The customer's own stars for this ticket, or None (select_related
+        'rating' when listing many orders)."""
+        rating = getattr(self, 'rating', None)
+        return rating.stars if rating else None
+
+    @property
+    def user_review(self):
+        rating = getattr(self, 'rating', None)
+        return (rating.review or None) if rating else None
+
+    @property
+    def rating_status(self):
+        """See bookings.ratings.order_rating_status."""
+        from bookings.ratings import order_rating_status
+        return order_rating_status(self)
 
     def __str__(self):
         return f'{self.id} — {self.event_name} on {self.date}'

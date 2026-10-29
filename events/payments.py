@@ -24,6 +24,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from bookings import payment_record
 from bookings.razorpay_client import (
     RazorpayError,
     create_order,
@@ -272,13 +273,16 @@ def _locked_order(**filters):
     return EventOrder.objects.select_for_update().filter(**filters).first()
 
 
-def _confirm_order(order, payment_id):
+def _confirm_order(order, payment_id, *, paid_at=None, source=payment_record.CHECKOUT):
     """Move an unpaid order to confirmed. Call inside transaction.atomic()
     with the order row LOCKED. The email is queued for after commit, so a
-    rolled-back confirmation never emails anyone."""
+    rolled-back confirmation never emails anyone. Records when the
+    successful payment happened (bookings/payment_record.py)."""
     order.status = 'confirmed'
     order.razorpay_payment_id = payment_id or order.razorpay_payment_id
-    order.save(update_fields=['status', 'razorpay_payment_id'])
+    order.save(update_fields=['status', 'razorpay_payment_id'] + payment_record.stamp_payment_time(
+        order, order.razorpay_payment_id, when=paid_at, source=source,
+    ))
     if order.user_id and not order.user.is_customer:
         order.user.is_customer = True
         order.user.save(update_fields=['is_customer'])
@@ -353,7 +357,10 @@ class EventPaymentVerifyView(APIView):
                 # The hold expired and the seats were resold mid-payment.
                 order.status = 'refund_pending'   # admin Refunds panel picks it up
                 order.razorpay_payment_id = payment_id
-                order.save(update_fields=['status', 'razorpay_payment_id'])
+                # The money WAS captured — record when, for the refund trail.
+                order.save(update_fields=['status', 'razorpay_payment_id'] + payment_record.stamp_payment_time(
+                    order, payment_id, source=payment_record.CHECKOUT,
+                ))
                 return _message(
                     'Payment received but this date sold out meanwhile — '
                     'our team will refund you.',
@@ -383,11 +390,15 @@ def _still_has_room(order):
     return order.seats <= seats_remaining(locked, exclude_order_id=order.pk)
 
 
-def _auto_refund(order, payment_id):
+def _auto_refund(order, payment_id, *, paid_at=None, source=payment_record.WEBHOOK):
     """Money captured for an order the customer already cancelled: refund it
     and record it. The order stays cancelled — never revived. Mirrors
-    bookings.payments._auto_refund so both products behave the same."""
+    bookings.payments._auto_refund so both products behave the same,
+    including recording when the capture happened."""
     order.razorpay_payment_id = payment_id or order.razorpay_payment_id
+    paid_fields = payment_record.stamp_payment_time(
+        order, order.razorpay_payment_id, when=paid_at, source=source,
+    )
     try:
         order.refund_id = refund_payment(order.razorpay_payment_id)
         order.status = 'refunded'
@@ -401,15 +412,17 @@ def _auto_refund(order, payment_id):
         order.status = 'refund_pending'
     order.save(update_fields=[
         'status', 'razorpay_payment_id', 'refund_id', 'refund_reason', 'refund_amount',
-    ])
+    ] + paid_fields)
 
 
-def handle_event_webhook(event_name, entity):
+def handle_event_webhook(event_name, entity, gateway_moment=None):
     """Razorpay webhook fallthrough for event orders.
 
     Called by bookings.payments.RazorpayWebhookView AFTER its signature check
     passes and no Booking matches the order id. Returns True when this module
     owned the order (so the webhook answers 'ok'), False when it did not.
+    `gateway_moment` is the signed payload's own timestamp (when Razorpay
+    captured the payment), or None — see bookings/payment_record.py.
 
     Sharing the endpoint keeps ONE webhook URL configured at Razorpay — adding
     a second one would be a production dashboard change, not a code change.
@@ -429,22 +442,33 @@ def handle_event_webhook(event_name, entity):
                     return True   # ours, but refused — do not confirm
             except (TypeError, ValueError):
                 return True
+        paid_at, source = payment_record.webhook_time(gateway_moment)
         with transaction.atomic():
             order = _locked_order(pk=order.pk)
             if order.status in CONFIRMABLE_STATUSES:
                 if not _still_has_room(order):
                     order.status = 'refund_pending'
                     order.razorpay_payment_id = payment_id
-                    order.save(update_fields=['status', 'razorpay_payment_id'])
+                    order.save(update_fields=['status', 'razorpay_payment_id'] + payment_record.stamp_payment_time(
+                        order, payment_id, when=paid_at, source=source,
+                    ))
                 else:
-                    _confirm_order(order, payment_id)
+                    _confirm_order(order, payment_id, paid_at=paid_at, source=source)
             elif order.status in ('cancelled', 'removed'):
                 # Customer abandoned the widget (or an admin removed the
                 # unpaid order) but a UPI collect landed anyway. NEVER
                 # resurrect it — refund the capture.
-                _auto_refund(order, payment_id)
-            # confirmed / refund_pending / refunded: this capture is already
-            # accounted for — a redelivery must not refund or email twice.
+                _auto_refund(order, payment_id, paid_at=paid_at, source=source)
+            elif source == payment_record.GATEWAY:
+                # confirmed / refund_pending / refunded: this capture is
+                # already accounted for — a redelivery must not refund or
+                # email twice. Only Razorpay's own capture time may refine the
+                # recorded time, and only for the SAME payment.
+                fields = payment_record.stamp_payment_time(
+                    order, payment_id, when=paid_at, source=source,
+                )
+                if fields:
+                    order.save(update_fields=fields)
     elif event_name == 'payment.failed':
         # One failed ATTEMPT. Recorded as 'failed' (releases the seats), not
         # 'cancelled': the order stays confirmable, because the customer may

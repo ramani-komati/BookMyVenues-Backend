@@ -23,7 +23,6 @@ from .slots import (
     parse_date,
     parse_slots,
     today_ist,
-    total_minutes,
 )
 from .views import (
     _amount_mismatch,
@@ -37,6 +36,22 @@ from .views import (
 )
 
 TODAY_BOOKINGS_LIMIT = 8
+
+
+CLOSED_BOOKINGS_LIMIT = 200
+
+
+def closed_bookings(user):
+    """Bookings that were PAID and then did not go ahead: refunded, or
+    cancelled with a captured payment (e.g. a late payment on an abandoned
+    checkout). Abandoned, never-paid checkouts are left out — they were never
+    bookings. Shown on the Bookings tab's "Cancelled & refunded" filter and
+    exported by the same rule (reports/vendor_reports.py)."""
+    from django.db.models import Q
+
+    return Booking.objects.filter(listing__vendor=user).filter(
+        Q(status='refunded') | (Q(status='cancelled') & ~Q(razorpay_payment_id=''))
+    )
 
 
 def _is_walk_in(booking):
@@ -70,9 +85,12 @@ def _sum_range(rows, start, end, *, walk_in=None):
 
 
 def _trend(current, previous):
-    """Percent change vs the previous period, e.g. 25 or -40."""
+    """Percent change vs the previous period, e.g. 25 or -40 — or None when
+    the previous period earned nothing. "+100 %" against an empty period
+    looks like growth but compares with nothing, so no figure is shown
+    rather than a misleading one (the dashboard hides a None trend)."""
     if previous == 0:
-        return 100 if current else 0
+        return None
     return round((current - previous) / previous * 100)
 
 
@@ -240,6 +258,11 @@ class VendorDashboardView(APIView):
             )
             venues.append(row)
 
+        # Business insights (bookings/analytics.py) — additive; an older
+        # portal simply ignores the key.
+        from .analytics import vendor_analytics
+        analytics = vendor_analytics(request.user, own_listings)
+
         return Response({
             'stats': stats,
             'earnings': earnings,
@@ -247,6 +270,13 @@ class VendorDashboardView(APIView):
             'bookings': today_bookings,
             'allBookings': all_bookings,
             'venues': venues,
+            'analytics': analytics,
+            # Additive: paid bookings that were cancelled or refunded, newest
+            # first (they are not in allBookings, which holds standing ones).
+            'closedBookings': [
+                booking.as_record()
+                for booking in closed_bookings(request.user).order_by('-created_at')[:CLOSED_BOOKINGS_LIMIT]
+            ],
         })
 
 
@@ -327,8 +357,10 @@ class WalkInBookingView(APIView):
             return _message('Cannot book a past date.', status.HTTP_400_BAD_REQUEST)
 
         # Contract: walk-in amount = hourly rate x duration, minus any coupon,
-        # NO ₹20 fee.
-        base = round(per_slot * total_minutes(intervals) / 60)
+        # NO ₹20 fee. The vendor's price rules price each step; `perSlot` is
+        # the rate for steps no rule covers (= the old formula without rules).
+        from venues.business import slot_charge
+        base = slot_charge(listing, date, intervals, per_slot)
         try:
             discount, applied_offer = _apply_offer(listing, base, body.get('offer'))
         except SlotError as error:
@@ -344,6 +376,18 @@ class WalkInBookingView(APIView):
                 return _message(
                     'One or more selected time slots are already booked.',
                     status.HTTP_409_CONFLICT,
+                )
+            # A walk-in is the vendor's own entry, so opening hours don't bind
+            # it — but a blocked range does: reopen the block first.
+            from venues.business import check_bookable
+            try:
+                check_bookable(listing, date, intervals, enforce_hours=False)
+            except SlotError as error:
+                return Response(
+                    {'message': 'That time is blocked. Reopen it in the Availability '
+                                'calendar first, then add the walk-in.',
+                     'code': error.code},
+                    status=status.HTTP_409_CONFLICT,
                 )
 
             booking = Booking.objects.create(

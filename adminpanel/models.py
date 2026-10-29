@@ -22,10 +22,36 @@ class Settings(models.Model):
     categories = models.JSONField(default=_default_categories, blank=True)
     cities = models.JSONField(default=list, blank=True)
     amenities = models.JSONField(default=list, blank=True)
+    # THE platform promotions: hero banners AND platform coupon codes are the
+    # same records (checkout validates codes against this list —
+    # bookings.views._apply_platform_offer). The Homepage page adds optional
+    # keys to each banner (image, placements, publish switch, CTA…), never a
+    # second store — see adminpanel/homepage.py.
     banners = models.JSONField(default=list, blank=True)
+    # The Explore homepage layout the super admin controls: section switches,
+    # titles, order, the Top Events display limit and the featured venues'
+    # order. {} = the built-in layout (adminpanel/homepage.py fills every
+    # missing key with its default), so the page renders as before until an
+    # admin changes something.
+    homepage = models.JSONField(default=dict, blank=True)
+    # Bumped by every homepage-content write (banners, sections, featured
+    # events/venues). Admin writes that replace a whole list send the
+    # revision they loaded; a mismatch means another admin saved first, and
+    # the write is refused (409) instead of silently overwriting their work.
+    homepage_revision = models.PositiveIntegerField(default=0)
+    # Bumped whenever anything the PUBLIC homepage payload shows changes —
+    # admin content AND customer ratings, event promotions, venue features.
+    # It is part of the homepage cache key, so every server process stops
+    # serving the old payload at once (the cache itself is per-process).
+    public_version = models.PositiveIntegerField(default=0)
 
     class Meta:
         verbose_name_plural = 'Settings'
+
+    @classmethod
+    def bump_public_version(cls):
+        """Invalidate the cached public homepage everywhere (one UPDATE)."""
+        cls.objects.filter(pk=1).update(public_version=models.F('public_version') + 1)
 
     @classmethod
     def load(cls):

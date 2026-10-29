@@ -9,6 +9,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from bookings.contact import order_contact
+
 from bookings.slots import now_minutes_ist, today_ist
 
 from .models import EventOrder
@@ -34,7 +36,10 @@ class MyEventOrdersView(APIView):
         # frontend shows a gate-ready ticket for confirmed/completed only.
         queryset = EventOrder.objects.filter(user=request.user).exclude(
             status='removed'
-        ).select_related('event')     # as_record reads the event's address
+        ).select_related(
+            'event', 'event__vendor',   # address + organiser contact
+            'rating',                   # ratingStatus / userRating, no query per row
+        )
 
         wanted = request.query_params.get('status')
         if wanted == 'upcoming':
@@ -57,7 +62,13 @@ class MyEventOrdersView(APIView):
         total = queryset.count()
         rows = queryset[(page - 1) * limit:page * limit]
         return Response({
-            'orders': [row.as_record() for row in rows],
+            # The organiser's name + phone — ONLY on a verified-paid order
+            # (bookings.contact.order_contact).
+            # ratingStatus: may this ticket be reviewed yet (bookings.ratings).
+            'orders': [
+                {**row.as_record(), 'vendorContact': order_contact(row), **row.rating_fields()}
+                for row in rows
+            ],
             'total': total,
         })
 

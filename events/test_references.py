@@ -91,7 +91,7 @@ class OrderIdGenerationTests(EventTestCase):
 
     def test_an_id_already_in_use_is_skipped(self):
         taken = make_order(self.event, self.customer).id
-        with patch('events.models.make_order_id', side_effect=[taken, 'K7M2QX']):
+        with patch('bookings.booking_codes.new_code', side_effect=[taken, 'K7M2QX']):
             order = EventOrder(**self.fields())
             order.id = taken                     # as if the default drew it
             order._generated_id = True
@@ -108,9 +108,11 @@ class OrderIdGenerationTests(EventTestCase):
 
         def exists(qs):
             calls['n'] += 1
-            return False if calls['n'] == 1 else real_exists(qs)
+            # The pre-check asks the registry, venue bookings and event
+            # orders; all three answer 'free' this once.
+            return False if calls['n'] <= 3 else real_exists(qs)
 
-        with patch('events.models.make_order_id', return_value='P3RT9W'), \
+        with patch('bookings.booking_codes.new_code', return_value='P3RT9W'), \
              patch.object(QuerySet, 'exists', exists):
             order = EventOrder(**self.fields())
             order.id = taken.id
@@ -124,7 +126,7 @@ class OrderIdGenerationTests(EventTestCase):
 
     def test_gives_up_loudly_when_no_free_id_is_found(self):
         taken = make_order(self.event, self.customer).id
-        with patch('events.models.make_order_id', return_value=taken):
+        with patch('bookings.booking_codes.new_code', return_value=taken):
             order = EventOrder(**self.fields())
             order.id = taken
             order._generated_id = True

@@ -51,11 +51,23 @@ class PublicBannersView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from .homepage import normalize_banner, public_banner
+
         today = today_ist()
-        banners = Settings.load().banners or []
-        return Response({
-            'banners': [b for b in banners if _is_active(b, today)],
-        })
+        banners = []
+        for index, raw in enumerate(Settings.load().banners or []):
+            if not _is_active(raw, today):
+                continue
+            banner = normalize_banner(raw, index)
+            # An admin-UNPUBLISHED banner (Homepage page switch) is left out.
+            # Checkout still validates codes against the full stored list,
+            # so unpublishing never changes what can be redeemed.
+            if not banner['published']:
+                continue
+            row = public_banner(banner)        # admin bookkeeping stripped
+            row['id'] = raw.get('id', row['id'])   # old banners keep a numeric id
+            banners.append(row)
+        return Response({'banners': banners})
 
 
 @method_decorator(cache_page(CACHE_SECONDS), name='get')

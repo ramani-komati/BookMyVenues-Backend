@@ -274,7 +274,7 @@ class BookingsExportTests(EventTestCase):
 
     def test_search_by_booking_id_and_names(self):
         self.assertExports(self.objs('v_paid'), q=self.v_paid.id)
-        ref = '#' + self.v_paid.id[3:][-6:].upper()
+        ref = '#' + self.v_paid.id     # the shared 6-character booking ID
         self.assertExports(self.objs('v_paid'), q=ref.lower())
         self.assertExports(self.objs('e_paid'), q=self.e_paid.id.upper())
         self.assertExports(self.objs('v_pending', 'v_abandoned', 'e_pending',

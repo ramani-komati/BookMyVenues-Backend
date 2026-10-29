@@ -17,12 +17,15 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from adminpanel.homepage import PublicHomepageView
 from adminpanel.public_views import PublicBannersView, PublicConfigView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     # Public: admin-managed homepage banners (customer hero carousel).
     path('api/banners', PublicBannersView.as_view(), name='public-banners'),
+    # The Explore homepage's admin-controlled sections in one cached read.
+    path('api/homepage', PublicHomepageView.as_view(), name='public-homepage'),
     # Public: live platform config (booking fee) — checkout reads this.
     path('api/config', PublicConfigView.as_view(), name='public-config'),
     # Frontend-contract routes (OTP auth, drafts, bookings, public) — /api/

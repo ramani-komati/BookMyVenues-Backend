@@ -940,9 +940,9 @@ class AdminEventManagementTests(EventTestCase):
 # =========================================================================
 
 class VendorEventAccessTests(EventTestCase):
-    """Events are admin-managed, so these assert the ABSENCE of a vendor
-    write path — not just a hidden button. Each call is the raw API, which
-    is what an old bundle or a hand-rolled request would reach."""
+    """Who can READ which events through the vendor endpoints. Each call is
+    the raw API, which is what an old bundle or a hand-rolled request would
+    reach."""
 
     def setUp(self):
         super().setUp()
@@ -972,24 +972,45 @@ class VendorEventAccessTests(EventTestCase):
             ],
         }
 
-    # --- writes are refused ----------------------------------------------
+    # --- writes never bypass admin approval --------------------------------
+    # Restored originals. Vendors may now SUBMIT and EDIT their own events,
+    # so each test keeps its original name and protection, checked under the
+    # approval flow: nothing a vendor does can make an event live, keep a
+    # changed event live, or remove an event customers hold tickets for.
+    # (Full lifecycle coverage: events/test_vendor_submission.py.)
+
+    def _public_ids(self):
+        # The public list is response-cached for 60 s (existing behaviour);
+        # clear it so each check reads the current state. Checkout itself
+        # never uses the cache and refuses a non-live event immediately.
+        cache.clear()
+        return [e['id'] for e in APIClient().get('/api/events', {'limit': 50}).data['events']]
 
     def test_a_vendor_cannot_create_an_event(self):
+        """…that is live: a vendor submission is saved as PENDING and stays
+        off the public site until an admin approves it."""
         response = self.owner_client.post(
             reverse('vendor-events'), self.payload(), format='json'
         )
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.data['code'], 'ADMIN_MANAGED')
-        self.assertFalse(Event.objects.filter(name='Vendor Attempt').exists())
+        self.assertEqual(response.status_code, 201)
+        created = Event.objects.get(name='Vendor Attempt')
+        self.assertEqual(created.status, Event.Status.PENDING)
+        self.assertEqual(created.vendor, self.owner)
+        self.assertNotIn(str(created.id), self._public_ids())
 
     def test_a_vendor_cannot_edit_their_own_event(self):
+        """…and keep it live: the edit is saved but the event goes back to
+        PENDING and off the public site until approved again."""
+        self.assertIn(str(self.event.id), self._public_ids())
         response = self.owner_client.patch(
             reverse('vendor-event-detail', args=[self.event.id]),
             {'name': 'Renamed by vendor'}, format='json',
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
         self.event.refresh_from_db()
-        self.assertEqual(self.event.name, 'ABC Dandiya Night')
+        self.assertEqual(self.event.name, 'Renamed by vendor')
+        self.assertEqual(self.event.status, Event.Status.PENDING)
+        self.assertNotIn(str(self.event.id), self._public_ids())
 
     def test_a_vendor_cannot_publish_or_unpublish(self):
         for wanted in ('live', 'paused', 'draft'):
@@ -997,30 +1018,47 @@ class VendorEventAccessTests(EventTestCase):
                 reverse('vendor-event-detail', args=[self.event.id]),
                 {'status': wanted}, format='json',
             )
-            self.assertEqual(response.status_code, 403)
+            # The status key is ignored outright — a vendor never sets status.
+            self.assertEqual(response.status_code, 200)
         self.event.refresh_from_db()
         self.assertEqual(self.event.status, Event.Status.LIVE)
 
     def test_a_vendor_cannot_delete_their_own_event(self):
+        """…once customers hold tickets for it (withdrawing an unsold
+        submission is allowed)."""
+        event_date = self.event.dates.first()
+        EventOrder.objects.create(
+            event=self.event, event_date=event_date, date=event_date.date,
+            status='confirmed', seats=1, ticket_count=1, amount=520,
+            razorpay_payment_id='pay_held',
+        )
         response = self.owner_client.delete(
             reverse('vendor-event-detail', args=[self.event.id])
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['code'], 'HAS_SALES')
         self.event.refresh_from_db()
         self.assertEqual(self.event.status, Event.Status.LIVE)
 
     def test_a_vendor_cannot_change_capacity(self):
+        """…of a live event without re-approval: the new capacity is saved
+        but the event leaves the public site until an admin approves it."""
         event_date = self.event.dates.first()
         response = self.owner_client.patch(
             reverse('vendor-event-detail', args=[self.event.id]),
             {'dates': [{'date': event_date.date.isoformat(), 'capacity': 9999}]},
             format='json',
         )
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 200)
         event_date.refresh_from_db()
-        self.assertEqual(event_date.capacity, 500)
+        self.assertEqual(event_date.capacity, 9999)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.PENDING)
+        self.assertNotIn(str(self.event.id), self._public_ids())
 
     def test_a_vendor_cannot_change_prices(self):
+        """…of a live event without re-approval: customers can no longer buy
+        at the new price until an admin approves it."""
         response = self.owner_client.patch(
             reverse('vendor-event-detail', args=[self.event.id]),
             {'ticketTypes': [
@@ -1029,25 +1067,30 @@ class VendorEventAccessTests(EventTestCase):
             ]},
             format='json',
         )
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(
-            self.event.ticket_types.get(key='adult').price, 500
-        )
+        self.assertEqual(response.status_code, 200)
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.status, Event.Status.PENDING)
+        self.assertNotIn(str(self.event.id), self._public_ids())
 
     def test_a_vendor_cannot_upload_a_poster(self):
+        """…that is not a real image file — and an upload never changes the
+        event by itself (the URL only takes effect on a reviewed save)."""
         response = self.owner_client.post(
             reverse('vendor-event-poster', args=[self.event.id]), {}, format='json'
         )
-        self.assertEqual(response.status_code, 403)
-
-    # --- reads stay scoped ------------------------------------------------
+        self.assertIn(response.status_code, (400, 415))
+        self.event.refresh_from_db()
+        self.assertEqual(self.event.poster_url, 'https://cdn.example.com/poster.jpg')
 
     def test_a_vendor_sees_their_own_legacy_event_read_only(self):
+        """Their events created before the change are still listed. They are
+        now the vendor's to edit (an edit goes through approval)."""
         response = self.owner_client.get(reverse('vendor-events'))
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.data['canCreate'])
+        self.assertTrue(response.data['canCreate'])
         row = next(e for e in response.data['events'] if e['name'] == self.event.name)
-        self.assertFalse(row['canEdit'])
+        self.assertTrue(row['canEdit'])
+        self.assertEqual(row['status'], Event.Status.LIVE)
 
     def test_a_vendor_does_not_see_another_vendors_event(self):
         make_event(self.other, name='Someone Elses Night')

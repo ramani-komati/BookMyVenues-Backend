@@ -689,7 +689,7 @@ def _apply_offer(listing, base, offer_request, user=None):
 
 
 def compute_amount(listing, intervals, requested_addons, rate=None,
-                   offer_request=None, weekend=False, user=None):
+                   offer_request=None, weekend=False, user=None, date=None):
     """
     Server-side total:
         base     = round(rate x minutes / 60) + sum(addon.price x qty)
@@ -703,7 +703,10 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
 
         base = package price + add-ons + extra persons
 
-    `rate` is the per-unit rate when given, else the listing price. Returns
+    `rate` is the per-unit rate when given, else the listing price. With a
+    `date`, the vendor's price rules (venues/business.py) price each
+    30-minute step and `rate` is the default for steps no rule covers —
+    identical to rate x minutes when the venue has no rules. Returns
     (amount, cleaned_addons, applied_offer, discount, fee, extra_hours,
     has_package) — `fee` is what was actually charged, stored on the booking
     for payout math; the last two tell the caller how much time to RESERVE.
@@ -716,7 +719,11 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     )
 
     if package is None:
-        slot_base = round(rate * booked_minutes / 60)
+        if date is not None:
+            from venues.business import slot_charge
+            slot_base = slot_charge(listing, date, intervals, rate)
+        else:
+            slot_base = round(rate * booked_minutes / 60)
     else:
         # The package price already buys the time — no hourly charge on top.
         slot_base = 0
@@ -807,7 +814,43 @@ def _availability(listing, date):
         'bookedUnits': booked_units,
     }
     payload.update(_rates_for(listing, date))   # rate / isWeekend / unitRates
+    payload.update(_business_fields(listing, date))
     return payload
+
+
+def _business_fields(listing, date):
+    """The vendor's schedule and price rules for this listing on `date`
+    (venues/business.py). Additive keys — an older client ignores them and
+    the server still refuses a closed or blocked time.
+
+      open          [{start, end}] the venue's opening periods ([] = closed)
+      closed        true when the venue takes no bookings at all that day
+      closedReason  the vendor's closure note, when it is a closure
+      unavailable   [{start, end, reason: 'closed'|'blocked'}] — times that
+                    cannot be booked besides `booked` (block notes stay
+                    private)
+      priceBands    [{start, end, rate, label}] — `rate` null where the
+                    venue's own price for the chosen pitch applies
+      bookingInstructions  shown before payment
+    """
+    from venues.business import (
+        base_listing, clock, open_periods, price_bands, unavailable_ranges,
+    )
+    from venues.models import VenueBusinessSettings
+
+    settings = VenueBusinessSettings.objects.filter(listing=base_listing(listing)).first()
+    periods, why = open_periods(settings, date)
+    return {
+        'open': [{'start': clock(s), 'end': clock(e)} for s, e in periods],
+        'closed': not periods,
+        'closedReason': (
+            (why or {}).get('note') or None
+            if (why or {}).get('kind') == 'closure' else None
+        ),
+        'unavailable': unavailable_ranges(listing, date, settings=settings),
+        'priceBands': price_bands(listing, date, settings=settings),
+        'bookingInstructions': (settings.booking_instructions if settings else '') or None,
+    }
 
 
 class AvailabilityView(APIView):
@@ -882,6 +925,7 @@ def validate_booking_request(body, user=None):
          extra_hours, has_package) = compute_amount(
             listing, intervals, body.get('addons'), rate=rate,
             offer_request=body.get('offer'), weekend=weekend, user=user,
+            date=date,
         )
         # A package's slots already cover its extra hours; an hourly booking's
         # do not, so the reservation has to grow to match the bill.
@@ -890,6 +934,11 @@ def validate_booking_request(body, user=None):
             intervals, slot_texts = extend_for_extra_hours(
                 intervals, slot_texts, extra_hours
             )
+        # The vendor's opening hours, closures and blocked slots — checked
+        # on the time actually RESERVED (extra hours included). Re-checked
+        # under the listing lock when the order is created.
+        from venues.business import check_bookable
+        check_bookable(listing, date, intervals)
         client_amount = _to_int(body.get('amount'), 'amount')
         per_slot = _to_int(
             body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'
@@ -1013,7 +1062,7 @@ class MyBookingsView(APIView):
         # Admin-removed rows are gone for the customer too (they were never
         # paid — see adminpanel.formatters.booking_removal_block).
         queryset = Booking.objects.filter(user=request.user).select_related(
-            'rating'
+            'rating', 'listing__vendor',
         ).exclude(status__in=('payment_pending', 'removed'))
 
         wanted = request.query_params.get('status')
@@ -1034,10 +1083,18 @@ class MyBookingsView(APIView):
 
         total = queryset.count()
         rows = queryset[(page - 1) * limit:page * limit]
-        return Response({
-            'bookings': [row.as_record() for row in rows],
-            'total': total,
-        })
+        from .contact import booking_contact
+        bookings = []
+        for row in rows:
+            record = row.as_record()
+            # The venue owner's name + phone — ONLY on a verified-paid
+            # booking, and only in the customer's own history (bookings.contact).
+            record['vendorContact'] = booking_contact(row)
+            # May the customer rate it yet? Decided here, on the server's
+            # clock and the booking's payment state (bookings.ratings).
+            record.update(row.rating_fields())
+            bookings.append(record)
+        return Response({'bookings': bookings, 'total': total})
 
     def post(self, request):
         """

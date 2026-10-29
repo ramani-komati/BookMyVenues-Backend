@@ -211,6 +211,16 @@ REST_FRAMEWORK = {
         # Payment order/verify: each order call creates a real gateway order
         # and a 30-min slot hold — throttled against hold-griefing.
         'payments': '20/min',
+        # Place search proxies an outside geocoder (Nominatim's public
+        # instance allows ~1 request/second in total) — keep it modest.
+        'geocode': '20/min',
+        # Booking verification / check-in at the gate, per vendor or admin
+        # account. Generous for a busy door, far too slow to enumerate IDs.
+        'checkin': '60/min',
+        # Excel exports (reports/), per vendor or admin account. Each one
+        # builds a whole workbook server-side; a person clicking Export never
+        # comes close, a script bulk-pulling data does.
+        'export': '20/min',
     },
 }
 
@@ -273,6 +283,16 @@ RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
 RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
 
+# Geocoding for the customer's manual location picker (venues/geocoding.py).
+# OFF unless a provider is chosen — the picker then offers GPS only, and no
+# coordinates are ever invented. 'nominatim' (OpenStreetMap; needs a contact
+# email per its usage policy) or 'google' (needs a server-side API key).
+GEOCODER_PROVIDER = os.environ.get('GEOCODER_PROVIDER', '')
+GEOCODER_COUNTRY = os.environ.get('GEOCODER_COUNTRY', 'in')
+GEOCODER_CONTACT_EMAIL = os.environ.get('GEOCODER_CONTACT_EMAIL', '')
+NOMINATIM_BASE_URL = os.environ.get('NOMINATIM_BASE_URL', 'https://nominatim.openstreetmap.org')
+GOOGLE_GEOCODING_API_KEY = os.environ.get('GOOGLE_GEOCODING_API_KEY', '')
+
 # Supabase Storage (venue photo uploads).
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
 SUPABASE_SERVICE_KEY = os.environ.get('SUPABASE_SERVICE_KEY', '')
@@ -294,6 +314,8 @@ LOGGING = {
         # Everything from our own apps at INFO level and above.
         'venues': {'handlers': ['console'], 'level': 'INFO'},
         'accounts': {'handlers': ['console'], 'level': 'INFO'},
+        # Booking verification / check-in audit lines (bookings/checkin.py).
+        'bookings.checkin': {'handlers': ['console'], 'level': 'INFO'},
     },
 }
 

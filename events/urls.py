@@ -10,8 +10,13 @@ from django.urls import path
 from . import customer_views, payments, public_views, vendor_views
 
 urlpatterns = [
-    # --- Vendor portal (Vendor JWT, owner-scoped) ---
+    # --- Vendor portal (Vendor JWT): submit events for admin approval ---
     path('vendors/me/events', vendor_views.VendorEventsView.as_view(), name='vendor-events'),
+    path(
+        'vendors/me/event-images',
+        vendor_views.VendorEventImageUploadView.as_view(),
+        name='vendor-event-images',
+    ),
     path(
         'vendors/me/events/<uuid:event_id>',
         vendor_views.VendorEventDetailView.as_view(),

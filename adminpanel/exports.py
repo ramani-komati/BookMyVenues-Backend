@@ -26,7 +26,6 @@ status (clock-based 'completed', 'expired') and the search haystack are then
 checked in Python with exactly the page's rules.
 """
 import datetime
-import io
 import re
 
 from bookings.models import Booking
@@ -139,9 +138,17 @@ def parse_filters(params):
 
 # --- matching ------------------------------------------------------
 
+# A 6-character booking ID ("K7M2QX") — shown in full, '#'-prefixed.
+_SHORT_ID = re.compile(r'[A-Z0-9]{6}')
+
+
 def booking_ref(row_id):
-    """The panel's short reference for an id (utils/format.js bookingRef)."""
+    """The panel's short reference for an id (utils/format.js bookingRef).
+    A 6-character booking ID — the shared format for venue bookings and event
+    orders alike — IS the reference, shown '#'-prefixed."""
     s = str(row_id or '')
+    if _SHORT_ID.fullmatch(s):
+        return f'#{s}'
     if len(s) <= 10:
         return s
     for prefix in ('bk_', 'wk_'):
@@ -149,10 +156,6 @@ def booking_ref(row_id):
             s = s[len(prefix):]
             break
     return '#' + s[-6:].upper()
-
-
-# A short event order id ("K7M2QX") — shown in full, '#'-prefixed.
-_SHORT_ID = re.compile(r'[A-Z0-9]{6}')
 
 
 def display_ref(row_id):
@@ -350,59 +353,17 @@ def matching_rows(filters, limit=MAX_EXPORT_ROWS):
 
 # --- workbook ------------------------------------------------------
 
-def _excel_value(value):
-    if isinstance(value, datetime.datetime):
-        # Excel has no time zones: write the IST wall-clock time.
-        return value.astimezone(IST).replace(tzinfo=None)
-    if value == '':
-        return None   # a truly blank cell, not an empty string
-    return value
-
-
 def build_workbook(rows):
     """The .xlsx bytes: bold frozen header row with filters, sized columns,
-    real dates and rupee amounts."""
-    from openpyxl import Workbook
-    from openpyxl.cell import WriteOnlyCell
-    from openpyxl.styles import Alignment, Font, PatternFill
-    from openpyxl.utils import get_column_letter
+    real dates and rupee amounts. Written by reports/workbook.py, the writer
+    every other dashboard export shares (it also keeps customer-typed text
+    from ever being read as a formula)."""
+    from reports.workbook import Sheet, build
 
-    wb = Workbook(write_only=True)
-    ws = wb.create_sheet('Bookings')
-    ws.freeze_panes = 'A2'
-    for index, (_header, width, _fmt) in enumerate(COLUMNS, start=1):
-        ws.column_dimensions[get_column_letter(index)].width = width
-    last_col = get_column_letter(len(COLUMNS))
-    ws.auto_filter.ref = f'A1:{last_col}{max(len(rows), 1) + 1}'
-
-    header_font = Font(bold=True, color='FFFFFF')
-    header_fill = PatternFill('solid', fgColor='1F3A5F')
-    header = []
-    for title, _width, _fmt in COLUMNS:
-        cell = WriteOnlyCell(ws, value=title)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = Alignment(vertical='center')
-        header.append(cell)
-    ws.append(header)
-
-    formats = [fmt for _h, _w, fmt in COLUMNS]
-    for row in rows:
-        values = list(row['cells']) + [row['createdAt']]
-        out = []
-        for value, number_format in zip(values, formats):
-            value = _excel_value(value)
-            if number_format and value is not None:
-                cell = WriteOnlyCell(ws, value=value)
-                cell.number_format = number_format
-                out.append(cell)
-            else:
-                out.append(value)
-        ws.append(out)
-
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    return buffer.getvalue()
+    return build([Sheet(
+        'Bookings', COLUMNS,
+        (list(row['cells']) + [row['createdAt']] for row in rows),
+    )])
 
 
 def export_filename(today=None):

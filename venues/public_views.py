@@ -17,6 +17,13 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from .geo import (
+    LocationParamError,
+    bounding_box,
+    coordinates_payload,
+    parse_location_params,
+    rank_by_distance,
+)
 from .models import Listing
 
 CACHE_SECONDS = 60
@@ -70,7 +77,9 @@ def _summary(listing, ratings=None):
     summary = {
         key: value
         for key, value in listing.record.items()
-        if key != 'detail'
+        # No phone numbers on public pages — the owner's number reaches only a
+        # customer whose booking is paid (bookings/contact.py).
+        if key not in ('detail', 'contactPhone')
     }
     from .taxonomy import canonical_category, sub_categories_for
 
@@ -87,6 +96,9 @@ def _summary(listing, ratings=None):
     summary['subCategories'] = sub_categories_for(listing)
     summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
+    # The venue's map pin (derived from the vendor's maps link), or null.
+    # Public on purpose: the venue page already embeds the same pin.
+    summary['coordinates'] = coordinates_payload(listing.latitude, listing.longitude)
     if ratings is not None:
         average, count = ratings.get(str(listing.id), (None, 0))
     else:
@@ -105,7 +117,16 @@ class PublicVenueListView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'public'
 
-    """GET /api/venues?q=&category=&locality=&pincode=&page=&limit=&sort="""
+    """GET /api/venues?q=&category=&locality=&pincode=&page=&limit=&sort=
+                      &lat=&lng=&radius=
+
+    Location (optional, never stored):
+      lat & lng       the customer's selected point. Each venue then carries
+                      `distanceKm` (null when the venue has no map pin).
+      sort=distance   ORDERS nearest first; venues without a pin go last.
+      radius=<km>     EXCLUDES venues farther than that — and venues without
+                      a pin, which cannot be shown to be inside it.
+    """
 
     permission_classes = [AllowAny]
 
@@ -130,9 +151,19 @@ class PublicVenueListView(APIView):
         if offset is not None and offset < 0:
             return _message('offset must be 0 or higher.', status.HTTP_400_BAD_REQUEST)
 
+        try:
+            origin, radius = parse_location_params(params)
+        except LocationParamError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+
         sort = params.get('sort', 'new')
-        if sort not in SORTS:
-            return _message('sort must be "popular" or "new".', status.HTTP_400_BAD_REQUEST)
+        if sort == 'distance':
+            if origin is None:
+                return _message('sort=distance needs lat and lng.', status.HTTP_400_BAD_REQUEST)
+        elif sort not in SORTS:
+            return _message(
+                'sort must be "popular", "new" or "distance".', status.HTTP_400_BAD_REQUEST
+            )
 
         queryset = Listing.objects.filter(status=Listing.Status.LIVE)
 
@@ -149,18 +180,44 @@ class PublicVenueListView(APIView):
         if params.get('pincode'):
             queryset = queryset.filter(pincode=params['pincode'])
 
-        queryset = queryset.order_by(SORTS[sort])
-
-        total = queryset.count()
+        # Distance sort keeps "newest first" as its tie-break and for venues
+        # without a pin, so the order is always deterministic.
+        queryset = queryset.order_by(SORTS.get(sort, SORTS['new']))
         start = offset if offset is not None else (page - 1) * limit
-        rows = list(queryset[start:start + limit])
+
+        distances = {}
+        if origin is not None and (radius is not None or sort == 'distance'):
+            # Rank on ids + coordinates only, then load just the page's rows.
+            if radius is not None:
+                min_lat, max_lat, min_lng, max_lng = bounding_box(*origin, radius)
+                queryset = queryset.filter(latitude__range=(min_lat, max_lat))
+                if min_lng is not None:
+                    queryset = queryset.filter(longitude__range=(min_lng, max_lng))
+            keys, distances = rank_by_distance(
+                list(queryset.values_list('pk', 'latitude', 'longitude')),
+                origin, radius, nearest_first=sort == 'distance',
+            )
+            total = len(keys)
+            page_keys = keys[start:start + limit]
+            by_pk = Listing.objects.in_bulk(page_keys)
+            rows = [by_pk[key] for key in page_keys if key in by_pk]
+        else:
+            total = queryset.count()
+            rows = list(queryset[start:start + limit])
 
         from bookings.ratings import venue_ratings_map
+        from .geo import distance_km
         ratings = venue_ratings_map(rows)   # two queries for the whole page
-        return Response({
-            'venues': [_summary(row, ratings) for row in rows],
-            'total': total,
-        })
+        venues = []
+        for row in rows:
+            summary = _summary(row, ratings)
+            if origin is not None:
+                summary['distanceKm'] = (
+                    distances[row.pk] if row.pk in distances
+                    else distance_km(origin, row.latitude, row.longitude)
+                )
+            venues.append(summary)
+        return Response({'venues': venues, 'total': total})
 
 
 def detail_cache_keys(listing):
@@ -218,6 +275,10 @@ class PublicVenueDetailView(APIView):
             record.get('category') or listing.category
         )
         record['subCategories'] = sub_categories_for(listing)
+        # Same pin the list rows carry, so the page can show "x km away"
+        # from the customer's selected location (computed in the browser —
+        # this cached response never depends on who is asking).
+        record['coordinates'] = coordinates_payload(listing.latitude, listing.longitude)
         average, count = venue_rating(listing)
         if average is not None:
             record['rating'] = average
@@ -236,7 +297,17 @@ class PublicVenueDetailView(APIView):
         # Copy before writing: `detail` is still the dict loaded from the row.
         detail = dict(record.get('detail') or {})
         detail['partPayment'] = part
+        # The owner's phone is released only to a customer whose booking is
+        # PAID (bookings/contact.py, in their booking history) — never on this
+        # public, unauthenticated page. The customer site never displayed it.
+        detail.pop('contactPhone', None)
+        record.pop('contactPhone', None)
         record['detail'] = detail
+        # The vendor's opening hours, upcoming closures and booking
+        # instructions (venues/business.py); null when never configured, i.e.
+        # the default 6 AM – midnight. Saving them invalidates this cache.
+        from .business import public_schedule
+        record['business'] = public_schedule(listing)
 
         cache.set(cache_key, record, CACHE_SECONDS)
         return Response(record)

@@ -163,7 +163,8 @@ class CreateBookingTests(BookingTestBase):
         self.assertEqual(booking['venueName'], 'Grand Palace Hall')
         self.assertEqual(booking['customer'], 'Asha')
         self.assertEqual(booking['phone'], '9000000002')
-        self.assertTrue(booking['id'].startswith('bk_'))
+        # The platform-wide 6-character booking ID (bookings/booking_codes.py).
+        self.assertRegex(booking['id'], r'^[A-Z0-9]{6}$')
 
     def test_amount_with_addons(self):
         # The frontend sends each add-on's price; the server sums them.
@@ -1296,9 +1297,14 @@ class RatingTests(BookingTestBase):
     def setUp(self):
         super().setUp()
         yesterday = today_ist() - datetime.timedelta(days=1)
+        # Ratable bookings are CONFIRMED with a verified Razorpay payment —
+        # only those may be rated (bookings/ratings.py). The payment ids here
+        # stand for that verified capture; RatingEligibilityTests covers the
+        # unpaid, cancelled, failed and refunded refusals.
         self.done = Booking.objects.create(
             listing=self.listing, user=self.customer, date=yesterday,
             slots=['10:00 – 11:00'], amount=620, venue_name='Grand Palace Hall',
+            razorpay_payment_id='pay_rating_done',
         )
 
     def rate(self, stars=4, booking_id=None, venue_id=None):
@@ -1318,7 +1324,7 @@ class RatingTests(BookingTestBase):
         other = Booking.objects.create(
             listing=self.listing, user=self.customer,
             date=today_ist() - datetime.timedelta(days=2),
-            slots=['12:00 – 13:00'], amount=620,
+            slots=['12:00 – 13:00'], amount=620, razorpay_payment_id='pay_rating_other',
         )
         response = self.rate(stars=5, booking_id=other.id)
         self.assertEqual(response.data, {'rating': 4.5, 'count': 2})
@@ -1356,7 +1362,7 @@ class RatingTests(BookingTestBase):
         on_sibling = Booking.objects.create(
             listing=sibling, user=self.customer,
             date=today_ist() - datetime.timedelta(days=1),
-            slots=['12:00 – 13:00'], amount=620,
+            slots=['12:00 – 13:00'], amount=620, razorpay_payment_id='pay_rating_sibling',
         )
         response = self.rate(stars=5, booking_id=on_sibling.id)  # posted to BASE id
         self.assertEqual(response.status_code, 201)
@@ -1414,6 +1420,7 @@ class RatingTests(BookingTestBase):
             listing=sibling, user=long_name,
             date=today_ist() - datetime.timedelta(days=2),
             slots=['12:00 – 13:00'], amount=620, unit_label='Screen 2',
+            razorpay_payment_id='pay_rating_screen2',
         )
         self.client.force_authenticate(user=long_name)
         self.client.post(

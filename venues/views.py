@@ -585,6 +585,14 @@ class DraftPhotoUploadView(APIView):
                 status.HTTP_400_BAD_REQUEST,
             )
 
+        # Pixel checks (venues/image_specs.py): refuse a photo too small to
+        # stay sharp on a card; the shape only ever produces warnings.
+        from .image_specs import listing_image_check
+        data = file.read()
+        problem, image_info = listing_image_check(data, 'photo')
+        if problem:
+            return _message(problem, status.HTTP_400_BAD_REQUEST)
+
         photos = draft.data.setdefault(
             'photos', {'venuePhotos': [], 'serviceImages': []}
         )
@@ -601,7 +609,7 @@ class DraftPhotoUploadView(APIView):
         path = f'{draft.id}/{gallery}/{photo_id}.{extension}'
 
         try:
-            url = upload_photo(path, file.read(), file.content_type)
+            url = upload_photo(path, data, file.content_type)
         except StorageError:
             logger.exception('Photo upload failed for draft %s', draft.id)
             return _message(
@@ -619,6 +627,8 @@ class DraftPhotoUploadView(APIView):
             'draftId': str(draft.id),
             'gallery': gallery,
             'photo': {'id': photo_id, 'name': file.name, 'url': url},
+            # Additive: the stored photo's size and any shape advice.
+            'image': image_info,
             'completion': compute_completion(draft)[0],
             'savedAt': draft.updated_at,
         }, status=status.HTTP_201_CREATED)

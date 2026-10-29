@@ -114,9 +114,13 @@ def notify_booking_confirmed(booking):
             booking_id=booking.id, customer=who, phone=booking.phone,
             is_vendor=True,
         )
-        sent |= _send('email', vendor.email or '', text,
+        # The vendor's alert preferences and business contact
+        # (accounts/vendor_settings.py) — '' for a channel switched off.
+        from accounts.vendor_settings import alert_targets
+        vendor_email, vendor_phone = alert_targets(vendor, 'booking')
+        sent |= _send('email', vendor_email, text,
                       subject=subject, html=html)
-        sent |= _send('sms', vendor.phone,
+        sent |= _send('sms', vendor_phone,
                       f'New booking: {booking.venue_name}, {when}, '
                       f'{who}. ID {booking.id}')
     return sent

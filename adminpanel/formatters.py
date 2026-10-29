@@ -17,6 +17,7 @@ from django.utils import timezone
 from accounts.models import User, vendor_accounts_q
 from bookings.models import Booking, Rating
 from bookings.part_payment import read_config as read_part_payment
+from bookings.payment_record import payment_time_fields
 from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 from venues.completion import compute_completion
 from venues.models import Listing, VenueDraft
@@ -340,6 +341,12 @@ def booking_row(booking, today=None):
         # `status` derives 'completed' from the clock, this never guesses.
         'paymentStatus': booking.status,
         'razorpayPaymentId': booking.razorpay_payment_id,
+        # Booking Info (the expanded row): the invoice number, the gateway
+        # order, and when the payment actually succeeded — distinct from
+        # createdAt above. Event orders carry the same keys (as_record).
+        'razorpayOrderId': booking.razorpay_order_id,
+        'invoiceNumber': booking.invoice_number or None,
+        **payment_time_fields(booking),
         # An unpaid hold past its window is an abandoned checkout.
         'holdExpired': booking.hold_expired,
         'removable': blocked is None,

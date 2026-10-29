@@ -1,15 +1,22 @@
 """
 Booking model — one confirmed reservation of time slots at a venue.
 """
-import uuid
-
 from django.conf import settings
 from django.db import models
 
+from .booking_codes import insert_with_code, new_code
+from .invoices import insert_with_invoice
+from .payment_record import payment_time_fields
+
 
 def make_booking_id():
-    """Contract-style ids, e.g. 'bk_3f8a92c1d04e'."""
-    return 'bk_' + uuid.uuid4().hex[:12]
+    """A new venue booking's ID: the platform-wide 6-character booking ID
+    ("K7M2QX") that event tickets use too — see bookings/booking_codes.py.
+
+    Bookings made before this keep their original 'bk_3f8a92c1d04e' IDs. The
+    function keeps its name because the migrations reference it as the
+    field default."""
+    return new_code()
 
 
 class Booking(models.Model):
@@ -126,7 +133,34 @@ class Booking(models.Model):
     # Set by the admin Refunds panel when issuing a refund.
     refund_reason = models.CharField(max_length=200, blank=True, default='')
     refund_amount = models.PositiveIntegerField(null=True, blank=True)
+    # Entry at the venue. Written ONCE, by bookings/checkin.py, under a row
+    # lock plus a conditional UPDATE — so two simultaneous check-ins can never
+    # both succeed. checked_in_by is the vendor account that admitted the
+    # customer; SET_NULL keeps the timestamp if that account is ever deleted.
+    checked_in_at = models.DateTimeField(null=True, blank=True)
+    checked_in_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='checked_in_bookings',
+    )
     created_at = models.DateTimeField(auto_now_add=True)
+    # The booking's invoice number ("INV-2627-000123"): issued ONCE by
+    # bookings/invoices.py when the row is first inserted, from the series
+    # event orders share, and never changed. It says the booking exists — NOT
+    # that it was paid (that is status + paid_at). Nullable only so the
+    # column could be added to the live table; the 0022 data migration
+    # numbered every existing row.
+    invoice_number = models.CharField(
+        max_length=24, unique=True, null=True, blank=True, editable=False
+    )
+    # When the SUCCESSFUL payment happened — never the creation time — and
+    # where that time came from ('gateway' | 'checkout' | 'webhook'). See
+    # bookings/payment_record.py. Empty for walk-ins, pay-at-venue, unpaid
+    # rows and bookings paid before this was recorded.
+    paid_at = models.DateTimeField(null=True, blank=True)
+    paid_at_source = models.CharField(max_length=10, blank=True, default='')
 
     class Meta:
         ordering = ['-created_at']
@@ -196,6 +230,26 @@ class Booking(models.Model):
         return rating.stars if rating else None
 
     @property
+    def user_review(self):
+        """The customer's own written review on this booking ('' or None)."""
+        rating = getattr(self, 'rating', None)
+        return (rating.review or None) if rating else None
+
+    @property
+    def rating_status(self):
+        """See bookings.ratings.booking_rating_status."""
+        from .ratings import booking_rating_status
+        return booking_rating_status(self)
+
+    def rating_fields(self):
+        """The rating keys the CUSTOMER's booking history adds to as_record:
+        the server's answer to "may I rate this now?" — 'eligible' | 'rated'
+        | 'not_completed' | 'not_eligible' — plus the review already given.
+        The customer app prompts on 'eligible' only, never on its own clock.
+        Kept out of as_record so vendor/admin lists don't pay for it."""
+        return {'ratingStatus': self.rating_status, 'userReview': self.user_review}
+
+    @property
     def online_amount(self):
         """What the gateway actually charged. Pre-part-payment bookings have
         no pay_now, and for those the online charge WAS the full amount."""
@@ -214,6 +268,10 @@ class Booking(models.Model):
             'phone': self.phone or None,
             'customer': self.customer_name,
             'venueName': self.venue_name,
+            # The listing booked (a unit's own listing for pitch/screen
+            # bookings). Lets the vendor dashboard filter by venue on the id
+            # rather than the name frozen at booking time.
+            'listingId': str(self.listing_id) if self.listing_id else None,
             'category': self.category,
             'location': self.location,
             'image': self.image,
@@ -238,31 +296,158 @@ class Booking(models.Model):
             'userRating': self.user_rating,
             'collected': self.collected,
             'collectedAt': self.collected_at.isoformat() if self.collected_at else None,
+            'checkedInAt': self.checked_in_at.isoformat() if self.checked_in_at else None,
             'createdAt': self.created_at.isoformat(),
+            # Booking Info only (the apps keep them off list rows). as_record
+            # is served solely to the booking's own customer, its venue's
+            # vendor and the admin — never on a public endpoint.
+            'invoiceNumber': self.invoice_number or None,
+            **payment_time_fields(self),
         }
+
+    def __init__(self, *args, **kwargs):
+        # Rows loaded from the database arrive positionally (Model.from_db);
+        # only a brand-new booking built without an explicit id gets a
+        # GENERATED one — the only kind save() may swap on a clash.
+        generated = not args and 'id' not in kwargs and 'pk' not in kwargs
+        super().__init__(*args, **kwargs)
+        self._generated_id = generated
+
+    def save(self, *args, **kwargs):
+        """A new booking is inserted under a platform-unique 6-character ID
+        (unique across venue bookings AND event orders, enforced by
+        BookingCode) and given its invoice number in the same transaction
+        (bookings/invoices.py). Updates save exactly as before — an existing
+        invoice number is never replaced."""
+        if not self._state.adding:
+            return super().save(*args, **kwargs)
+        return insert_with_invoice(self, lambda: insert_with_code(
+            self, 'venue', lambda: super(Booking, self).save(*args, **kwargs)
+        ))
 
     def __str__(self):
         return f'{self.id} — {self.venue_name} on {self.date}'
+
+
+class BookingCode(models.Model):
+    """Every 6-character booking ID ever issued, across ALL booking types.
+
+    Venue bookings and event ticket orders live in separate tables, so their
+    own primary keys cannot stop the two from issuing the same ID. This one
+    table can: `code` is its primary key, and each new booking / order
+    inserts its code here in the same savepoint as itself
+    (booking_codes.insert_with_code). A clash fails the insert and a fresh
+    code is drawn. Nothing reads it for display — it is purely the
+    uniqueness guarantee.
+    """
+
+    code = models.CharField(max_length=6, primary_key=True)
+    kind = models.CharField(max_length=10)   # 'venue' | 'event'
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f'{self.code} ({self.kind})'
+
+
+class InvoiceSequence(models.Model):
+    """The invoice-number counter: one row per financial year ('2627' =
+    1 Apr 2026 – 31 Mar 2027 IST), holding the last serial issued.
+
+    Venue bookings and event orders share it, so the platform has ONE
+    invoice series. bookings/invoices.py increments it with a conditional
+    UPDATE in the same transaction as the booking insert — the row lock that
+    UPDATE takes is what stops two simultaneous bookings from getting the
+    same number. Nothing else writes it.
+    """
+
+    financial_year = models.CharField(max_length=4, primary_key=True)
+    last_number = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f'FY {self.financial_year}: {self.last_number}'
 
 
 class Rating(models.Model):
     """One customer rating for one completed booking (1–5 stars).
 
     The OneToOne on booking enforces "one rating per booking" at the DB level
-    — a double-submit can never skew the average."""
+    — a double-submit can never skew the average.
+
+    The SAME table rates event tickets: a row is either a venue rating
+    (booking + listing) or an event rating (event_order + event), never both
+    — the check constraint below says so. Every rating written before events
+    could be rated is a venue rating, so existing rows satisfy it unchanged.
+    One table means one set of rules (bookings/ratings.py) for both kinds.
+    """
 
     booking = models.OneToOneField(
-        Booking, on_delete=models.CASCADE, related_name='rating'
+        Booking, null=True, blank=True, on_delete=models.CASCADE, related_name='rating'
     )
     listing = models.ForeignKey(
-        'venues.Listing', on_delete=models.CASCADE, related_name='ratings'
+        'venues.Listing', null=True, blank=True,
+        on_delete=models.CASCADE, related_name='ratings',
+    )
+    # Event tickets. SET_NULL on the event, like EventOrder.event: a genuine
+    # review must not vanish if an event row is ever hard-deleted.
+    event_order = models.OneToOneField(
+        'events.EventOrder', null=True, blank=True,
+        on_delete=models.CASCADE, related_name='rating',
+    )
+    event = models.ForeignKey(
+        'events.Event', null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='ratings',
     )
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL, null=True, blank=True,
         on_delete=models.SET_NULL, related_name='ratings',
     )
     stars = models.PositiveSmallIntegerField()
+    # Optional written review. Blank for every rating made before reviews
+    # existed (stars only) and whenever the customer leaves it empty.
+    review = models.TextField(blank=True, default='')
+    # Super-admin moderation: a hidden rating stays in the table (it is a
+    # real customer's submission) but leaves every average, count and public
+    # review list. Set and cleared only by AdminRatingDetailView.
+    hidden_at = models.DateTimeField(null=True, blank=True)
+    hidden_reason = models.CharField(max_length=200, blank=True, default='')
+    # The venue / event owner's public reply (bookings/ratings.py). The
+    # vendor can write, edit or remove THEIR reply — never the customer's
+    # stars or words. A super admin can hide a reply (reply_hidden_at) the
+    # same way they hide a review; a hidden reply stays hidden until the
+    # admin restores it.
+    reply = models.TextField(blank=True, default='')
+    replied_at = models.DateTimeField(null=True, blank=True)
+    reply_hidden_at = models.DateTimeField(null=True, blank=True)
+    reply_hidden_reason = models.CharField(max_length=200, blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    # The longest written review accepted (characters).
+    MAX_REVIEW_LENGTH = 1000
+    MAX_REPLY_LENGTH = 600
+
+    @property
+    def public_reply(self):
+        """{text, repliedAt} for public lists, or None (none / hidden)."""
+        if not self.reply or self.reply_hidden_at is not None:
+            return None
+        return {
+            'text': self.reply,
+            'repliedAt': self.replied_at.isoformat() if self.replied_at else None,
+        }
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=(
+                    models.Q(booking__isnull=False, event_order__isnull=True)
+                    | models.Q(booking__isnull=True, event_order__isnull=False)
+                ),
+                name='rating_is_for_a_booking_or_a_ticket',
+            ),
+        ]
 
     def __str__(self):
+        if self.event_order_id:
+            return f'{self.stars}★ for event {self.event_id} ({self.event_order_id})'
         return f'{self.stars}★ for {self.listing_id} ({self.booking_id})'

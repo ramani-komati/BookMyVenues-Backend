@@ -114,6 +114,38 @@ class User(AbstractBaseUser, PermissionsMixin):
         return f'{self.name} ({self.phone})'
 
 
+class VendorSettings(models.Model):
+    """A vendor's business contact details and alert preferences
+    (GET/PATCH /api/vendors/me/settings — accounts/vendor_settings.py).
+
+    Separate from User so the sign-in identity (phone) and the admin-owned
+    fields (role, KYC, active) are never in reach of this form. A missing row
+    means the defaults below — every alert on, sent to the account's own
+    email and phone — which is exactly how notifications worked before.
+    """
+
+    user = models.OneToOneField(
+        User, on_delete=models.CASCADE, related_name='vendor_settings'
+    )
+    business_name = models.CharField(max_length=150, blank=True, default='')
+    # Where booking alerts go, when set; else the account email / phone.
+    business_phone = models.CharField(
+        max_length=10, blank=True, default='', validators=[phone_validator]
+    )
+    business_email = models.EmailField(blank=True, default='')
+    business_address = models.CharField(max_length=300, blank=True, default='')
+
+    notify_booking_email = models.BooleanField(default=True)
+    notify_booking_sms = models.BooleanField(default=True)
+    notify_ticket_email = models.BooleanField(default=True)
+    notify_ticket_sms = models.BooleanField(default=True)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f'Vendor settings of {self.user_id}'
+
+
 def vendor_accounts_q():
     """Q filter matching every account with vendor access (role or flag)."""
     from django.db.models import Q
