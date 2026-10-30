@@ -9,8 +9,9 @@ Custom sub-categories (venues/subcategories.py) — the registration wizards'
     that is really a built-in one is never stored; empty / junk names and
     categories without a sub-category list are refused
   * a rejected name cannot be re-submitted by a vendor
-  * the admin endpoints list, add (approved at once, duplicates refused) and
-    approve / reject — every write audited
+  * the admin endpoints list (filter by status / category), add (approved at
+    once, duplicates refused), approve / reject and correct a name's
+    spelling (never change the name itself) — every write audited
   * customers and other vendors only ever see APPROVED names: /api/config,
     /api/subcategories, the venue list rows and the venue page
   * existing venues and the built-in lists are untouched
@@ -278,6 +279,65 @@ class AdminEndpointTests(_Base):
         self.assertTrue(AuditEntry.objects.filter(action='Updated sub-category', change__contains='not a sport').exists())
         self.assertEqual(self.admin_client.patch(url, {'status': 'nope'}, format='json').status_code, 400)
 
+    def test_list_filters_by_status_and_category(self):
+        ensure('Play zone', 'Cricket Nets', user=self.vendor)
+        ensure('Play zone', 'Archery', by_admin=True, reviewer='Anita')
+        ensure('Playstation', 'VR Racing', user=self.vendor)
+        everything = self.admin_client.get('/api/admin/subcategories').data
+        self.assertEqual(len(everything['subCategories']), 3)
+        self.assertEqual(everything['counts'], {'approved': 1, 'pending': 2, 'rejected': 0})
+        pending = self.admin_client.get('/api/admin/subcategories?status=pending').data['subCategories']
+        self.assertEqual(sorted(r['name'] for r in pending), ['Cricket Nets', 'VR Racing'])
+        # The wizard's venue type and the stored category both work.
+        for category in ('Playzone', 'Play zone'):
+            rows = self.admin_client.get(f'/api/admin/subcategories?category={category}').data['subCategories']
+            self.assertEqual(sorted(r['name'] for r in rows), ['Archery', 'Cricket Nets'])
+        both = self.admin_client.get('/api/admin/subcategories?status=pending&category=Play zone').data
+        self.assertEqual([r['name'] for r in both['subCategories']], ['Cricket Nets'])
+        self.assertEqual(self.admin_client.get('/api/admin/subcategories?status=nope').status_code, 400)
+
+    def test_admin_corrects_the_spelling_of_a_name(self):
+        row, _ = ensure('Play zone', 'cricket nets', user=self.vendor)
+        url = f'/api/admin/subcategories/{row.pk}'
+        response = self.admin_client.patch(url, {'name': ' Cricket  Nets '}, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data['subCategory']['name'], 'Cricket Nets')
+        row.refresh_from_db()
+        # The spelling only — still pending, same duplicate key.
+        self.assertEqual((row.name, row.status, row.name_key), ('Cricket Nets', 'pending', name_key('cricket nets')))
+        self.assertTrue(AuditEntry.objects.filter(
+            action='Updated sub-category', change='name: cricket nets → Cricket Nets').exists())
+
+    def test_a_respelt_name_reaches_venues_already_using_it(self):
+        row, _ = ensure('Play zone', 'cricket nets', user=self.vendor)
+        listing_id = uuid.uuid4()
+        Listing.objects.create(
+            id=listing_id, vendor=self.vendor, slug=f'arena-{listing_id.hex[:6]}', name='Arena',
+            category='Play zone', status=Listing.Status.LIVE,
+            record={'id': str(listing_id), 'name': 'Arena', 'category': 'Play zone', 'price': '800',
+                    'detail': {'primaryCategory': 'Playzone', 'customSubCategories': ['cricket nets'],
+                               'sports': [{'name': 'cricket nets', 'price': '800', 'units': 1}]}},
+        )
+        self.admin_client.patch(f'/api/admin/subcategories/{row.pk}',
+                                {'name': 'Cricket Nets', 'status': 'approved'}, format='json')
+        detail = APIClient().get(f'/api/venues/{listing_id}').data
+        self.assertEqual(detail['detail']['customSubCategories'], ['Cricket Nets'])
+        self.assertTrue(AuditEntry.objects.filter(
+            change='name: cricket nets → Cricket Nets · status: pending → approved').exists())
+
+    def test_an_edit_that_changes_the_name_itself_is_refused(self):
+        row, _ = ensure('Play zone', 'Cricket Nets', user=self.vendor)
+        url = f'/api/admin/subcategories/{row.pk}'
+        renamed = self.admin_client.patch(url, {'name': 'Bowling Nets'}, format='json')
+        self.assertEqual((renamed.status_code, renamed.data['code']), (400, 'NAME_CHANGED'))
+        self.assertEqual(self.admin_client.patch(url, {'name': '  '}, format='json').status_code, 400)
+        self.assertEqual(self.admin_client.patch(url, {}, format='json').status_code, 400)
+        self.assertEqual(self.admin_client.patch('/api/admin/subcategories/999999', {'status': 'approved'},
+                                                 format='json').status_code, 404)
+        row.refresh_from_db()
+        self.assertEqual((row.name, row.status), ('Cricket Nets', 'pending'))
+        self.assertFalse(AuditEntry.objects.filter(action='Updated sub-category').exists())
+
     def test_admin_endpoints_are_admin_only(self):
         self.assertIn(self.client.get('/api/admin/subcategories').status_code, (401, 403))
         self.assertIn(
@@ -285,6 +345,13 @@ class AdminEndpointTests(_Base):
             .status_code, (401, 403),
         )
         self.assertEqual(CustomSubCategory.objects.count(), 0)
+        row, _ = ensure('Play zone', 'Cricket Nets', user=self.vendor)
+        self.assertIn(
+            self.client.patch(f'/api/admin/subcategories/{row.pk}', {'status': 'approved'}, format='json')
+            .status_code, (401, 403),
+        )
+        row.refresh_from_db()
+        self.assertEqual(row.status, 'pending')
 
 
 class CustomerVisibilityTests(_Base):

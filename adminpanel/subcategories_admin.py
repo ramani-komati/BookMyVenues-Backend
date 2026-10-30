@@ -4,13 +4,15 @@ the Register Venues form's option lists).
 
     GET   /api/admin/subcategories?status=&category=   every name, any status
     POST  /api/admin/subcategories   {category, name}  add one — approved at once
-    PATCH /api/admin/subcategories/<id>  {status: approved|rejected|pending, reason?}
+    PATCH /api/admin/subcategories/<id>  {status?: approved|rejected|pending, name?, reason?}
+          (name: a spelling fix only — same duplicate key, see the view)
 
 Vendors add names through the registration wizard's "Others" option; those
 wait here as PENDING. Every rule (tidying, duplicates, which categories take
 custom names) is venues/subcategories.py — this file is only the admin's
 door to it. Every write is audited.
 """
+from django.db import transaction
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.response import Response
@@ -102,19 +104,49 @@ class AdminSubCategoryDetailView(_AdminWriteView):
         if row is None:
             return detail('Sub-category not found.', status.HTTP_404_NOT_FOUND)
         body = self._body(request)
+        renaming = 'name' in body
         new_status = str(body.get('status') or '').strip()
-        if new_status not in _STATUSES:
+        if (new_status and new_status not in _STATUSES) or (not new_status and not renaming):
             return detail('status must be pending, approved or rejected.', status.HTTP_400_BAD_REQUEST)
-        before = row.status
-        if new_status != before:
+
+        # A name is only RE-SPELT ("cricket nets" → "Cricket Nets"): venues
+        # hold the names they declared and are matched to this row by
+        # name_key, so a different key would silently drop the name from
+        # every venue using it. A genuinely new name is added (POST) instead.
+        new_name = row.name
+        if renaming:
+            try:
+                new_name = clean_name(body.get('name'))
+            except SubCategoryError as error:
+                return detail(str(error), status.HTTP_400_BAD_REQUEST)
+            if name_key(new_name) != row.name_key:
+                return Response(
+                    {'detail': 'Only the spelling, capitals or punctuation of a name can be edited — '
+                               'venues already using it are matched by the name. Add a new '
+                               'sub-category instead.',
+                     'code': 'NAME_CHANGED'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        before_status, before_name = row.status, row.name
+        changes, fields = [], []
+        if new_name != before_name:
+            row.name = new_name
+            fields.append('name')
+            changes.append(f'name: {before_name} → {new_name}')
+        if new_status and new_status != before_status:
             row.status = new_status
             row.reviewed_by = _admin_name(request)
             row.reviewed_at = timezone.now()
-            row.save(update_fields=['status', 'reviewed_by', 'reviewed_at', 'updated_at'])
+            fields += ['status', 'reviewed_by', 'reviewed_at']
+            changes.append(f'status: {before_status} → {new_status}')
+        if fields:
+            with transaction.atomic():
+                row.save(update_fields=[*fields, 'updated_at'])
+                record_audit(
+                    request, 'Updated sub-category', f'{row.category} → {row.name}',
+                    ' · '.join(changes), target_id=str(row.pk),
+                    reason=body.get('reason'),
+                )
             invalidate()
-            record_audit(
-                request, 'Updated sub-category', f'{row.category} → {row.name}',
-                f'status: {before} → {new_status}', target_id=str(row.pk),
-                reason=body.get('reason'),
-            )
         return Response({'subCategory': row_payload(row, for_admin=True)})
