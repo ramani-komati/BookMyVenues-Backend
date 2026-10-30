@@ -27,6 +27,9 @@ adds optional keys to each record:
     featuredPromotion  appears in Featured Promotions (default True)
     heroOrder / promoOrder   position in each (default: list order)
     image / imageMobile / imageAlt   uploaded artwork (desktop + optional phone)
+    imagePosition / imageMobilePosition   which part of the art stays in view
+                       when a frame must crop it (banners with words drawn
+                       over the art): one of IMAGE_POSITIONS, default centre
     showText / showCode      draw the title/details and the code over the image
     ctaLabel / ctaUrl        button text and destination
     category           a customer nav category the promotion is aimed at —
@@ -248,6 +251,9 @@ _TEXT_LIMITS = {
     'title': 120, 'text': 240, 'terms': 600, 'imageAlt': 200, 'ctaLabel': 40,
 }
 _SAFE_IMAGE_PREFIXES = ('https://', 'http://', '/')
+# The focal points an admin can pick for each artwork (CSS object-position
+# keywords — the customer site and the panel preview use them verbatim).
+IMAGE_POSITIONS = ('center', 'top', 'bottom', 'left', 'right')
 # Payment statuses where the money was captured — a booking in one of these
 # that used a code is part of that promotion's redemption history.
 REDEMPTION_STATUSES = ('confirmed', 'refund_pending', 'refunded')
@@ -310,6 +316,9 @@ def normalize_banner(raw, index):
     )
     b['heroOrder'] = _int(raw.get('heroOrder'), index)
     b['promoOrder'] = _int(raw.get('promoOrder'), index)
+    for key in ('imagePosition', 'imageMobilePosition'):
+        value = str(raw.get(key) or '').strip().lower()
+        b[key] = value if value in IMAGE_POSITIONS else 'center'
     return b
 
 
@@ -425,6 +434,7 @@ _BANNER_FIELDS = (
     'imageWidth', 'imageHeight', 'imageMobileWidth', 'imageMobileHeight',
     'showText', 'showCode', 'ctaLabel', 'ctaUrl', 'category', 'terms',
     'published', 'showInHero', 'featuredPromotion',
+    'imagePosition', 'imageMobilePosition',
 )
 _BOOL_FIELDS = ('showText', 'showCode', 'published', 'showInHero', 'featuredPromotion')
 
@@ -450,6 +460,11 @@ def clean_banner(body, current, others, redemptions):
     for key in _BOOL_FIELDS:
         if key in body and not isinstance(body[key], bool):
             raise BannerError(f'{key} must be true or false.')
+    # Checked on the RAW value: normalize_banner reads anything unknown as
+    # 'center', which would hide a bad request instead of refusing it.
+    for key in ('imagePosition', 'imageMobilePosition'):
+        if key in body and str(body[key] or 'center').strip().lower() not in IMAGE_POSITIONS:
+            raise BannerError(f'{key} must be one of: {", ".join(IMAGE_POSITIONS)}.')
 
     b = normalize_banner(merged, 0)
     if not b['title']:

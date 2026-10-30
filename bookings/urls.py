@@ -5,7 +5,7 @@ from django.urls import path
 
 from reports.views import VendorExportView
 
-from . import checkin_views, payments, ratings, vendor_views, views
+from . import checkin_views, history, hold_views, payments, ratings, vendor_views, views
 
 urlpatterns = [
     # Vendor portal (contract 3.4, 3.7)
@@ -64,7 +64,13 @@ urlpatterns = [
     path('payments/order', payments.PaymentOrderView.as_view(), name='payment-order'),
     path('payments/verify', payments.PaymentVerifyView.as_view(), name='payment-verify'),
     path('payments/webhook', payments.RazorpayWebhookView.as_view(), name='payment-webhook'),
+    # The 5-minute slot hold taken at checkout (bookings/holds.py).
+    path('bookings/holds', hold_views.HoldCreateView.as_view(), name='booking-holds'),
+    path('bookings/holds/<str:hold_id>', hold_views.HoldDetailView.as_view(), name='booking-hold'),
     path('users/me/bookings', views.MyBookingsView.as_view(), name='my-bookings'),
+    # ONE list of venue bookings, memberships and event tickets, newest
+    # booking first (bookings/history.py).
+    path('users/me/booking-history', history.MyBookingHistoryView.as_view(), name='my-booking-history'),
     path(
         'users/me/bookings/<str:booking_id>',
         views.CancelBookingView.as_view(),

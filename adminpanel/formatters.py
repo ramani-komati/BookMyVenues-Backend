@@ -173,11 +173,20 @@ def venue_row(listing, ctx=None):
         bookings = list(listing.bookings.exclude(status='removed'))
         average, _count = venue_rating(listing)
     district, city = _district_and_city(listing, ctx)
+    from venues.taxonomy import category_group
+    from venues.timings import timings_label, validate_timings, TimingsError
+    try:
+        timings = validate_timings(detail.get('timings'))
+    except TimingsError:
+        timings = None
+    category = listing.category or record.get('category') or ''
     return {
         'id': str(listing.id),
         'name': listing.name or record.get('name') or '',
         'vendor': listing.vendor.name or listing.vendor.phone,
-        'category': listing.category or record.get('category') or '',
+        'category': category,
+        # The primary category it browses under ('celebrate', 'sports', …).
+        'categoryGroup': category_group(category),
         'city': city,
         'district': district,
         'area': listing.locality or record.get('locality') or '',
@@ -192,7 +201,11 @@ def venue_row(listing, ctx=None):
         # rather than a shape either of them has to defend against.
         'partPayment': read_part_payment(record),
         'packages': str(len(detail.get('packages') or [])),
-        'hours': '06:00 – 24:00',
+        # The venue's saved Venue Timings (was a fixed '06:00 – 24:00' for
+        # every venue). Weekly hours set under Business controls are more
+        # specific and are shown to the vendor there.
+        'hours': timings_label(timings) or 'Not set (bookable 6:00 AM – 12:00 AM)',
+        'timings': timings,
         'addedOn': listing.created_at.strftime('%b %Y'),
         'deletedAt': listing.deleted_at.isoformat() if listing.deleted_at else None,
         'deletionRequestedAt': (
@@ -349,11 +362,26 @@ def booking_row(booking, today=None):
         **payment_time_fields(booking),
         # An unpaid hold past its window is an abandoned checkout.
         'holdExpired': booking.hold_expired,
+        # Which kind of unpaid row: 'held' (5-minute slot hold, checkout
+        # open), 'payment_pending' (payment started) or 'expired' — and when
+        # the hold ends (bookings/holds.py). Null on every other row.
+        'holdState': booking.hold_state,
+        'holdExpiresAt': (
+            booking.hold_expiry.isoformat()
+            if booking.status == 'payment_pending' and booking.hold_expiry else None
+        ),
+        # Booking status and payment status as two answers (the badges the
+        # Bookings page shows); `status`/`paymentStatus` above are unchanged.
+        **booking.state_fields(),
         'removable': blocked is None,
         'removeBlockedReason': blocked[1] if blocked else '',
         'slotsDesc': ', '.join(booking.slots),
         'slotsAmt': _rupees(booking.amount),
         'addons': ', '.join(str(a.get('name', '')) for a in (booking.addons or [])),
+        # Additive: 'slot' | 'membership' | 'package' | 'surprise', plus the
+        # membership validity / package guests / surprise message (offerings app).
+        'kind': booking.kind or 'slot',
+        'offering': booking.offering_summary(),
     }
 
 
@@ -525,8 +553,11 @@ def event_row(event, sold_by_date=None, order_stats=None):
             'id': event_date.id,
             'date': event_date.date.isoformat(),
             'capacity': event_date.capacity,
+            'unlimited': event_date.capacity is None,
             'sold': sold,
-            'remaining': max(0, event_date.capacity - sold),
+            'remaining': (
+                None if event_date.capacity is None else max(0, event_date.capacity - sold)
+            ),
             'isAvailable': event_date.is_available,
         })
 
@@ -566,7 +597,12 @@ def event_row(event, sold_by_date=None, order_stats=None):
         'endTime': event.end_time.strftime('%H:%M') if event.end_time else '',
         'dates': rows,
         'datesCount': len(rows),
-        'capacity': sum(r['capacity'] for r in rows),
+        # None when any night is unlimited (a total would be meaningless).
+        'capacity': (
+            None if any(r['capacity'] is None for r in rows)
+            else sum(r['capacity'] for r in rows)
+        ),
+        'unlimited': any(r['capacity'] is None for r in rows),
         'ticketsSold': tickets,
         'ordersNum': orders,
         'revenueNum': revenue,

@@ -387,7 +387,8 @@ def _still_has_room(order):
     ).first()
     if locked is None:
         return False
-    return order.seats <= seats_remaining(locked, exclude_order_id=order.pk)
+    remaining = seats_remaining(locked, exclude_order_id=order.pk)
+    return remaining is None or order.seats <= remaining
 
 
 def _auto_refund(order, payment_id, *, paid_at=None, source=payment_record.WEBHOOK):

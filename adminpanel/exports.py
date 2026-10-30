@@ -89,6 +89,11 @@ COLUMNS = (
     ('Payment Status', 17, None),
     ('Booking Status', 19, None),
     ('Booking Created At', 20, 'dd-mmm-yyyy hh:mm'),
+    # The two separate answers the Bookings page badges show (bookings/
+    # status_view.py): is the booking happening, and what happened to the
+    # money. Appended so every earlier column keeps its place.
+    ('Booking State', 15, None),
+    ('Payment State', 17, None),
 )
 
 
@@ -238,6 +243,7 @@ def _venue_row(b):
         'id': b.id,
         'statusKey': key,
         'createdAt': b.created_at,
+        'states': b.state_fields(),
         # The page's haystack, field for field (unifiedBookings.js
         # matchesQuery): id, ref, displayRef, title, venue, eventName,
         # location, customer, phone, gateway order, payment.
@@ -280,6 +286,7 @@ def _event_row(o):
         'id': o.id,
         'statusKey': key,
         'createdAt': o.created_at,
+        'states': o.state_fields(),
         'search': [
             o.id, booking_ref(o.id), display_ref(o.id),
             o.event_name, None, o.event_name, o.location, o.customer_name,
@@ -362,7 +369,14 @@ def build_workbook(rows):
 
     return build([Sheet(
         'Bookings', COLUMNS,
-        (list(row['cells']) + [row['createdAt']] for row in rows),
+        (
+            list(row['cells']) + [
+                row['createdAt'],
+                row['states']['bookingStateLabel'],
+                row['states']['paymentStateLabel'],
+            ]
+            for row in rows
+        ),
     )])
 
 

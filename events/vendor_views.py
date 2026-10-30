@@ -163,7 +163,7 @@ def sales_status(event, dates, today=None):
         return 'not_open_yet'
     if event.booking_closes_on and today > event.booking_closes_on:
         return 'closed'
-    if not any(d['isAvailable'] and d['remaining'] > 0 for d in upcoming):
+    if not any(d['isAvailable'] and (d['remaining'] is None or d['remaining'] > 0) for d in upcoming):
         return 'sold_out'
     return 'on_sale'
 
@@ -180,8 +180,9 @@ def vendor_event_record(event, user=None):
             'id': event_date.id,
             'date': event_date.date.isoformat(),
             'capacity': event_date.capacity,
+            'unlimited': event_date.capacity is None,
             'sold': sold,
-            'remaining': max(0, event_date.capacity - sold),
+            'remaining': None if event_date.capacity is None else max(0, event_date.capacity - sold),
             'isAvailable': event_date.is_available,
         })
     confirmed = list(EventOrder.objects.filter(event=event, status='confirmed'))

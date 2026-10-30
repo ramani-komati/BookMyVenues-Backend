@@ -195,7 +195,7 @@ class VendorPricingPreviewView(APIView):
             'bands': price_bands(target, day, settings=settings, default_rate=default),
             # The day's opening periods ([] = closed), so the preview shows
             # only the hours customers can actually book.
-            'open': [{'start': clock(s), 'end': clock(e)} for s, e in open_periods(settings, day)[0]],
+            'open': [{'start': clock(s), 'end': clock(e)} for s, e in open_periods(settings, day, listing=base)[0]],
         })
 
 

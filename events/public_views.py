@@ -28,7 +28,7 @@ from venues.geo import (
 )
 
 from .catalog import canonical_event_category, event_categories_payload
-from .inventory import availability, date_is_sellable, seats_remaining
+from .inventory import availability, date_is_sellable, seats_remaining, seats_sold
 from .location import place_q, search_q
 from .models import Event, EventDate
 
@@ -70,17 +70,22 @@ def date_rows(event, *, only_sellable=True, include_counts=False):
         row = {
             'id': event_date.id,
             'date': event_date.date.isoformat(),
+            # remaining is None for an UNLIMITED date — never sold out.
             'soldOut': remaining == 0,
             # A sold-out date stays in the list (greyed out) so the customer
             # can see the night exists; `available` is what gates selection.
-            'available': ok and remaining > 0,
+            'available': ok and remaining != 0,
             'reason': '' if ok else reason,
             'isPast': event_date.date < today,
         }
         if include_counts:
             row['capacity'] = event_date.capacity
+            row['unlimited'] = event_date.capacity is None
             row['remaining'] = remaining
-            row['sold'] = max(0, event_date.capacity - remaining)
+            row['sold'] = (
+                seats_sold(event_date) if remaining is None
+                else max(0, event_date.capacity - remaining)
+            )
         rows.append(row)
     return rows
 

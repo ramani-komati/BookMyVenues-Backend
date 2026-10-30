@@ -1,53 +1,77 @@
 """
-Place search for the customer's manual location picker.
+Place search for the customer's location picker and the vendor wizard.
 
-    GET /api/geo/search?q=gachibowli        -> {"results": [{label, locality, city, lat, lng}]}
-    GET /api/geo/reverse?lat=17.44&lng=78.35 -> {"result": {label, locality, city} | null}
+    GET /api/geo/search?q=gachibowli[&state=&district=]
+        -> {"results": [PLACE, …]}                  (geocode a typed name, on submit)
+    GET /api/geo/reverse?lat=17.44&lng=78.35
+        -> {"result": PLACE | null}                  (name the customer's GPS point)
+    GET /api/geo/autocomplete?q=kompa[&session=&lat=&lng=]
+        -> {"suggestions": [{placeId, main, secondary, label}]}   (as you type)
+    GET /api/geo/place?id=<placeId>[&session=]
+        -> {"result": PLACE | null}                  (the picked suggestion's details)
+    GET /api/geo/regions
+        -> {"country": "India", "states": [{name, code, type, districts}]}
+
+    PLACE = {label, locality, city, district, state, country, formattedAddress, lat, lng}
+            (lat/lng absent on reverse results — the customer's own point is used)
 
 WHY A SERVER-SIDE PROXY
 
-The project had no geocoding service, and coordinates for a typed place must
-come from one — never from a guess. Proxying keeps any provider key on the
-server (it never ships in the frontend bundle) and lets results be cached.
+Coordinates for a typed place must come from a geocoder — never from a guess.
+Proxying keeps the provider key on the server (it never ships in the frontend
+bundle) and lets results be cached.
 
 PROVIDERS (settings.GEOCODER_PROVIDER, set from the environment)
 
-  ''          OFF (the default). Both endpoints answer 503 with
-              code GEOCODER_NOT_CONFIGURED; the picker then offers "use my
-              current location" only. Nothing is invented.
+  ''          OFF (the default). Every endpoint except /regions answers 503
+              with code GEOCODER_NOT_CONFIGURED; the picker then falls back
+              to its own lists and to OpenStreetMap from the browser.
   'nominatim' OpenStreetMap Nominatim. No key, but its usage policy requires
               an identifying contact (GEOCODER_CONTACT_EMAIL — refused
               without it), at most ~1 request/second, and NO search-as-you-
-              type: the picker searches only on submit. The public instance
-              suits low traffic; point NOMINATIM_BASE_URL at a self-hosted or
-              commercial Nominatim for production volume.
-  'google'    Google Geocoding API. Needs GOOGLE_GEOCODING_API_KEY (billed
-              per request by Google).
+              type: autocomplete is unavailable (503) with this provider.
+  'google'    Google Geocoding API (search, reverse) with
+              GOOGLE_GEOCODING_API_KEY, and Places API (New) (autocomplete,
+              place) with GOOGLE_PLACES_API_KEY — or the geocoding key when
+              that is unset. Both are SERVER keys: restrict them by API, not
+              by HTTP referrer (Google refuses referrer-restricted keys on
+              server calls with REQUEST_DENIED).
 
-Results are restricted to GEOCODER_COUNTRY (default 'in'). The customer's
-query and coordinates are sent to the configured provider only — never logged
-or stored here; responses are cached briefly in the process cache.
+Results are restricted to GEOCODER_COUNTRY (default 'in'). State and district
+names are matched to the platform's India dataset (venues/regions.py), so a
+place always reports the same spelling the vendor wizard stores. The
+customer's query and coordinates go to the configured provider only — never
+logged or stored here; responses are cached briefly in the process cache.
 """
 import hashlib
 import logging
+import re
 
 import requests
 from django.conf import settings
 from django.core.cache import cache
+from django.utils.decorators import method_decorator
+from django.views.decorators.cache import cache_page
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from . import regions
 from .geo import valid_coordinates
 
 logger = logging.getLogger(__name__)
 
 TIMEOUT = 6            # seconds — a slow provider must not hold a worker
 MAX_RESULTS = 5
+MAX_SUGGESTIONS = 6
 MIN_QUERY, MAX_QUERY = 2, 100
 CACHE_SECONDS = 60 * 60 * 24   # place names and pins change rarely
+BIAS_RADIUS_M = 50000          # autocomplete prefers places within ~50 km of a hint
+
+_SESSION = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
+_PLACE_ID = re.compile(r'^[A-Za-z0-9_-]{10,300}$')
 
 
 class GeocoderError(Exception):
@@ -71,6 +95,14 @@ def _provider():
     raise GeocoderNotConfigured('No geocoding provider is configured.')
 
 
+def _places_key():
+    """Places API (New) key — only with the Google provider."""
+    if _provider() != 'google':
+        raise GeocoderNotConfigured('Autocomplete needs GEOCODER_PROVIDER=google.')
+    return (getattr(settings, 'GOOGLE_PLACES_API_KEY', '')
+            or settings.GOOGLE_GEOCODING_API_KEY)
+
+
 def _country():
     return str(getattr(settings, 'GEOCODER_COUNTRY', 'in') or 'in').strip().lower()
 
@@ -85,7 +117,25 @@ def _join(*parts):
     return ', '.join(out)
 
 
-def _place(locality, city, lat=None, lng=None, fallback=''):
+def _region_names(state, district_candidates):
+    """(canonical state, canonical district) from a provider's names — the
+    first candidate that is a real district of that state wins; '' when
+    nothing matches (never a guess)."""
+    known_state = regions.canonical_state(state)
+    for candidate in district_candidates:
+        if known_state:
+            found = regions.find_district(known_state, candidate)
+            if found:
+                return known_state, found
+        else:
+            pair = regions.find_district_anywhere(candidate)
+            if pair:
+                return pair
+    return known_state or str(state or '').strip(), ''
+
+
+def _place(locality, city, lat=None, lng=None, fallback='', *, district='', state='',
+           formatted=''):
     """One result row. A row without a usable name is dropped by callers."""
     locality = str(locality or '').strip()
     city = str(city or '').strip()
@@ -93,6 +143,10 @@ def _place(locality, city, lat=None, lng=None, fallback=''):
         'label': _join(locality, city) or str(fallback or '').strip(),
         'locality': locality or city,
         'city': city,
+        'district': str(district or '').strip(),
+        'state': str(state or '').strip(),
+        'country': 'India' if _country() == 'in' else '',
+        'formattedAddress': str(formatted or fallback or '').strip(),
     }
     if lat is not None:
         point = valid_coordinates(lat, lng)
@@ -100,6 +154,15 @@ def _place(locality, city, lat=None, lng=None, fallback=''):
             return None
         row['lat'], row['lng'] = point
     return row if row['label'] else None
+
+
+def _scoped_query(query, state='', district=''):
+    """'Kompally' within Medchal Malkajgiri, Telangana → one geocodable text."""
+    state_name = regions.canonical_state(state) or ''
+    district_name = regions.find_district(state_name, district) if state_name else None
+    lowered = query.lower()
+    extra = [part for part in (district_name, state_name) if part and part.lower() not in lowered]
+    return _join(query, *extra)
 
 
 # --- Nominatim ------------------------------------------------------------
@@ -131,22 +194,30 @@ def _nominatim_names(address):
     return locality, city
 
 
+def _nominatim_regions(address):
+    address = address if isinstance(address, dict) else {}
+    return _region_names(address.get('state'), (
+        address.get('state_district'), address.get('county'), address.get('city'),
+    ))
+
+
+def _nominatim_row(item, with_point=True):
+    address = item.get('address')
+    locality, city = _nominatim_names(address)
+    state, district = _nominatim_regions(address)
+    point = (item.get('lat'), item.get('lon')) if with_point else (None, None)
+    return _place(locality or (item.get('name') if with_point else None), city, *point,
+                  fallback=item.get('display_name') if with_point else '',
+                  district=district, state=state, formatted=item.get('display_name'))
+
+
 def _nominatim_search(query):
     data = _nominatim_get('search', {
         'q': query, 'limit': MAX_RESULTS, 'countrycodes': _country(),
     })
     if not isinstance(data, list):
         raise GeocoderError('Unexpected search response.')
-    rows = []
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-        locality, city = _nominatim_names(item.get('address'))
-        row = _place(locality or item.get('name'), city, item.get('lat'), item.get('lon'),
-                     fallback=item.get('display_name'))
-        if row:
-            rows.append(row)
-    return rows
+    return [row for row in (_nominatim_row(item) for item in data if isinstance(item, dict)) if row]
 
 
 def _nominatim_reverse(lat, lng):
@@ -155,12 +226,15 @@ def _nominatim_reverse(lat, lng):
         raise GeocoderError('Unexpected reverse response.')
     if data.get('error'):
         return None   # e.g. the middle of the sea — "no name", not a failure
-    return _place(*_nominatim_names(data.get('address')))
+    return _nominatim_row(data, with_point=False)
 
 
 # --- Google ---------------------------------------------------------------
 
 GOOGLE_URL = 'https://maps.googleapis.com/maps/api/geocode/json'
+PLACES_URL = 'https://places.googleapis.com/v1'
+# Place Details "Essentials" fields only — nothing billed at a higher tier.
+PLACE_FIELDS = 'id,formattedAddress,location,addressComponents'
 
 
 def _google_get(params):
@@ -175,17 +249,28 @@ def _google_get(params):
     if status_text == 'ZERO_RESULTS':
         return []
     if status_text != 'OK':
-        # REQUEST_DENIED / OVER_QUERY_LIMIT … — never echo Google's message
-        # (it can describe the key's configuration) to the public.
-        raise GeocoderError(f'Google geocoding status {status_text!r}.')
+        # REQUEST_DENIED / OVER_QUERY_LIMIT … — Google's own explanation goes
+        # to the SERVER LOG only (it names the cause: API not enabled, key
+        # restricted by referrer, billing off), never to the public.
+        detail = str((data or {}).get('error_message') or '')[:300] if isinstance(data, dict) else ''
+        raise GeocoderError(f'Google geocoding status {status_text!r}' + (f': {detail}' if detail else '.'))
     return data.get('results') or []
 
 
-def _google_names(components):
+def _components(raw, long_key, short_key):
+    """{type: (long, short)} from Geocoding (long_name/short_name) or Places
+    (New) (longText/shortText) address components — first one of a type wins."""
     found = {}
-    for component in components or []:
+    for component in raw or []:
+        if not isinstance(component, dict):
+            continue
         for kind in component.get('types') or []:
-            found.setdefault(kind, component.get('long_name'))
+            found.setdefault(kind, (component.get(long_key), component.get(short_key)))
+    return found
+
+
+def _google_names(components):
+    found = {kind: names[0] for kind, names in components.items()}
     locality = (
         found.get('sublocality_level_1') or found.get('sublocality')
         or found.get('neighborhood')
@@ -197,13 +282,32 @@ def _google_names(components):
     return locality, city
 
 
+def _google_regions(components):
+    state_long, state_short = components.get('administrative_area_level_1', (None, None))
+    state = state_long if regions.find_state(state_long) else (state_short or state_long)
+    found = {kind: names[0] for kind, names in components.items()}
+    # Google files Indian districts under level 3 in some states and level 2
+    # in others; the locality is tried last (Hyderabad is both).
+    return _region_names(state, (
+        found.get('administrative_area_level_3'), found.get('administrative_area_level_2'),
+        found.get('locality'),
+    ))
+
+
+def _google_row(components, lat=None, lng=None, formatted=''):
+    locality, city = _google_names(components)
+    state, district = _google_regions(components)
+    return _place(locality, city, lat, lng, fallback=formatted,
+                  district=district, state=state, formatted=formatted)
+
+
 def _google_search(query):
     rows = []
     for item in _google_get({'address': query, 'components': f'country:{_country().upper()}'})[:MAX_RESULTS]:
         location = ((item.get('geometry') or {}).get('location') or {})
-        locality, city = _google_names(item.get('address_components'))
-        row = _place(locality, city, location.get('lat'), location.get('lng'),
-                     fallback=item.get('formatted_address'))
+        components = _components(item.get('address_components'), 'long_name', 'short_name')
+        row = _google_row(components, location.get('lat'), location.get('lng'),
+                          item.get('formatted_address'))
         if row:
             rows.append(row)
     return rows
@@ -213,7 +317,71 @@ def _google_reverse(lat, lng):
     results = _google_get({'latlng': f'{lat},{lng}'})
     if not results:
         return None
-    return _place(*_google_names(results[0].get('address_components')))
+    first = results[0]
+    components = _components(first.get('address_components'), 'long_name', 'short_name')
+    # No lat/lng in the row: the customer's point stays theirs; only the
+    # NAME comes from Google.
+    return _google_row(components, formatted=first.get('formatted_address'))
+
+
+def _places_call(method, path, **kwargs):
+    """One Places API (New) request. Errors carry Google's status + message
+    for the server log (never the key — it travels in a header)."""
+    headers = {'X-Goog-Api-Key': _places_key(), **kwargs.pop('headers', {})}
+    response = requests.request(method, f'{PLACES_URL}/{path}', headers=headers,
+                                timeout=TIMEOUT, **kwargs)
+    if response.status_code != 200:
+        try:
+            error = (response.json() or {}).get('error') or {}
+        except ValueError:
+            error = {}
+        raise GeocoderError(
+            f'Places API HTTP {response.status_code} {error.get("status") or ""}: '
+            f'{str(error.get("message") or "")[:300]}'
+        )
+    return response.json()
+
+
+def _places_autocomplete(query, session='', bias=None):
+    body = {
+        'input': query,
+        'includedRegionCodes': [_country()],
+        # Cities, towns, districts, localities and PIN codes — not shops.
+        'includedPrimaryTypes': ['(regions)'],
+        'languageCode': 'en',
+    }
+    if session:
+        body['sessionToken'] = session
+    if bias:
+        body['locationBias'] = {'circle': {
+            'center': {'latitude': bias[0], 'longitude': bias[1]}, 'radius': BIAS_RADIUS_M,
+        }}
+    data = _places_call('POST', 'places:autocomplete', json=body)
+    out = []
+    for suggestion in (data or {}).get('suggestions') or []:
+        prediction = (suggestion or {}).get('placePrediction') or {}
+        place_id = str(prediction.get('placeId') or '')
+        fmt = prediction.get('structuredFormat') or {}
+        main = str((fmt.get('mainText') or {}).get('text') or '').strip()
+        secondary = str((fmt.get('secondaryText') or {}).get('text') or '').strip()
+        label = str((prediction.get('text') or {}).get('text') or '').strip() or _join(main, secondary)
+        if _PLACE_ID.fullmatch(place_id) and (main or label):
+            out.append({'placeId': place_id, 'main': main or label, 'secondary': secondary, 'label': label})
+        if len(out) >= MAX_SUGGESTIONS:
+            break
+    return out
+
+
+def _places_details(place_id, session=''):
+    params = {'languageCode': 'en', 'regionCode': _country()}
+    if session:
+        params['sessionToken'] = session
+    data = _places_call('GET', f'places/{place_id}', params=params,
+                        headers={'X-Goog-FieldMask': PLACE_FIELDS})
+    location = (data or {}).get('location') or {}
+    components = _components((data or {}).get('addressComponents'), 'longText', 'shortText')
+    return _google_row(components, location.get('latitude'), location.get('longitude'),
+                       (data or {}).get('formattedAddress'))
 
 
 # --- Public API -----------------------------------------------------------
@@ -231,18 +399,27 @@ def _provider_failure(exc):
     return GeocoderError(f'{type(exc).__name__}' + (f' (HTTP {code})' if code else ''))
 
 
-def search_places(query):
-    provider = _provider()
-    key = 'geo:search:' + hashlib.sha256(f'{provider}|{query.lower()}'.encode()).hexdigest()
+def _cached(key, compute, empty=None):
     cached = cache.get(key)
     if cached is not None:
-        return cached
+        return cached if cached != {} else empty
     try:
-        rows = _nominatim_search(query) if provider == 'nominatim' else _google_search(query)
+        value = compute()
     except (requests.RequestException, ValueError) as exc:
         raise _provider_failure(exc) from None
-    cache.set(key, rows, CACHE_SECONDS)
-    return rows
+    cache.set(key, value if value is not None else {}, CACHE_SECONDS)
+    return value
+
+
+def _digest(*parts):
+    return hashlib.sha256('|'.join(str(p) for p in parts).encode()).hexdigest()
+
+
+def search_places(query, state='', district=''):
+    provider = _provider()
+    text = _scoped_query(query, state, district)
+    key = 'geo:search:' + _digest(provider, text.lower())
+    return _cached(key, lambda: _nominatim_search(text) if provider == 'nominatim' else _google_search(text))
 
 
 def reverse_place(lat, lng):
@@ -251,15 +428,22 @@ def reverse_place(lat, lng):
     # customer's exact position.
     lat, lng = round(lat, 3), round(lng, 3)
     key = f'geo:reverse:{provider}:{lat}:{lng}'
-    cached = cache.get(key)
-    if cached is not None:
-        return cached or None
-    try:
-        row = _nominatim_reverse(lat, lng) if provider == 'nominatim' else _google_reverse(lat, lng)
-    except (requests.RequestException, ValueError) as exc:
-        raise _provider_failure(exc) from None
-    cache.set(key, row or {}, CACHE_SECONDS)
-    return row
+    return _cached(key, lambda: _nominatim_reverse(lat, lng) if provider == 'nominatim'
+                   else _google_reverse(lat, lng))
+
+
+def autocomplete_places(query, session='', bias=None):
+    _places_key()
+    # The bias is rounded to ~1 km for the cache key and the request alike.
+    bias = (round(bias[0], 2), round(bias[1], 2)) if bias else None
+    key = 'geo:auto:' + _digest(query.lower(), bias)
+    return _cached(key, lambda: _places_autocomplete(query, session, bias))
+
+
+def place_details(place_id, session=''):
+    _places_key()
+    key = 'geo:place:' + _digest(place_id)
+    return _cached(key, lambda: _places_details(place_id, session))
 
 
 def _unavailable(error):
@@ -279,8 +463,25 @@ def _unavailable(error):
     )
 
 
+def _query_param(request):
+    return ' '.join(str(request.query_params.get('q', '')).split())
+
+
+def _bad_query():
+    return Response(
+        {'message': f'Type {MIN_QUERY}–{MAX_QUERY} characters to search.'},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
+def _session(request):
+    value = str(request.query_params.get('session', '') or '')
+    return value if _SESSION.fullmatch(value) else ''
+
+
 class PlaceSearchView(APIView):
-    """GET /api/geo/search?q= — places matching a typed name (on submit)."""
+    """GET /api/geo/search?q=[&state=&district=] — places matching a typed
+    name (on submit). state/district narrow the search to that district."""
 
     authentication_classes = []
     permission_classes = [AllowAny]
@@ -288,14 +489,13 @@ class PlaceSearchView(APIView):
     throttle_scope = 'geocode'
 
     def get(self, request):
-        query = ' '.join(str(request.query_params.get('q', '')).split())
+        query = _query_param(request)
         if not (MIN_QUERY <= len(query) <= MAX_QUERY):
-            return Response(
-                {'message': f'Type {MIN_QUERY}–{MAX_QUERY} characters to search.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return _bad_query()
+        state = str(request.query_params.get('state', '') or '')[:100]
+        district = str(request.query_params.get('district', '') or '')[:100]
         try:
-            return Response({'results': search_places(query)})
+            return Response({'results': search_places(query, state, district)})
         except GeocoderError as error:
             return _unavailable(error)
 
@@ -321,3 +521,69 @@ class PlaceReverseView(APIView):
             return Response({'result': reverse_place(*point)})
         except GeocoderError as error:
             return _unavailable(error)
+
+
+class PlaceAutocompleteView(APIView):
+    """GET /api/geo/autocomplete?q=[&session=&lat=&lng=] — suggestions while
+    the customer types (Places API (New); Google provider only). lat/lng
+    only BIAS the suggestions towards a chosen district; nothing is filtered
+    out by them."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'geocode_suggest'
+
+    def get(self, request):
+        query = _query_param(request)
+        if not (MIN_QUERY <= len(query) <= MAX_QUERY):
+            return _bad_query()
+        params = request.query_params
+        bias = None
+        if params.get('lat') not in (None, '') or params.get('lng') not in (None, ''):
+            bias = valid_coordinates(params.get('lat'), params.get('lng'))
+            if bias is None:
+                return Response({'message': 'lat and lng must be valid coordinates.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({'suggestions': autocomplete_places(query, _session(request), bias)})
+        except GeocoderError as error:
+            return _unavailable(error)
+
+
+class PlaceDetailsView(APIView):
+    """GET /api/geo/place?id=<placeId>[&session=] — the coordinates and
+    address parts of a picked suggestion (ends the autocomplete session)."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'geocode'
+
+    def get(self, request):
+        place_id = str(request.query_params.get('id', '') or '')
+        if not _PLACE_ID.fullmatch(place_id):
+            return Response({'message': 'id must be a place id from /api/geo/autocomplete.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            return Response({'result': place_details(place_id, _session(request))})
+        except GeocoderError as error:
+            return _unavailable(error)
+
+
+@method_decorator(cache_page(CACHE_SECONDS), name='get')
+class RegionListView(APIView):
+    """GET /api/geo/regions — every Indian state / UT and its districts
+    (venues/regions.py). Static data: needs no provider and no key."""
+
+    authentication_classes = []
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        return Response({
+            'country': regions.dataset()['country'],
+            'states': [
+                {'name': s['name'], 'code': s['code'], 'type': s['type'], 'districts': s['districts']}
+                for s in regions.states()
+            ],
+        })

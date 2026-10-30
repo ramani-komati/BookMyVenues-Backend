@@ -10,7 +10,9 @@ WHAT A CUSTOMER MAY BOOK on a date (check_bookable):
   1. a closure covering the date            → closed all day
   2. else a special-hours entry for the date → those periods only
   3. else the weekly hours for the weekday   → those periods only
-  4. no hours configured at all              → 06:00–24:00 (the platform's
+  4. no weekly hours configured              → the Venue Timings saved with
+                                               the venue (venues/timings.py),
+                                               else 06:00–24:00 (the platform's
                                                long-standing default)
   and never a time a SlotBlock covers. Every booked range must sit inside ONE
   open period. Walk-ins (the vendor's own entries) skip the opening hours but
@@ -540,12 +542,25 @@ def special_on(settings, day):
     return None
 
 
-def open_periods(settings, day):
+def default_periods(listing):
+    """The open periods a venue has when no weekly hours are configured:
+    its saved Venue Timings on the booking grid, else 06:00–24:00."""
+    from .timings import bookable_periods, listing_timings
+    return bookable_periods(listing_timings(listing))
+
+
+def open_periods(settings, day, listing=None):
     """(merged open periods, why) for `day`. `why` is None on an ordinary
     day, else {'kind': 'closure'|'special'|'weekly', 'note': ...} explaining
-    a closed or changed day."""
+    a closed or changed day.
+
+    Without weekly hours the venue's saved Venue Timings apply (`listing`,
+    else the settings row's own venue); weekly hours, special dates and
+    closures are more specific and always win."""
+    if listing is None and settings is not None:
+        listing = settings.listing
     if settings is None:
-        return [(OPEN_MINUTE, CLOSE_MINUTE)], None
+        return default_periods(listing), None
     closure = closure_on(settings, day)
     if closure is not None:
         return [], {'kind': 'closure', 'note': closure.get('reason') or ''}
@@ -554,7 +569,7 @@ def open_periods(settings, day):
         periods = _merge(_stored_periods(special.get('periods')))
         return periods, {'kind': 'special', 'note': special.get('note') or ''}
     if settings.hours is None:
-        return [(OPEN_MINUTE, CLOSE_MINUTE)], None
+        return default_periods(listing), None
     periods = _merge(_stored_periods((settings.hours or {}).get(str(day.weekday()))))
     return periods, (None if periods else {'kind': 'weekly', 'note': ''})
 
@@ -589,7 +604,7 @@ def unavailable_ranges(listing, day, *, settings=None, include_private=False):
     base = base_listing(listing)
     if settings is None:
         settings = VenueBusinessSettings.objects.filter(listing=base).first()
-    periods, why = open_periods(settings, day)
+    periods, why = open_periods(settings, day, listing=base)
     out = []
     for start, end in closed_ranges(periods):
         row = {'start': clock(start), 'end': clock(end), 'reason': 'closed'}
@@ -619,7 +634,7 @@ def check_bookable(listing, day, intervals, *, enforce_hours=True, settings=None
     if settings is None:
         settings = VenueBusinessSettings.objects.filter(listing=base).first()
     if enforce_hours:
-        periods, why = open_periods(settings, day)
+        periods, why = open_periods(settings, day, listing=base)
         if not periods:
             reason = (why or {}).get('note') if (why or {}).get('kind') == 'closure' else ''
             raise SlotError(
@@ -753,14 +768,16 @@ def upcoming_bookings(listings):
     """Active bookings (confirmed, or a fresh payment hold) on these
     listings that have not ended yet — what a schedule change could hit."""
     from bookings.slots import slots_end_minute
-    from bookings.views import exclude_dead, PENDING_HOLD_MINUTES
+    from bookings.holds import expired_hold_q
+    from bookings.views import exclude_dead
     from bookings.models import Booking
 
     today = today_ist()
-    cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+    # A live 5-minute checkout hold counts; a lapsed one does not
+    # (bookings/holds.py — the same rule availability uses).
     rows = exclude_dead(
         Booking.objects.filter(listing__in=listings, date__gte=today)
-    ).exclude(status='payment_pending', created_at__lt=cutoff).select_related('listing')
+    ).exclude(expired_hold_q()).select_related('listing')
     now = now_minutes_ist()
     out = []
     for booking in rows:
@@ -839,6 +856,9 @@ def settings_payload(base, settings=None, listings=None):
         'resources': resources,
         'hours': settings.hours if settings else None,
         'usesDefaultHours': settings is None or settings.hours is None,
+        # What "default" means for this venue: its saved Venue Timings
+        # (null = never set → 06:00–24:00). Additive.
+        **_timings_fields(base),
         'specialHours': list(settings.special_hours or []) if settings else [],
         'closures': list(settings.closures or []) if settings else [],
         'priceRules': list(settings.price_rules or []) if settings else [],
@@ -849,6 +869,16 @@ def settings_payload(base, settings=None, listings=None):
             'open': clock(OPEN_MINUTE), 'close': clock(CLOSE_MINUTE), 'step': STEP_MINUTES,
             'maxPeriodsPerDay': MAX_PERIODS_PER_DAY, 'maxRules': MAX_RULES,
         },
+    }
+
+
+def _timings_fields(base):
+    from .timings import bookable_periods, listing_timings, timings_label
+    timings = listing_timings(base)
+    return {
+        'venueTimings': timings,
+        'venueTimingsLabel': timings_label(timings),
+        'defaultPeriods': [{'start': clock(s), 'end': clock(e)} for s, e in bookable_periods(timings)],
     }
 
 
@@ -1023,7 +1053,7 @@ def calendar(base, start_day, days):
     out_days = []
     for offset in range(days):
         day = start_day + datetime.timedelta(days=offset)
-        periods, why = open_periods(settings, day)
+        periods, why = open_periods(settings, day, listing=base)
         resources = []
         for listing in listings:
             bookings = [
@@ -1076,8 +1106,11 @@ def public_schedule(listing):
     if settings is None:
         return None
     today = today_ist().isoformat()
+    from .timings import listing_timings, timings_label
+    timings = listing_timings(listing)
     return {
         'hours': settings.hours,
+        'timingsLabel': timings_label(timings),
         'closures': [
             {'from': c['from'], 'to': c['to'], 'reason': c.get('reason') or ''}
             for c in settings.closures or [] if c.get('to', '') >= today

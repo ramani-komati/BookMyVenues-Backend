@@ -259,7 +259,10 @@ class EventDate(models.Model):
 
     event = models.ForeignKey(Event, on_delete=models.CASCADE, related_name='dates')
     date = models.DateField()
-    capacity = models.PositiveIntegerField()
+    # Tickets (capacity units) this night can sell. NULL = UNLIMITED: any
+    # number of customers may register at once, and no seat lock or hold is
+    # taken (events/inventory.py). The per-order ticket limit still applies.
+    capacity = models.PositiveIntegerField(null=True, blank=True)
     # The vendor can close one night (bad weather) without deleting it —
     # existing orders for it stay valid.
     is_available = models.BooleanField(default=True)
@@ -273,6 +276,10 @@ class EventDate(models.Model):
 
     def __str__(self):
         return f'{self.event_id} on {self.date}'
+
+    @property
+    def unlimited(self):
+        return self.capacity is None
 
 
 class TicketType(models.Model):
@@ -536,7 +543,14 @@ class EventOrder(models.Model):
             # event's vendor and the admin, never on a public endpoint.
             'invoiceNumber': self.invoice_number or None,
             **payment_time_fields(self),
+            # Booking (ticket) status and payment status, answered separately
+            # — the same contract as Booking.as_record (bookings/status_view).
+            **self.state_fields(),
         }
+
+    def state_fields(self):
+        from bookings.status_view import order_states, state_fields
+        return state_fields(order_states(self))
 
     def rating_fields(self):
         """Rating keys for the CUSTOMER's ticket history — the same contract

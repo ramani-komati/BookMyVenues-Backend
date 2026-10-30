@@ -104,7 +104,10 @@ def event_sheets(events, *, owner=None):
             first,
             last,
             len(event.dates.all()),
-            sum(d.capacity for d in event.dates.all()),
+            (
+                'Unlimited' if any(d.capacity is None for d in event.dates.all())
+                else sum(d.capacity for d in event.dates.all())
+            ),
             seats,
             s['tickets'],
             s['orders'],
@@ -138,8 +141,11 @@ def event_sheets(events, *, owner=None):
             for event_date in event.dates.all():
                 paid, held = by_date.get(event_date.id, (0, 0))
                 yield [
-                    str(event.id), event.name, event_date.date, event_date.capacity,
-                    paid, held, max(0, event_date.capacity - paid - held),
+                    str(event.id), event.name, event_date.date,
+                    'Unlimited' if event_date.capacity is None else event_date.capacity,
+                    paid, held,
+                    'Unlimited' if event_date.capacity is None
+                    else max(0, event_date.capacity - paid - held),
                     event_date.is_available,
                 ]
 

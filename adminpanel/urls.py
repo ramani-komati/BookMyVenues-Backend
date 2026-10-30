@@ -4,10 +4,11 @@ customer/vendor app, cookie-session auth, {"detail"} error shape).
 """
 from django.urls import path
 
+from campaigns import admin_views as campaign_views
 from events import admin_views as event_admin_views
 from reports.views import AdminExportView
 
-from . import homepage, ratings_admin, views
+from . import homepage, ratings_admin, subcategories_admin, venue_edit, views
 
 urlpatterns = [
     path('auth/login', views.AdminLoginView.as_view(), name='admin-login'),
@@ -17,6 +18,8 @@ urlpatterns = [
     # Writes (Phase 2)
     path('approvals/<uuid:listing_id>', views.AdminApprovalUpdateView.as_view(), name='admin-approval'),
     path('venues/<uuid:listing_id>', views.AdminVenueUpdateView.as_view(), name='admin-venue'),
+    # All venues → Edit: every vendor-submitted detail except bank details.
+    path('venues/<uuid:listing_id>/edit', venue_edit.AdminVenueEditView.as_view(), name='admin-venue-edit'),
     # Must precede the <int:vendor_id> route so 'token' is never read as an id.
     path('vendors/token', views.AdminVendorTokenView.as_view(), name='admin-vendor-token'),
     path('vendors/<int:vendor_id>', views.AdminVendorUpdateView.as_view(), name='admin-vendor'),
@@ -64,6 +67,14 @@ urlpatterns = [
     path('reviews/<int:review_id>/resolve', views.AdminReviewResolveView.as_view(), name='admin-review-resolve'),
     path('audit', views.AdminAuditView.as_view(), name='admin-audit'),
     # Customer ratings & reviews — moderation only (adminpanel/ratings_admin.py).
+    # Custom sub-categories added via the wizards' "Others" option — approve /
+    # reject / add (adminpanel/subcategories_admin.py).
+    path('subcategories', subcategories_admin.AdminSubCategoriesView.as_view(), name='admin-subcategories'),
+    path(
+        'subcategories/<int:subcategory_id>',
+        subcategories_admin.AdminSubCategoryDetailView.as_view(),
+        name='admin-subcategory',
+    ),
     path('ratings', ratings_admin.AdminRatingsView.as_view(), name='admin-ratings'),
     path('ratings/<int:rating_id>', ratings_admin.AdminRatingDetailView.as_view(), name='admin-rating'),
     # The Explore homepage: banners & promotions, featured events and venues,
@@ -90,5 +101,20 @@ urlpatterns = [
         'homepage/featured-venues/reorder',
         homepage.AdminFeaturedVenuesReorderView.as_view(),
         name='admin-homepage-featured-venues-reorder',
-    ),
+    ),    # Email Campaigns (campaigns/admin_views.py). Static segments before the
+    # <uuid> routes they would otherwise be read as.
+    path('campaigns', campaign_views.CampaignsView.as_view(), name='admin-campaigns'),
+    path('campaigns/options', campaign_views.CampaignOptionsView.as_view(), name='admin-campaign-options'),
+    path('campaigns/audience', campaign_views.CampaignAudienceView.as_view(), name='admin-campaign-audience'),
+    path('campaigns/preview', campaign_views.CampaignPreviewView.as_view(), name='admin-campaign-preview'),
+    path('campaigns/images', campaign_views.CampaignImagesView.as_view(), name='admin-campaign-images'),
+    path('campaigns/<uuid:campaign_id>', campaign_views.CampaignDetailView.as_view(), name='admin-campaign'),
+    path('campaigns/<uuid:campaign_id>/duplicate', campaign_views.CampaignDuplicateView.as_view(),
+         name='admin-campaign-duplicate'),
+    path('campaigns/<uuid:campaign_id>/test', campaign_views.CampaignTestView.as_view(), name='admin-campaign-test'),
+    path('campaigns/<uuid:campaign_id>/send', campaign_views.CampaignSendView.as_view(), name='admin-campaign-send'),
+    path('campaigns/<uuid:campaign_id>/cancel', campaign_views.CampaignCancelView.as_view(),
+         name='admin-campaign-cancel'),
+    path('campaigns/<uuid:campaign_id>/recipients', campaign_views.CampaignRecipientsView.as_view(),
+         name='admin-campaign-recipients'),
 ]

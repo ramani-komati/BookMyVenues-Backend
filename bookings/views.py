@@ -19,6 +19,10 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken
+
 from venues.models import Listing
 
 from .models import Booking
@@ -126,7 +130,10 @@ def _vendor_paused(listing):
     return bool(record.get('paused') or detail.get('paused'))
 
 
-PENDING_HOLD_MINUTES = 30  # how long an unpaid Razorpay hold keeps the slot
+# How long an unpaid EVENT ticket order keeps its seats (events/inventory.py).
+# Venue / resort / surprise holds are 5 minutes and stored on the row —
+# bookings/holds.py.
+PENDING_HOLD_MINUTES = 30
 
 
 def exclude_dead(queryset):
@@ -138,17 +145,20 @@ def exclude_dead(queryset):
 
 def _active_bookings(listing, date):
     """The rows that HOLD time: everything except dead rows and EXPIRED
-    payment holds (a fresh hold still blocks the slot; an abandoned one frees
-    it after PENDING_HOLD_MINUTES). Availability and the overlap check both
-    read exactly this queryset so they can never disagree."""
-    from django.utils import timezone
-    cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+    payment holds (a live 5-minute hold still blocks the slot; a lapsed one
+    frees it at once — bookings/holds.py). Availability and the overlap check
+    both read exactly this queryset so they can never disagree."""
+    from .holds import expired_hold_q
+    # Slot bookings only: memberships, resort packages and big screen
+    # surprises (Booking.kind) hold places by their own capacity rules
+    # (offerings/availability.py) — a 10-guest pool package must not block
+    # the resort's hourly lawn bookings.
     return exclude_dead(
-        Booking.objects.filter(listing=listing, date=date)
-    ).exclude(status='payment_pending', created_at__lt=cutoff)
+        Booking.objects.filter(listing=listing, date=date, kind='')
+    ).exclude(expired_hold_q())
 
 
-def _booked_intervals(listing, date, sport=None, unit=None):
+def _booked_intervals(listing, date, sport=None, unit=None, exclude_pk=None):
     """
     (start, end) minute-intervals already booked for venue+date that CONFLICT
     with a booking for (sport, unit).
@@ -157,9 +167,15 @@ def _booked_intervals(listing, date, sport=None, unit=None):
       the original behaviour.
     - unit set: conflicts only with the SAME (sport, unit), plus legacy /
       whole-venue bookings (unit is None) which block every unit (safe default).
+    - exclude_pk: leave a row (or a collection of rows) out — the customer's
+      OWN hold, when it moves on to payment or is being replaced
+      (bookings/holds.py), must not conflict with itself.
     """
+    excluded = set(exclude_pk) if isinstance(exclude_pk, (set, frozenset, list, tuple)) else {exclude_pk}
     intervals = []
     for booking in _active_bookings(listing, date):
+        if booking.pk in excluded:
+            continue
         if unit is not None and booking.unit is not None:
             if booking.unit != unit or (booking.sport or '') != (sport or ''):
                 continue  # a different pitch/court/screen — no conflict
@@ -567,10 +583,9 @@ def _standing_redemptions(user):
     limit of 1. An ABANDONED hold stops counting once it expires, so a failed
     payment never permanently burns someone's allowance.
     """
-    hold_cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
+    from .holds import live_hold_q
     return Booking.objects.filter(user=user, walk_in=False).filter(
-        Q(status__in=REDEEMED_STATUSES)
-        | Q(status='payment_pending', created_at__gte=hold_cutoff)
+        Q(status__in=REDEEMED_STATUSES) | live_hold_q()
     )
 
 
@@ -786,7 +801,7 @@ def _rates_for(listing, date):
     }
 
 
-def _availability(listing, date):
+def _availability(listing, date, viewer=None):
     """
     Availability payload. Each listing is ONE bookable resource in the
     frontend's model (pitches/screens are separate sibling listings), so the
@@ -794,24 +809,44 @@ def _availability(listing, date):
     — the same rows the booking-create overlap check reads. The sport/unit
     fields bookings carry are display metadata and must never hide a range.
     `bookedUnits` groups the same ranges per (sport, unit) for detail views.
+
+    5-minute checkout holds (bookings/holds.py) stay in `booked` — they ARE
+    taken — and are ALSO listed in `held` / `heldUnits`, so a customer sees
+    "temporarily reserved" rather than "booked". A signed-in `viewer`'s OWN
+    live holds are left out entirely: their reserved slot is theirs to keep
+    booking, not someone else's. Who holds a slot is never revealed.
     """
     booked = set()
+    held = set()
     per_unit = defaultdict(list)         # (sport, unit) -> [slot strings]
+    held_unit = defaultdict(list)
 
     for booking in _active_bookings(listing, date):
+        if booking.status == 'payment_pending' and viewer is not None and booking.user_id == viewer.pk:
+            continue
         booked.update(booking.slots)
         if booking.unit is not None:
             per_unit[(booking.sport or '', booking.unit)].extend(booking.slots)
+        if booking.status == 'payment_pending':
+            held.update(booking.slots)
+            if booking.unit is not None:
+                held_unit[(booking.sport or '', booking.unit)].extend(booking.slots)
 
-    booked_units = [
-        {'sport': sport or None, 'unit': unit, 'ranges': sorted(ranges, key=_slot_start)}
-        for (sport, unit), ranges in sorted(per_unit.items(), key=lambda kv: (kv[0][0], kv[0][1]))
-    ]
+    def grouped(source):
+        return [
+            {'sport': sport or None, 'unit': unit, 'ranges': sorted(ranges, key=_slot_start)}
+            for (sport, unit), ranges in sorted(source.items(), key=lambda kv: (kv[0][0], kv[0][1]))
+        ]
 
     payload = {
         'date': date.isoformat(),
         'booked': sorted(booked, key=_slot_start),
-        'bookedUnits': booked_units,
+        'bookedUnits': grouped(per_unit),
+        # Additive: the part of `booked` that is only someone's checkout
+        # hold — free again within 5 minutes unless they pay.
+        'held': sorted(held, key=_slot_start),
+        'heldUnits': grouped(held_unit),
+        'holdMinutes': _hold_minutes(),
     }
     payload.update(_rates_for(listing, date))   # rate / isWeekend / unitRates
     payload.update(_business_fields(listing, date))
@@ -838,8 +873,9 @@ def _business_fields(listing, date):
     )
     from venues.models import VenueBusinessSettings
 
-    settings = VenueBusinessSettings.objects.filter(listing=base_listing(listing)).first()
-    periods, why = open_periods(settings, date)
+    base = base_listing(listing)
+    settings = VenueBusinessSettings.objects.filter(listing=base).first()
+    periods, why = open_periods(settings, date, listing=base)
     return {
         'open': [{'start': clock(s), 'end': clock(e)} for s, e in periods],
         'closed': not periods,
@@ -853,9 +889,28 @@ def _business_fields(listing, date):
     }
 
 
+def _hold_minutes():
+    from .holds import HOLD_MINUTES
+    return HOLD_MINUTES
+
+
+class OptionalJWTAuthentication(JWTAuthentication):
+    """A valid customer token identifies the viewer; a missing, expired or
+    malformed one is simply ignored — a public read must never 401."""
+
+    def authenticate(self, request):
+        try:
+            return super().authenticate(request)
+        except (InvalidToken, AuthenticationFailed):
+            return None
+
+
 class AvailabilityView(APIView):
     # Public and deliberately UNCACHED (slot freshness matters), so it needs a
     # per-IP ceiling of its own.
+    # Signed-in customers send their token so their OWN 5-minute hold is not
+    # shown back to them as taken (see _availability).
+    authentication_classes = [OptionalJWTAuthentication]
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'public'
 
@@ -880,15 +935,23 @@ class AvailabilityView(APIView):
         if date < today_ist():
             return _message('date cannot be in the past.', status.HTTP_400_BAD_REQUEST)
 
-        return Response(_availability(listing, date))
+        viewer = request.user if getattr(request.user, 'is_authenticated', False) else None
+        return Response(_availability(listing, date, viewer=viewer))
 
 
-def validate_booking_request(body, user=None):
+def validate_booking_request(body, user=None, hold_only=False):
     """
     Full server-side validation + pricing for a customer booking request.
     Shared by direct booking creation AND Razorpay order creation so the two
     can never disagree. Returns (data_dict, None) on success or
     (None, error_response) on failure.
+
+    hold_only: the 5-minute slot hold taken when the customer leaves the slot
+    step (bookings/hold_views.py). Every rule about WHAT is reserved runs —
+    venue, date, slots, pitch, add-on extra hours, opening hours, blocks —
+    but the bill is not final yet (the offer and payment split are chosen
+    after), so the client's amount / offer are not checked here. The payment
+    order re-validates everything in full before any money moves.
     """
     # --- Resolve the venue -------------------------------------
     listing = None
@@ -924,7 +987,7 @@ def validate_booking_request(body, user=None):
         (amount, addons, applied_offer, discount, fee,
          extra_hours, has_package) = compute_amount(
             listing, intervals, body.get('addons'), rate=rate,
-            offer_request=body.get('offer'), weekend=weekend, user=user,
+            offer_request=None if hold_only else body.get('offer'), weekend=weekend, user=user,
             date=date,
         )
         # A package's slots already cover its extra hours; an hourly booking's
@@ -939,7 +1002,7 @@ def validate_booking_request(body, user=None):
         # under the listing lock when the order is created.
         from venues.business import check_bookable
         check_bookable(listing, date, intervals)
-        client_amount = _to_int(body.get('amount'), 'amount')
+        client_amount = amount if hold_only else _to_int(body.get('amount'), 'amount')
         per_slot = _to_int(
             body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'
         )
@@ -967,7 +1030,7 @@ def validate_booking_request(body, user=None):
 
     # Cross-check the client's INFORMATIONAL discountAmount (money math
     # always uses our recomputed value).
-    client_discount = body.get('discountAmount')
+    client_discount = None if hold_only else body.get('discountAmount')
     if client_discount not in (None, ''):
         try:
             client_discount = int(str(client_discount))
@@ -1048,6 +1111,20 @@ def build_booking_fields(user, body, data):
     )
 
 
+def customer_booking_record(row):
+    """One booking as its OWN customer sees it (My bookings, and the unified
+    booking history — bookings/history.py)."""
+    from .contact import booking_contact
+    record = row.as_record()
+    # The venue owner's name + phone — ONLY on a verified-paid
+    # booking, and only in the customer's own history (bookings.contact).
+    record['vendorContact'] = booking_contact(row)
+    # May the customer rate it yet? Decided here, on the server's
+    # clock and the booking's payment state (bookings.ratings).
+    record.update(row.rating_fields())
+    return record
+
+
 class MyBookingsView(APIView):
     """
     GET  /api/users/me/bookings — my bookings (?status=upcoming|past)
@@ -1063,7 +1140,11 @@ class MyBookingsView(APIView):
         # paid — see adminpanel.formatters.booking_removal_block).
         queryset = Booking.objects.filter(user=request.user).select_related(
             'rating', 'listing__vendor',
-        ).exclude(status__in=('payment_pending', 'removed'))
+        ).exclude(status__in=('payment_pending', 'removed')).exclude(
+            # Memberships have their own list (GET /users/me/memberships):
+            # they run for weeks, so "upcoming / past by date" misfiles them.
+            kind='membership',
+        )
 
         wanted = request.query_params.get('status')
         if wanted == 'upcoming':
@@ -1083,17 +1164,7 @@ class MyBookingsView(APIView):
 
         total = queryset.count()
         rows = queryset[(page - 1) * limit:page * limit]
-        from .contact import booking_contact
-        bookings = []
-        for row in rows:
-            record = row.as_record()
-            # The venue owner's name + phone — ONLY on a verified-paid
-            # booking, and only in the customer's own history (bookings.contact).
-            record['vendorContact'] = booking_contact(row)
-            # May the customer rate it yet? Decided here, on the server's
-            # clock and the booking's payment state (bookings.ratings).
-            record.update(row.rating_fields())
-            bookings.append(record)
+        bookings = [customer_booking_record(row) for row in rows]
         return Response({'bookings': bookings, 'total': total})
 
     def post(self, request):
@@ -1130,6 +1201,15 @@ class CancelBookingView(APIView):
         ).first()
         if booking is None:
             return _message('Booking not found.', status.HTTP_404_NOT_FOUND)
+
+        # A PAID membership is not cancelled from the app (it may already be
+        # in use); an unpaid hold still is — that is how an abandoned
+        # checkout releases itself.
+        if booking.kind == 'membership' and booking.status not in Booking.CONFIRMABLE_STATUSES:
+            return _message(
+                'A paid membership can’t be cancelled here — please contact support.',
+                status.HTTP_400_BAD_REQUEST,
+            )
 
         # Time-based, not date-based: a same-day booking whose last slot has
         # ENDED can no longer be cancelled.

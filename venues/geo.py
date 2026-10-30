@@ -16,6 +16,9 @@ it yields None. Nothing is ever guessed from a venue's name or address, and
 the `@lat,lng` viewport centre is deliberately ignored: it is where the map
 happened to be scrolled, not where the venue is.
 
+When the link has no pin, the vendor's own confirmed map location from the
+registration wizard (`detail.mapPin`) is used instead — see record_map_pin.
+
 CUSTOMER LOCATION
 
 The customer's coordinates arrive as query parameters on a public list
@@ -31,7 +34,8 @@ from urllib.parse import parse_qs, urlparse
 EARTH_RADIUS_KM = 6371.0
 
 # Upper bound for ?radius= — wide enough for "anywhere in the state", small
-# enough that the bounding-box prefilter stays meaningful.
+# enough that the bounding-box prefilter stays meaningful. (The customer site
+# offers 5–50 km; its default is 30 km — frontend constants/location.js.)
 MAX_RADIUS_KM = 500
 
 _MARKER = re.compile(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)')
@@ -103,13 +107,28 @@ def record_pin(record):
     """
     link = record_maps_link(record)
     point = pin_from_maps_link(link)
-    if point is not None or not link:
+    if point is not None:
         return point
     detail = record.get('detail') if isinstance(record, dict) else None
-    resolved = detail.get('mapsLinkResolved') if isinstance(detail, dict) else None
-    if isinstance(resolved, dict) and str(resolved.get('source') or '').strip() == link:
-        return pin_from_maps_link(resolved.get('url'))
-    return None
+    detail = detail if isinstance(detail, dict) else {}
+    resolved = detail.get('mapsLinkResolved')
+    if link and isinstance(resolved, dict) and str(resolved.get('source') or '').strip() == link:
+        point = pin_from_maps_link(resolved.get('url'))
+        if point is not None:
+            return point
+    return record_map_pin(record)
+
+
+def record_map_pin(record):
+    """The map location the vendor CONFIRMED in the wizard's Map location
+    field (`detail.mapPin` = {lat, lng}) — set from their phone's GPS at the
+    venue, their address, or typed coordinates. Used only when the maps link
+    itself carries no exact pin: an exact link pin always wins."""
+    detail = record.get('detail') if isinstance(record, dict) else None
+    pin = detail.get('mapPin') if isinstance(detail, dict) else None
+    if not isinstance(pin, dict):
+        return None
+    return valid_coordinates(pin.get('lat'), pin.get('lng'))
 
 
 def coordinates_payload(lat, lng):

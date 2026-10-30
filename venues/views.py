@@ -33,8 +33,12 @@ from .storage import (
 
 logger = logging.getLogger(__name__)
 
-# Gallery name -> maximum number of photos (contract 4.4).
-GALLERY_CAPS = {'venuePhotos': 5, 'serviceImages': 10}
+# Gallery name -> maximum number of photos (contract 4.4). The last four
+# belong to the Big Screen Surprise form (Media & Branding).
+GALLERY_CAPS = {
+    'venuePhotos': 5, 'serviceImages': 10,
+    'auditoriumImages': 5, 'screenImages': 5, 'exteriorImages': 5, 'theatreLogo': 1,
+}
 
 
 class IsVendor(BasePermission):
@@ -172,6 +176,21 @@ class DraftSubmitView(APIView):
                 'Missing: ' + ', '.join(missing),
                 status.HTTP_400_BAD_REQUEST,
             )
+
+        # Sub-categories typed with the "Others" option join the shared list
+        # (venues/subcategories.py): pending for a vendor, approved when the
+        # super admin is registering the venue on the owner's behalf.
+        from .subcategories import SubCategoryError, acting_admin, register_from_details
+        admin = acting_admin(request)
+        try:
+            register_from_details(
+                (draft.data or {}).get('details') or {},
+                user=admin or request.user,
+                by_admin=admin is not None,
+                reviewer=(getattr(admin, 'name', '') or getattr(admin, 'phone', '')) if admin else '',
+            )
+        except SubCategoryError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
 
         draft.status = VenueDraft.Status.PENDING
         draft.submitted_at = timezone.now()
@@ -311,6 +330,36 @@ def _resolve_publish_status(record, existing, vendor):
     return Listing.Status.PENDING
 
 
+def _register_record_subcategories(record, request):
+    """(record, error) — records detail.customSubCategories on the shared
+    list (venues/subcategories.py) and stores them in their kept spelling.
+    Unit siblings (detail.unitOf) copy their base venue's detail, so they are
+    left as they are."""
+    from .subcategories import (
+        SubCategoryError, acting_admin, category_for_type, declared_custom, ensure,
+    )
+    detail = record.get('detail')
+    if not isinstance(detail, dict) or not declared_custom(detail) or detail.get('unitOf'):
+        return record, ''
+    category = category_for_type(detail.get('primaryCategory') or record.get('category'))
+    if not category:
+        detail = {**detail, 'customSubCategories': []}
+        return {**record, 'detail': detail}, ''
+    admin = acting_admin(request)
+    kept = []
+    try:
+        for raw in declared_custom(detail):
+            row, _ = ensure(
+                category, raw, user=admin or request.user, by_admin=admin is not None,
+                reviewer=(getattr(admin, 'name', '') or getattr(admin, 'phone', '')) if admin else '',
+            )
+            if row is not None and row.name not in kept:
+                kept.append(row.name)
+    except SubCategoryError as error:
+        return record, str(error)
+    return {**record, 'detail': {**detail, 'customSubCategories': kept}}, ''
+
+
 class VendorListingPublishView(APIView):
     """
     POST /api/vendors/me/listings — publish/update a listing from a
@@ -371,6 +420,41 @@ class VendorListingPublishView(APIView):
         # happens to spread into the payload.
         record = _strip_private_keys(record)
 
+        # Venue Timings are validated here as well as in the form: the
+        # booking engine reads them (venues/timings.py), so a malformed value
+        # must never be stored. Absent = the venue keeps its previous ones.
+        detail = record.get('detail')
+        if isinstance(detail, dict) and 'timings' in detail:
+            from .timings import TimingsError, validate_timings
+            try:
+                detail = dict(detail)
+                detail['timings'] = validate_timings(detail.get('timings'))
+            except TimingsError as error:
+                return _message(str(error), status.HTTP_400_BAD_REQUEST)
+            record['detail'] = detail
+        elif isinstance(detail, dict) and existing is not None:
+            kept = ((existing.record or {}).get('detail') or {}).get('timings')
+            if kept is not None:
+                record['detail'] = {**detail, 'timings': kept}
+
+        # Fitness / Resort / Big Screen Surprise configuration (membership
+        # plans, packages, shows): validated here because checkout prices
+        # and books from it (offerings/schema.py), then synced to its tables
+        # once the listing is saved.
+        from offerings.schema import OfferingError, clean_record
+        try:
+            record = clean_record(record)
+        except OfferingError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+
+        # Custom sub-categories the record declares are on the shared list
+        # too (normally already, from the draft submit) — so a name can never
+        # reach a venue without the super admin seeing it. Tidied to their
+        # stored spelling.
+        record, error = _register_record_subcategories(record, request)
+        if error:
+            return _message(error, status.HTTP_400_BAD_REQUEST)
+
         # Keep the record's own category in step with the indexed column, so
         # the venue page and the search results never disagree.
         from .taxonomy import resolve_category
@@ -418,6 +502,9 @@ class VendorListingPublishView(APIView):
                 status=listing_status,
                 **columns,
             )
+
+        from offerings.sync import sync_listing
+        sync_listing(listing)
 
         # The public detail is cached, so without this a vendor who deletes an
         # offer keeps seeing it for up to a minute and concludes the save
@@ -554,7 +641,7 @@ class DraftPhotoUploadView(APIView):
         gallery = request.data.get('gallery')
         if gallery not in GALLERY_CAPS:
             return _message(
-                'gallery must be "venuePhotos" or "serviceImages".',
+                'gallery must be one of: ' + ', '.join(GALLERY_CAPS) + '.',
                 status.HTTP_400_BAD_REQUEST,
             )
 
@@ -645,7 +732,7 @@ class DraftPhotoDeleteView(APIView):
         gallery = request.query_params.get('gallery')
         if gallery not in GALLERY_CAPS:
             return _message(
-                'gallery query parameter must be "venuePhotos" or "serviceImages".',
+                'gallery query parameter must be one of: ' + ', '.join(GALLERY_CAPS) + '.',
                 status.HTTP_400_BAD_REQUEST,
             )
 

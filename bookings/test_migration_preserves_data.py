@@ -20,6 +20,10 @@ BEFORE = [
     ('bookings', '0018_booking_codes'),
     ('events', '0004_event_coordinates_order_checkin'),
     ('adminpanel', '0002_auditentry_target_id_payout_period_end_and_more'),
+    # The offerings app (2026-10-30) builds on bookings 0023, so it cannot
+    # sit at its latest migration while bookings is rolled back — it did not
+    # exist before these changes either.
+    ('offerings', None),
 ]
 AFTER = [
     # 0020 (vendor replies) is today's Rating model: reading the migrated rows
@@ -28,9 +32,15 @@ AFTER = [
     # today's Booking / EventOrder: an old booking must come out with its id
     # and payment reference unchanged, a fresh invoice number, and NO
     # invented payment time.
-    ('bookings', '0022_backfill_invoice_numbers'),
-    ('events', '0006_eventorder_invoice_number_paid_at'),
+    # 0023 (Booking.kind) is today's Booking too: an old booking must come
+    # out as an ordinary slot booking (kind '').
+    # 0024 (Booking.hold_expires_at) and events 0007 (nullable = unlimited
+    # EventDate.capacity) are today's models as well: an old booking comes
+    # out with no stored hold end (holds.py falls back to created_at).
+    ('bookings', '0024_booking_hold_expires_at'),
+    ('events', '0007_event_date_unlimited_capacity'),
     ('adminpanel', '0003_settings_homepage'),
+    ('offerings', '0001_initial'),
 ]
 
 
@@ -46,7 +56,9 @@ class MigrationPreservesDataTests(TransactionTestCase):
             node for node in executor.loader.graph.leaf_nodes() if node[0] not in moving
         ]
         executor.migrate(targets)
-        return executor.loader.project_state(targets).apps
+        # (app, None) = "not applied at all" is valid for migrate() but is not
+        # a graph node, so it is left out of the state lookup.
+        return executor.loader.project_state([t for t in targets if t[1] is not None]).apps
 
     def tearDown(self):
         # Leave the test database at the latest schema for the next test case.
@@ -103,6 +115,7 @@ class MigrationPreservesDataTests(TransactionTestCase):
         self.assertEqual(booking.invoice_number,                             # numbered once
                          format_invoice_number(financial_year(booking.created_at), 1))
         self.assertIsNone(booking.paid_at)                                   # never guessed
+        self.assertEqual(booking.kind, '')                                   # still a slot booking
         self.assertEqual(NewBooking.objects.count(), 1)
         rating = NewRating.objects.get(booking=booking)
         self.assertEqual((rating.stars, rating.review, rating.event_order_id, rating.hidden_at),

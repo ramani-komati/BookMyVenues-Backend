@@ -563,8 +563,11 @@ class BlockTests(BusinessTestBase):
         from bookings.payments import _conflicts_excluding_self
         hold = ExistingBookingTests.order_on(self, self.monday, ['10:00 – 11:00'], 620)
         booking = Booking.objects.get(pk=hold.data['bookingId'])
+        # Holds store their own end (5 minutes — bookings/holds.py), so the
+        # expired hold moves both.
         Booking.objects.filter(pk=booking.pk).update(
-            created_at=timezone.now() - datetime.timedelta(minutes=45))   # hold expired
+            created_at=timezone.now() - datetime.timedelta(minutes=45),
+            hold_expires_at=timezone.now() - datetime.timedelta(minutes=40))   # hold expired
         self.assertEqual(self.block(self.monday, '10:00', '11:00').status_code, 201)
         booking.refresh_from_db()
         self.assertTrue(_conflicts_excluding_self(booking))

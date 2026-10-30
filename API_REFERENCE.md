@@ -71,11 +71,34 @@ Never cached. `400` bad/past date, `404` unknown venue.
 Resolves `maps.app.goo.gl` / `goo.gl` / `g.co` share links. Any other host → `400`.
 → `{ "resolved": "https://www.google.com/maps/place/…!3d..!4d.." }`
 
-### `GET /api/geo/search?q=<place>` · `GET /api/geo/reverse?lat=&lng=` — no auth
-The customer's manual location picker, proxied to the geocoder set by
+### `GET /api/geo/search?q=<place>[&state=&district=]` · `GET /api/geo/reverse?lat=&lng=` — no auth
+The customer's location picker and the vendor wizard, proxied to the geocoder set by
 `GEOCODER_PROVIDER` (`nominatim` | `google`; keys stay server-side). Throttled 20/min.
-→ `{ "results": [ { "label","locality","city","lat","lng" } ] }` · `{ "result": { "label","locality","city" } | null }`.
-**Off by default** → `503 { "message", "code":"GEOCODER_NOT_CONFIGURED" }`; provider failure → `502 GEOCODER_UNAVAILABLE`.
+`state`/`district` narrow a search to that district (appended to the geocoded text).
+→ `{ "results": [ PLACE ] }` · `{ "result": PLACE (no lat/lng) | null }` where PLACE =
+`{ label, locality, city, district, state, country, formattedAddress, lat, lng }` — `state`/`district`
+use the India dataset's spelling (`venues/regions.py`), `''` when they can't be matched.
+**Off by default** → `503 { "message", "code":"GEOCODER_NOT_CONFIGURED" }`; provider failure → `502 GEOCODER_UNAVAILABLE`
+(Google's own reason — e.g. REQUEST_DENIED and why — is written to the server log only).
+
+### `GET /api/geo/autocomplete?q=[&session=&lat=&lng=]` · `GET /api/geo/place?id=<placeId>[&session=]` — no auth
+As-you-type suggestions and the picked suggestion's details, via **Google Places API (New)**
+(`GEOCODER_PROVIDER=google`; key `GOOGLE_PLACES_API_KEY`, else `GOOGLE_GEOCODING_API_KEY`, sent in a header).
+India only, `(regions)` types (cities, localities, districts, PIN codes). `session` (8–64 chars `[A-Za-z0-9_-]`)
+groups one search for Google billing; `lat`/`lng` only bias results (~50 km). Throttles: autocomplete
+`geocode_suggest` 90/min, place `geocode` 20/min.
+→ `{ "suggestions": [ { placeId, main, secondary, label } ] }` · `{ "result": PLACE | null }`.
+Any other provider → `503 GEOCODER_NOT_CONFIGURED`; Places failure → `502`.
+
+### `GET /api/geo/regions` — no auth, no provider needed
+Every Indian state / union territory and its districts (`venues/data/india_regions.json`, cached 24 h).
+→ `{ "country":"India", "states":[ { name, code, type:"state"|"ut", districts:[…] } ] }` (36 entries, 784 districts).
+
+**Vendor location (draft `location` section).** Venues may be registered in any state/UT. Submit requires
+`stateName` (a state/UT or alias), `district` (in that state), `city`, `pincode` (6 digits, not starting
+with 0, first digit = the state's postal zone), `houseStreet`, `mapsLink`. Optional `latitude`/`longitude`
+(both or neither, inside India; validated on autosave) are published as `detail.mapPin` and give the
+venue its distance pin when the maps link has no exact pin.
 
 ---
 
@@ -263,6 +286,44 @@ applied & validated at booking time (see `POST /users/me/bookings`).
 ---
 ---
 
+## A5. Memberships, resort packages, big screen surprises (`offerings` app)
+
+Fitness (`Gym`), Resort and Big Screen Surprise venues sell memberships,
+packages and surprises instead of hourly slots. Their configuration is the
+venue record's `detail.fitness` / `detail.resort` / `detail.surprise` block
+(published by the wizard through `POST /vendors/me/listings` — vendor and super
+admin alike — or saved by `PUT /admin/venues/<id>/edit`). The server validates
+it (`offerings/schema.py`, 400 with a message) and syncs it into
+`FitnessPlan` / `ResortPackage` / `SurpriseShow` rows keyed by each entry's
+`id`; removed entries are archived, never deleted.
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/offerings/options` | — | the forms' option lists |
+| GET | `/venues/<id>/offerings?date=YYYY-MM-DD` | — | plans / packages (+ slot availability) / shows (+ time availability) of a live venue |
+| POST | `/offerings/quote` | User | server price: `{kind, date, slots, lines[], fee, amount, …}` |
+| POST | `/offerings/order` | User | Razorpay order + 30-min hold → `{orderId, keyId, amount (paise), bookingId, quote}` |
+| POST | `/payments/verify` | User | **existing** endpoint confirms the payment (and the webhook) |
+| POST | `/offerings/surprise-media` | User | multipart `venueId`, `type` (photo\|video), `file` → `{url}` |
+| GET | `/users/me/memberships` | User | the customer's memberships (validity, visits, state) |
+| GET | `/vendors/me/memberships[?venueId=]` | Vendor | members of the vendor's gyms |
+| POST | `/vendors/me/memberships/<bookingId>/visits` | Vendor | record today's visit (one per day, valid + paid only) |
+
+Request bodies (`quote` / `order`; `amount` optional on order — a mismatch is 400 `AMOUNT_MISMATCH`):
+- fitness `{kind:"fitness", venueId, planId, startDate?}`
+- resort `{kind:"resort", venueId, packageId, date, slot:"HH:MM-HH:MM", adults, children}`
+- surprise `{kind:"surprise", venueId, showId, date, time:"HH:MM", occasion, recipientName, message, senderName?, photoUrl?, videoUrl?}`
+
+Every purchase is a `Booking` with `kind` = `membership` | `package` | `surprise`
+(`''` = an ordinary slot booking). `as_record` / admin rows add `kind` and
+`offering` (membership validity / package guests / surprise message). These
+kinds never block slot availability; capacity (package guests per slot, one
+surprise per screen + show time up to `maxBookingsPerShow`, `showsPerDay`) is
+checked at quote, re-checked under the venue lock at order, and again at
+verify (a re-sold place → `refund_pending`). Memberships are not in
+`GET /users/me/bookings`; a paid membership cannot be cancelled from the app;
+the joining fee applies to a customer's first paid membership at that gym.
+
 # PART B — Super-Admin API (`/api/admin`)
 
 **Cookie session**, so every request sends `credentials: "include"`. Errors are `{ "detail": "..." }`.
@@ -299,6 +360,16 @@ The admin site's origin must be whitelisted in the backend's `CORS_ALLOWED_ORIGI
 | `POST /api/admin/audit` | an AuditEntry (append). The server also auto-writes audit rows after every admin action. |
 
 Bad value → `400 { "detail" }`; unknown id → `404 { "detail":"Not found" }`.
+
+### All venues → Edit — admin session (`adminpanel/venue_edit.py`), each save audited
+- `GET /api/admin/venues/:id/edit` → `{ venue, vendor:{id,name,phone}, record, draft:{basics,location,details,photos}|null, draftStatus, version, siblingCount, bankDetailsEditable:false }`. The draft's **payout section is never returned**.
+- `PUT /api/admin/venues/:id/edit` — JSON `{ version, sections:{basics?,location?,details?,photos?}, record }` (`record` is rebuilt from the sections by the panel's `listingCompose.js`). Writes the vendor's draft **and** the listing (+ its pitch/screen listings) in one transaction, merging key by key. Server-owned fields (id, owner, status, slug, featured, submittedAt, the vendor's pause, unitOf/unitLabel) are kept. `400 BANK_DETAILS_READ_ONLY` if any payout/bank/KYC key appears anywhere; `409 STALE_VERSION` if the venue changed since `GET`; `409 RESOURCES_CHANGED` if the pitch/screen count would change; `409 UNIT_LISTING` / `409 DELETED`.
+
+### Booking status vs payment status (additive, every booking / ticket record)
+Customer history, `/payments/verify`, the vendor dashboard, `/admin/bootstrap` rows and event orders now also carry `bookingState` (`pending|expired|not_confirmed|confirmed|completed|cancelled|removed`) and `paymentState` (`pending|unpaid|failed|completed|refund_pending|refunded|at_venue|free|not_recorded`) with `…Label`s (`bookings/status_view.py`). `status` / `paymentStatus` are unchanged. `paymentState: completed` requires a recorded gateway capture.
+
+### Categories and Venue Timings (additive)
+`GET /api/config` adds `categoryGroups` (Celebrate · Sports · Gaming · Resorts · Fitness, each with its venue `types`); `categories` gains `Gym` and a `group` per entry. Venue rows / detail add `categoryGroup`. Listing `detail.timings = {open:"HH:MM", close:"HH:MM", open24Hours}` is validated on publish (`400` when invalid; omitted → previous kept); the venue detail adds `detail.timingsLabel`. Without weekly hours (Business controls) the timings are the venue's bookable default on the 06:00–24:00 grid.
 
 ### Excel exports — admin session, each one audited
 `GET /api/admin/bookings/export?type=&status=&date=&basis=&from=&to=&today=&q=` — the Bookings page
@@ -383,6 +454,66 @@ Settings  { fee, feeDate, commission, categories[], cities[], amenities[],
 **Note on ids:** `vendors/users/payouts/reviews` ids are numeric; **`venues`/`approvals`
 ids are UUID strings** and **bookings are `"bk_…"`** (not `BMV-…`). The panel treats ids as
 opaque and echoes them back in write URLs, so this works as-is.
+
+---
+
+## B5. Email campaigns (`/api/admin/campaigns…`, `campaigns` app)
+
+Promotional email, kept apart from transactional mail (OTP, booking and ticket
+confirmations never read the marketing preference). Same auth and `{"detail"}`
+errors as the rest of the panel; every action is audited server-side. The
+Resend key never leaves the server; the panel only sees counts and masked
+addresses. Sending is controlled by `CAMPAIGN_DELIVERY` (`off` by default,
+`dry-run`, `resend`).
+
+| Method | Path | Body / query → response |
+|---|---|---|
+| GET | `campaigns` | → `{campaigns:[Campaign], delivery:{mode, from, webhookConfigured, emailConfigured}}` — also resumes any stalled send |
+| POST | `campaigns` | `{name, subject?, …, audience?}` → 201 `{campaign}` (draft) |
+| GET | `campaigns/options` | → `{segments, locations:[{state, cities}], categories, delivery, limits}` |
+| POST | `campaigns/audience` | `{audience}` → `{count, eligibleTotal, customers, withEmail, optedIn, suppressed, label}` |
+| POST | `campaigns/preview` | campaign fields → `{subject, previewText, html, text, from}` (nothing stored) |
+| GET | `campaigns/images` | → `{images:[{url, source:"campaign"\|"banner", label}]}` |
+| POST | `campaigns/images` | multipart `image` + `X-Requested-With` → 201 `{url, width, height, warnings}` (Supabase `campaigns/…`) |
+| GET | `campaigns/<uuid>` | → `{campaign}` |
+| PATCH | `campaigns/<uuid>` | fields + `version` → `{campaign}`; 409 `STALE` / `NOT_EDITABLE` |
+| DELETE | `campaigns/<uuid>` | drafts only → 204; sent campaigns 409 |
+| POST | `campaigns/<uuid>/duplicate` | → 201 `{campaign}` (new draft) |
+| POST | `campaigns/<uuid>/test` | `{to:[≤5 emails]}` (default: the admin's own) → `{sent, dryRun, to}`; 409 `DELIVERY_OFF`; throttle 20/hour |
+| POST | `campaigns/<uuid>/send` | `{confirm:true, confirmAll (segment all), expectedCount, version}` → 202 `{campaign}`; 409 `ALREADY_SENT` / `COUNT_CHANGED` {count} / `STALE` / `DELIVERY_OFF`; 400 `INCOMPLETE` / `NO_RECIPIENTS` |
+| POST | `campaigns/<uuid>/cancel` | → `{campaign}`; 409 unless queued/sending |
+| GET | `campaigns/<uuid>/recipients` | `?status=problems\|delivered\|…&page=` → `{total, page, pageSize, recipients:[{name, email (masked), status, error, sentAt, deliveredAt, openedAt, clickedAt, unsubscribedAt}]}` |
+
+```
+Campaign { id, name, subject, previewText, heading, body, images:[{url, alt, link, caption}],
+           ctaLabel, ctaUrl, audience:{segment, state?, city?, category?, days?}, audienceLabel,
+           status:"draft|queued|sending|sent|partial|failed|cancelled", statusLabel, editable,
+           version, dryRun, createdAt, updatedAt, queuedAt, startedAt, finishedAt, createdBy,
+           sentBy, lastError, problems:{field: message},
+           stats:{recipients, pending, sent, delivered, opened, clicked, bounced, complained,
+                  failed, skipped, unsubscribed} }
+```
+
+Segments: `all`, `location` (state + optional city/district of booked venues),
+`booked` (optional `days`), `not_booked`, `lapsed` (`days`, default 90),
+`category`, `event_buyers`. Every segment starts from customers who opted in
+themselves, have an email, are active, and whose address is not suppressed.
+
+Body formatting (plain text, escaped): blank line = paragraph, `**bold**`,
+lines starting `- ` = list, `{{first_name}}` = customer's first name.
+
+### Public campaign routes (`/api/…`)
+
+| Method | Path | Notes |
+|---|---|---|
+| GET/PATCH | `users/me/email-preferences` | Customer Bearer. `{marketingEmails: bool}` → `{preferences:{marketingEmails, hasEmail, updatedAt}}`. Opt-in needs an email on the profile. The ONLY way consent is given. |
+| GET | `email/unsubscribe?token=` | HTML confirm page (a GET never unsubscribes — link scanners open links) |
+| POST | `email/unsubscribe?token=` | Unsubscribes; also RFC 8058 one-click (`List-Unsubscribe=One-Click`) from mail apps |
+| POST | `email/webhooks/resend` | Resend (Svix-signed with `RESEND_WEBHOOK_SECRET`) delivery events → recipient status; hard bounce / spam complaint suppress the address; 503 when the secret is unset |
+
+Background sending: a daemon thread per send (`CAMPAIGN_INLINE_WORKER`), with
+a database lease so only one worker sends; a stalled send resumes on the next
+`GET campaigns` or via `python manage.py send_email_campaigns` (cron-safe).
 
 ---
 

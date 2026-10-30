@@ -14,6 +14,9 @@ How that is guaranteed:
   * the sold count is RE-READ inside the lock, never carried in from the
     read-only availability call the customer's browser made
 
+UNLIMITED dates (capacity NULL) skip all of that: any number of customers
+may register at the same moment, so there is nothing to lock or count.
+
 Unpaid Razorpay holds count against capacity for PENDING_HOLD_MINUTES and
 then stop, so an abandoned checkout releases its seats automatically. The
 hold window is imported from bookings so events and venues can never drift
@@ -75,8 +78,17 @@ def seats_sold(event_date, exclude_order_id=None):
 
 
 def seats_remaining(event_date, exclude_order_id=None):
-    """Free capacity units, never negative."""
+    """Free capacity units, never negative — None for an unlimited date."""
+    if event_date.capacity is None:
+        return None
     return max(0, event_date.capacity - seats_sold(event_date, exclude_order_id))
+
+
+def remaining_after(event_date, sold):
+    """capacity - sold for display, None when the date is unlimited."""
+    if event_date.capacity is None:
+        return None
+    return max(0, event_date.capacity - sold)
 
 
 def date_is_sellable(event, event_date, today=None):
@@ -119,19 +131,31 @@ def reserve_seats(event, event_date_id, seats, *, exclude_order_id=None):
     count from the database rather than trusting anything the caller passed.
     """
     try:
-        locked = (
-            EventDate.objects.select_for_update()
-            .select_related('event')
-            .get(pk=event_date_id, event=event)
-        )
+        plain = EventDate.objects.select_related('event').get(pk=event_date_id, event=event)
     except EventDate.DoesNotExist:
         raise InventoryError('That event date was not found.', code='DATE_NOT_FOUND')
 
+    if plain.capacity is None:
+        # Unlimited: registrations never wait on each other — no row lock,
+        # nothing to count. (The per-order ticket limit is checked when the
+        # order is priced.)
+        ok, message = date_is_sellable(event, plain)
+        if not ok:
+            raise InventoryError(message, code='DATE_UNAVAILABLE')
+        return plain
+
+    locked = (
+        EventDate.objects.select_for_update()
+        .select_related('event')
+        .get(pk=event_date_id, event=event)
+    )
     ok, message = date_is_sellable(event, locked)
     if not ok:
         raise InventoryError(message, code='DATE_UNAVAILABLE')
 
     remaining = seats_remaining(locked, exclude_order_id)
+    if remaining is None:          # made unlimited a moment ago
+        return locked
     if seats > remaining:
         raise InventoryError(
             'Only {} ticket{} left for this date.'.format(
@@ -156,17 +180,19 @@ def availability(event, event_date, *, include_counts=False):
     count under a row lock, which is what actually prevents overselling.
     """
     sold = seats_sold(event_date)
-    remaining = max(0, event_date.capacity - sold)
+    remaining = remaining_after(event_date, sold)
+    sold_out = remaining == 0            # never for an unlimited date (None)
     ok, message = date_is_sellable(event, event_date)
     payload = {
         'date': event_date.date.isoformat(),
-        'soldOut': remaining == 0,
-        'available': ok and remaining > 0,
+        'soldOut': sold_out,
+        'available': ok and not sold_out,
         'reason': '' if ok else message,
     }
     if include_counts:
         payload.update({
             'capacity': event_date.capacity,
+            'unlimited': event_date.capacity is None,
             'sold': sold,
             'remaining': remaining,
         })

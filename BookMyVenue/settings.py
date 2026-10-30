@@ -126,6 +126,11 @@ INSTALLED_APPS = [
     'bookings',
     'events',
     'adminpanel',
+    # Memberships, resort packages, big screen surprises (after bookings).
+    'offerings',
+    # Promotional email campaigns (super admin) — separate from the
+    # transactional OTP / booking mail, which it never touches.
+    'campaigns',
 ]
 
 MIDDLEWARE = [
@@ -214,6 +219,9 @@ REST_FRAMEWORK = {
         # Place search proxies an outside geocoder (Nominatim's public
         # instance allows ~1 request/second in total) — keep it modest.
         'geocode': '20/min',
+        # As-you-type place suggestions (Google Places autocomplete): a few
+        # requests per search by design, so a higher ceiling than 'geocode'.
+        'geocode_suggest': '90/min',
         # Booking verification / check-in at the gate, per vendor or admin
         # account. Generous for a busy door, far too slow to enumerate IDs.
         'checkin': '60/min',
@@ -221,6 +229,8 @@ REST_FRAMEWORK = {
         # builds a whole workbook server-side; a person clicking Export never
         # comes close, a script bulk-pulling data does.
         'export': '20/min',
+        # Email campaign test sends, per admin account.
+        'campaign_test': '20/hour',
     },
 }
 
@@ -265,6 +275,35 @@ BRAND_LOGO_URL = os.environ.get('BRAND_LOGO_URL', '')
 BRAND_SITE_URL = os.environ.get('BRAND_SITE_URL', 'https://thebookmyvenues.in')
 
 
+# Promotional email campaigns (campaigns/). Reuses RESEND_API_KEY above; the
+# transactional settings and code paths are untouched.
+#
+# CAMPAIGN_DELIVERY is the master switch and defaults to OFF, so a local run,
+# the test suite or a fresh deploy can never email customers by accident:
+#   off      nothing is sent (the panel says so)
+#   dry-run  the whole pipeline runs, Resend is never called
+#   resend   real email
+CAMPAIGN_DELIVERY = os.environ.get('CAMPAIGN_DELIVERY', 'off').strip().lower()
+# Sender for promotional mail. Best practice is a separate subdomain (e.g.
+# offers@news.thebookmyvenues.in, verified in Resend) so complaints about
+# promotions can never hurt delivery of OTP and booking mail. Blank =
+# RESEND_FROM.
+CAMPAIGN_FROM = os.environ.get('CAMPAIGN_FROM', '')
+CAMPAIGN_REPLY_TO = os.environ.get('CAMPAIGN_REPLY_TO', '')
+# Optional postal address shown in the campaign footer.
+CAMPAIGN_POSTAL_ADDRESS = os.environ.get('CAMPAIGN_POSTAL_ADDRESS', '')
+# Public https origin of THIS API, used in unsubscribe links (e.g.
+# https://bookmyvenues-backend.onrender.com). Blank = taken from the admin's
+# request when the campaign is sent.
+PUBLIC_API_BASE_URL = os.environ.get('PUBLIC_API_BASE_URL', '')
+# Signing secret of the Resend webhook (Resend dashboard -> Webhooks), for
+# delivered / bounced / opened / clicked stats. Blank = the webhook endpoint
+# refuses everything and the reports show sent / failed only.
+RESEND_WEBHOOK_SECRET = os.environ.get('RESEND_WEBHOOK_SECRET', '')
+# Send on a background thread of the web process (no task queue needed).
+CAMPAIGN_INLINE_WORKER = os.environ.get('CAMPAIGN_INLINE_WORKER', 'True') == 'True'
+
+
 # Booking notifications go by EMAIL only.
 #
 # SMS is off because the DLT route accepts nothing but pre-approved template
@@ -283,15 +322,20 @@ RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
 RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
 
-# Geocoding for the customer's manual location picker (venues/geocoding.py).
-# OFF unless a provider is chosen — the picker then offers GPS only, and no
-# coordinates are ever invented. 'nominatim' (OpenStreetMap; needs a contact
-# email per its usage policy) or 'google' (needs a server-side API key).
+# Geocoding for the customer's location picker and the vendor wizard
+# (venues/geocoding.py). OFF unless a provider is chosen — the picker then
+# uses its own India lists, GPS and OpenStreetMap, and no coordinates are
+# ever invented. 'nominatim' (OpenStreetMap; needs a contact email per its
+# usage policy) or 'google' (needs a server-side API key; Render:
+# GEOCODER_PROVIDER=google, GEOCODER_COUNTRY=IN, GOOGLE_GEOCODING_API_KEY).
 GEOCODER_PROVIDER = os.environ.get('GEOCODER_PROVIDER', '')
 GEOCODER_COUNTRY = os.environ.get('GEOCODER_COUNTRY', 'in')
 GEOCODER_CONTACT_EMAIL = os.environ.get('GEOCODER_CONTACT_EMAIL', '')
 NOMINATIM_BASE_URL = os.environ.get('NOMINATIM_BASE_URL', 'https://nominatim.openstreetmap.org')
 GOOGLE_GEOCODING_API_KEY = os.environ.get('GOOGLE_GEOCODING_API_KEY', '')
+# Places API (New) — as-you-type suggestions. Optional: falls back to the
+# geocoding key (one server key with both APIs enabled is enough).
+GOOGLE_PLACES_API_KEY = os.environ.get('GOOGLE_PLACES_API_KEY', '')
 
 # Supabase Storage (venue photo uploads).
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
@@ -316,6 +360,7 @@ LOGGING = {
         'accounts': {'handlers': ['console'], 'level': 'INFO'},
         # Booking verification / check-in audit lines (bookings/checkin.py).
         'bookings.checkin': {'handlers': ['console'], 'level': 'INFO'},
+        'campaigns': {'handlers': ['console'], 'level': 'INFO'},
     },
 }
 

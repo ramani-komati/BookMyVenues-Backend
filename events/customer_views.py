@@ -23,6 +23,12 @@ def _message(text, http_status):
     return Response({'message': text}, status=http_status)
 
 
+def customer_order_record(row):
+    """One ticket order as its OWN customer sees it (My event orders, and
+    the unified booking history — bookings/history.py)."""
+    return {**row.as_record(), 'vendorContact': order_contact(row), **row.rating_fields()}
+
+
 class MyEventOrdersView(APIView):
     """GET /api/users/me/event-orders?status=upcoming|past&page=&limit="""
 
@@ -65,10 +71,7 @@ class MyEventOrdersView(APIView):
             # The organiser's name + phone — ONLY on a verified-paid order
             # (bookings.contact.order_contact).
             # ratingStatus: may this ticket be reviewed yet (bookings.ratings).
-            'orders': [
-                {**row.as_record(), 'vendorContact': order_contact(row), **row.rating_fields()}
-                for row in rows
-            ],
+            'orders': [customer_order_record(row) for row in rows],
             'total': total,
         })
 

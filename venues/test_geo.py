@@ -382,6 +382,9 @@ class GeocodingProxyTests(APITestCase):
         self.assertEqual(r.data['results'], [{
             'label': 'Gachibowli, Hyderabad', 'locality': 'Gachibowli', 'city': 'Hyderabad',
             'lat': 17.4401, 'lng': 78.3489,
+            # Hyderabad is also a district name found in one state only.
+            'district': 'Hyderabad', 'state': 'Telangana', 'country': 'India',
+            'formattedAddress': 'Gachibowli, Hyderabad, Telangana',
         }])
 
     @override_settings(GEOCODER_PROVIDER='nominatim', GEOCODER_CONTACT_EMAIL='ops@example.com')
@@ -392,7 +395,9 @@ class GeocodingProxyTests(APITestCase):
             # The provider only ever sees the ~110 m-rounded point.
             self.assertEqual(network.call_args.kwargs['params']['lat'], 17.461)
         self.assertEqual(r.data['result'], {'label': 'Kondapur, Hyderabad', 'locality': 'Kondapur',
-                                            'city': 'Hyderabad'})
+                                            'city': 'Hyderabad', 'district': 'Hyderabad',
+                                            'state': 'Telangana', 'country': 'India',
+                                            'formattedAddress': ''})
 
     @override_settings(GEOCODER_PROVIDER='google', GOOGLE_GEOCODING_API_KEY='server-key')
     def test_google_search_and_error_status(self):

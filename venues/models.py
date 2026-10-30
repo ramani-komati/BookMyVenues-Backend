@@ -517,3 +517,48 @@ class SlotBlock(models.Model):
 
     def __str__(self):
         return f'Block {self.date} {self.start_minute}-{self.end_minute} @ {self.listing_id}'
+
+
+class CustomSubCategory(models.Model):
+    """A sub-category someone added with the registration wizard's "Others"
+    option because the built-in list (venues/taxonomy.CATEGORIES) lacks it —
+    e.g. Sports → "Cricket Nets".
+
+    ONE shared list for the vendor wizard and the super admin's Register
+    Venues form (venues/subcategories.py owns every rule). A vendor's name
+    waits for the super admin (PENDING); an admin's is APPROVED at once. Only
+    approved names are offered to other vendors and shown to customers.
+
+    `category` is the canonical stored venue type the name belongs to
+    ('Play zone', 'Party hall'…), never the vendor's "Others" category.
+    `name_key` is the duplicate guard: "  cricket   NETS" and "Cricket-Nets"
+    are the same sub-category.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        APPROVED = 'approved', 'Approved'
+        REJECTED = 'rejected', 'Rejected'
+
+    category = models.CharField(max_length=50, db_index=True)
+    name = models.CharField(max_length=40)
+    name_key = models.CharField(max_length=40)
+    status = models.CharField(max_length=10, choices=Status.choices, default=Status.PENDING)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name='+',
+    )
+    created_by_admin = models.BooleanField(default=False)
+    reviewed_by = models.CharField(max_length=120, blank=True, default='')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['category', 'name']
+        constraints = [
+            models.UniqueConstraint(fields=['category', 'name_key'], name='uniq_custom_subcategory'),
+        ]
+
+    def __str__(self):
+        return f'{self.category} → {self.name} ({self.status})'

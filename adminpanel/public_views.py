@@ -86,7 +86,7 @@ class PublicConfigView(APIView):
         from bookings.razorpay_client import configured as payments_configured
         from events.catalog import event_categories_payload
         from venues.public_views import NEW_BADGE_DAYS
-        from venues.taxonomy import taxonomy_payload
+        from venues.taxonomy import groups_payload, taxonomy_payload
 
         settings_obj = Settings.load()
         # razorpayKeyId is PUBLIC by design (it goes into the checkout widget);
@@ -100,6 +100,9 @@ class PublicConfigView(APIView):
             # THE canonical venue taxonomy — registration and the customer
             # filters should both read this instead of hard-coding a copy.
             'categories': taxonomy_payload(),
+            # The primary categories (Celebrate, Sports, Gaming, Resorts,
+            # Fitness) and the venue types each one groups. Additive.
+            'categoryGroups': groups_payload(),
             # THE canonical EVENT taxonomy (Navaratri, Dandiya…). Kept apart
             # from `categories` on purpose: an event is not a venue, and
             # merging them would offer "Navaratri" in the venue wizard and

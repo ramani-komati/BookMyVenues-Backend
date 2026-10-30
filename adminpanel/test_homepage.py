@@ -743,3 +743,25 @@ class AdminRatingModerationTests(HomepageTestBase):
         restored = self.admin_client.patch(f'/api/admin/ratings/{rating.pk}', {'hidden': False}, format='json')
         self.assertFalse(restored.data['hidden'])
         self.assertEqual(venue_rating(listing), (1.0, 1))
+
+
+class BannerImagePositionTests(HomepageTestBase):
+    """imagePosition / imageMobilePosition — which part of the artwork stays
+    in view when a frame has to crop it. Optional; old banners read centre."""
+
+    def test_positions_are_stored_and_served(self):
+        self.create_banner(imageMobile='https://cdn.example.com/phone.jpg',
+                           imagePosition='left', imageMobilePosition='top')
+        banner = self.public.get('/api/banners').data['banners'][0]
+        self.assertEqual((banner['imagePosition'], banner['imageMobilePosition']), ('left', 'top'))
+
+    def test_old_banners_default_to_centre(self):
+        self.create_banner()
+        banner = self.public.get('/api/banners').data['banners'][0]
+        self.assertEqual((banner['imagePosition'], banner['imageMobilePosition']), ('center', 'center'))
+
+    def test_unknown_positions_are_refused(self):
+        response = self.admin_client.post('/api/admin/homepage/banners', {
+            'title': 'x', 'image': IMAGE, 'imagePosition': '50% 50%; background:url(x)',
+        }, format='json')
+        self.assertEqual(response.status_code, 400)

@@ -952,7 +952,8 @@ class PaymentFlowTests(BookingTestBase):
         from django.utils import timezone as dj_tz
         response = self.order()
         Booking.objects.filter(pk=response.data['bookingId']).update(
-            created_at=dj_tz.now() - datetime.timedelta(minutes=31)
+            created_at=dj_tz.now() - datetime.timedelta(minutes=31),
+            hold_expires_at=dj_tz.now() - datetime.timedelta(minutes=26),
         )
         self.assertEqual(self.book().status_code, 201)  # slot free again
 
@@ -1125,7 +1126,8 @@ class PaymentFlowTests(BookingTestBase):
         from django.utils import timezone as dj_tz
         order = self.order().data
         Booking.objects.filter(pk=order['bookingId']).update(
-            created_at=dj_tz.now() - datetime.timedelta(minutes=31)
+            created_at=dj_tz.now() - datetime.timedelta(minutes=31),
+            hold_expires_at=dj_tz.now() - datetime.timedelta(minutes=26),
         )
         self.assertEqual(self.book().status_code, 201)  # slot re-sold
         response = self._webhook('payment.captured')

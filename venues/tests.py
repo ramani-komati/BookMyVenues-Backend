@@ -18,6 +18,10 @@ FULL_DATA = {
         'houseStreet': '12 MG Road',
         'pincode': '560001',
         'stateName': 'Karnataka',
+        # District + city are required since venues can be registered
+        # anywhere in India (venues/regions.py).
+        'district': 'Bengaluru Urban',
+        'city': 'Bengaluru',
         'mapsLink': 'https://maps.google.com/?q=grand+palace',
     },
     'details': {
@@ -758,8 +762,11 @@ class TaxonomyTests(APITestCase):
     def test_config_serves_the_taxonomy(self):
         data = self.client.get('/api/config').data
         names = [c['name'] for c in data['categories']]
+        # 'Gym' (Fitness) and 'Big screen surprise' (Celebrate, 2026-10-30)
+        # joined the taxonomy after this test was written.
         self.assertEqual(names, ['Party hall', 'Private theatre', 'Play zone',
-                                 'Resort', 'Playstation', 'Open-air theatre'])
+                                 'Resort', 'Playstation', 'Open-air theatre', 'Gym',
+                                 'Big screen surprise'])
         play = next(c for c in data['categories'] if c['name'] == 'Play zone')
         self.assertIn('Box Cricket', play['subCategories'])
         ps = next(c for c in data['categories'] if c['name'] == 'Playstation')

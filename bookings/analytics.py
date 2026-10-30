@@ -91,7 +91,7 @@ def _occupancy(listings, kept, today):
         open_minutes = 0
         day = first
         while day <= today:
-            for s, e in open_periods(settings, day)[0]:
+            for s, e in open_periods(settings, day, listing=base)[0]:
                 if day == today:
                     e = min(e, max(s, now))
                 open_minutes += max(0, e - s)
@@ -147,7 +147,8 @@ def _events_summary(user):
             event_sold += count
             if event_date.date >= today:
                 upcoming_dates += 1
-                event_remaining += max(0, event_date.capacity - count)
+                if event_date.capacity is not None:   # unlimited nights add nothing
+                    event_remaining += max(0, event_date.capacity - count)
         sold += event_sold
         remaining += event_remaining
         rows.append({'id': str(event.id), 'name': event.name, 'status': event.status,
@@ -192,16 +193,15 @@ def vendor_analytics(user, listings):
     rows = list(
         Booking.objects.filter(listing__vendor=user).exclude(status='removed')
     )
-    hold_cutoff = timezone.now() - datetime.timedelta(minutes=30)
     kept = [b for b in rows if is_kept(b.status)]
 
     def count(start, end):
         return sum(1 for b in kept if start <= b.date <= end)
 
     statuses = Counter(b.status for b in rows)
-    live_holds = sum(
-        1 for b in rows if b.status == 'payment_pending' and b.created_at >= hold_cutoff
-    )
+    # Checkouts holding a slot right now (5-minute holds — bookings/holds.py).
+    from .holds import is_live
+    live_holds = sum(1 for b in rows if is_live(b))
     channel = Counter(
         'walkIn' if (b.walk_in or b.method == Booking.Method.WALK_IN) else 'platform'
         for b in kept if month_start <= b.date <= today

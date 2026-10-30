@@ -45,6 +45,61 @@ CATEGORIES = {
         'Anniversary Celebration', 'Marriage Proposal', 'Surprise Celebration',
         'Rooftop Party', 'Private Dining',
     ],
+    # Fitness — the services a gym offers (the Fitness registration form's
+    # list, offerings/catalog.FITNESS_SERVICES). Gyms used to have no
+    # category at all (they could only register under "Others"); the
+    # earlier short names ('Cardio', 'Group Classes'…) still map onto these
+    # through canonical_sub_category.
+    'Gym': [
+        'General Gym / Strength Training', 'Cardio Training', 'Personal Training',
+        'Weight Loss Programs', 'Yoga', 'Zumba', 'CrossFit / Functional Training',
+        'Pilates', 'Group Fitness Classes', 'Martial Arts / Boxing',
+        'Dance Fitness', 'Physiotherapy / Recovery',
+    ],
+    # Celebrate → Big Screen Surprise: a personal message played on a real
+    # cinema screen. Its sub-categories are the occasions it is booked for.
+    'Big screen surprise': [
+        'Birthday', 'Anniversary', 'Proposal', 'Special Wishes', 'Love',
+        'Friendship', 'Selfie on Screen', 'Other',
+    ],
+}
+
+# THE primary categories customers browse and vendors register under. Each
+# groups one or more stored venue types (CATEGORIES keys) — the stored value
+# is never renamed, so every existing venue and filter keeps working:
+#   Celebrate  Party hall (the wizard's "Private Hall"), Private theatre,
+#              Open-air theatre, Big screen surprise
+#   Sports     Play zone (formerly the "Playzone" category)
+#   Gaming     Playstation (formerly the "PlayStation" category)
+#   Resorts    Resort
+#   Fitness    Gym
+# "Explore" is the customer home page and "Events" the ticketing product —
+# neither is a venue category, so neither is here (events have their own
+# taxonomy in events/catalog.py).
+CATEGORY_GROUPS = [
+    {'key': 'celebrate', 'label': 'Celebrate',
+     'types': ['Party hall', 'Private theatre', 'Open-air theatre', 'Big screen surprise']},
+    {'key': 'sports', 'label': 'Sports', 'types': ['Play zone']},
+    {'key': 'gaming', 'label': 'Gaming', 'types': ['Playstation']},
+    {'key': 'resorts', 'label': 'Resorts', 'types': ['Resort']},
+    {'key': 'fitness', 'label': 'Fitness', 'types': ['Gym']},
+]
+_GROUP_OF = {t.lower(): g['key'] for g in CATEGORY_GROUPS for t in g['types']}
+
+# The registration wizards' stored venue-type values (draft
+# details.primaryCategory) — kept as they always were so every existing
+# draft still opens — and the catalogue category each publishes as.
+OTHERS = 'Others'
+VENUE_TYPES = {
+    'Private Hall': 'Party hall',
+    'Private Theatre': 'Private theatre',
+    'Open Theatre': 'Open-air theatre',
+    'Playzone': 'Play zone',
+    'Playstation': 'Playstation',
+    'Resort': 'Resort',
+    'Gym': 'Gym',
+    'Big Screen Surprise': 'Big screen surprise',
+    OTHERS: None,       # the vendor types the category name
 }
 
 # Everything the database has ever stored -> the canonical category.
@@ -70,6 +125,26 @@ _CATEGORY_ALIASES = {
     'open theater': 'Open-air theatre',
     'open-air theatre': 'Open-air theatre',
     'open air theatre': 'Open-air theatre',
+    'open-air theater': 'Open-air theatre',
+    'open air theater': 'Open-air theatre',
+    # Single-sport play zones were filed under the sport's own name by the
+    # vendor wizard (Box cricket above, these two as well) — they are Sports.
+    'swimming pool': 'Play zone',
+    'pickleball': 'Play zone',
+    'gaming': 'Playstation',
+    'gaming zone': 'Playstation',
+    'gym': 'Gym',
+    'gyms': 'Gym',
+    'fitness': 'Gym',
+    'fitness centre': 'Gym',
+    'fitness center': 'Gym',
+    'fitness studio': 'Gym',
+    'gym & fitness': 'Gym',
+    'gym and fitness': 'Gym',
+    'big screen surprise': 'Big screen surprise',
+    'big-screen surprise': 'Big screen surprise',
+    'big screen surprises': 'Big screen surprise',
+    'cinema surprise': 'Big screen surprise',
 }
 
 
@@ -85,6 +160,10 @@ _SUBCATEGORY_ALIASES = {
     'get together': 'Get Together Party',
     'football': 'Football Turf',
     'ps 5': 'PS5',
+    # The Fitness list's earlier short names.
+    'group classes': 'Group Fitness Classes',
+    'cardio': 'Cardio Training',
+    'crossfit': 'CrossFit / Functional Training',
 }
 
 
@@ -137,7 +216,6 @@ def canonical_sub_category(category, raw):
     return text
 
 
-OTHERS = 'Others'
 MAX_CUSTOM_CATEGORY = 50   # matches the indexed Listing.category column
 
 
@@ -188,6 +266,12 @@ def sub_categories_for(listing):
         resolve_category(record) or record.get('category') or listing.category
     )
 
+    # Names added with the wizard's "Others" option (detail.
+    # customSubCategories) are shown only once the super admin approved them,
+    # in their approved spelling — and never run through the fuzzy matcher
+    # below, which would turn "Cricket" into "Box Cricket".
+    from .subcategories import is_declared_custom, public_custom_names
+
     raw = []
     raw.extend(_sub_category_names(detail.get('subCategories')))
     raw.extend(_sub_category_names(record.get('subCategories')))
@@ -199,16 +283,52 @@ def sub_categories_for(listing):
 
     seen, result = set(), []
     for value in raw:
+        if is_declared_custom(detail, value):
+            continue
         name = canonical_sub_category(category, value)
         if name and name not in seen:
+            seen.add(name)
+            result.append(name)
+    for name in public_custom_names(category, detail):
+        if name not in seen:
             seen.add(name)
             result.append(name)
     return result
 
 
+def category_group(category):
+    """The primary category ('celebrate' | 'sports' | 'gaming' | 'resorts' |
+    'fitness') a stored category belongs to, or '' (e.g. a vendor's own
+    "Others" name — a gym typed there still counts as Fitness)."""
+    canonical = canonical_category(category)
+    group = _GROUP_OF.get(canonical.lower(), '')
+    if not group and canonical:
+        words = _normalise(canonical).split()
+        if any(w in ('gym', 'gyms', 'fitness') for w in words):
+            return 'fitness'
+    return group
+
+
 def taxonomy_payload():
-    """[{name, subCategories:[...]}] — the shape GET /api/config serves."""
+    """[{name, subCategories:[...], group}] — the shape GET /api/config
+    serves (`group` is additive)."""
+    # Approved custom sub-categories (venues/subcategories.py) follow the
+    # built-in ones, so the customer filters offer them too.
+    try:
+        from .subcategories import approved_names
+        custom = approved_names()
+    except Exception:  # noqa: BLE001 — the config must never fail over this
+        custom = {}
     return [
-        {'name': name, 'subCategories': subs}
+        {
+            'name': name,
+            'subCategories': subs + [c for c in custom.get(name, []) if c not in subs],
+            'group': _GROUP_OF.get(name.lower(), ''),
+        }
         for name, subs in CATEGORIES.items()
     ]
+
+
+def groups_payload():
+    """The primary categories, in navigation order (GET /api/config)."""
+    return [dict(group) for group in CATEGORY_GROUPS]

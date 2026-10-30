@@ -354,6 +354,10 @@ def evaluate(kind, row, *, today=None):
     if row.status != 'confirmed':
         code = code or INELIGIBLE
         return code, _status_message(code, row)
+    if kind == 'venue' and getattr(row, 'kind', '') == 'membership':
+        # A membership is used many times — the gym records each visit under
+        # Members (offerings/views.py), not with a one-time check-in.
+        return INELIGIBLE, 'This is a gym membership. Record the visit from your Members list.'
     if row.checked_in_at is not None:
         return ALREADY_CHECKED_IN, _checked_in_message(row)
     if row.date != today:

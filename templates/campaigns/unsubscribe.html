@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Email preferences · TheBookMyVenues</title>
+<style>
+  :root { color-scheme: light; }
+  body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+         background: #EEF1F6; font-family: 'Plus Jakarta Sans', system-ui, -apple-system, 'Segoe UI', Arial, sans-serif;
+         color: #06152C; padding: 16px; box-sizing: border-box; }
+  .card { background: #fff; border-radius: 14px; max-width: 460px; width: 100%; overflow: hidden;
+          box-shadow: 0 10px 30px rgba(6, 21, 44, .08); }
+  .top { background: #06152C; color: #fff; padding: 18px 24px; font-weight: 800; font-size: 17px; }
+  .top span { color: #F1252E; }
+  .body { padding: 26px 24px 28px; }
+  h1 { font-size: 21px; margin: 0 0 10px; letter-spacing: -.3px; }
+  p { margin: 0 0 14px; line-height: 1.55; color: #45577A; font-size: 15px; }
+  button { font: inherit; font-weight: 800; font-size: 15px; color: #fff; background: #F1252E; border: 0;
+           border-radius: 10px; padding: 13px 22px; cursor: pointer; width: 100%; }
+  button:focus-visible, a:focus-visible { outline: 3px solid #06152C; outline-offset: 2px; }
+  a { color: #06152C; font-weight: 700; }
+  .note { font-size: 13px; color: #7789A6; margin-top: 16px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <div class="top">The<span>Book</span>MyVenues</div>
+    <div class="body">
+      {% if state == 'confirm' %}
+        <h1>Unsubscribe from offers?</h1>
+        <p>You will stop getting promotional emails from TheBookMyVenues.</p>
+        <form method="post">
+          <input type="hidden" name="token" value="{{ token }}">
+          <button type="submit">Unsubscribe</button>
+        </form>
+        <p class="note">Booking confirmations, tickets and sign-in codes will still reach you.</p>
+      {% elif state == 'done' %}
+        <h1>You're unsubscribed</h1>
+        <p>We won't send you promotional emails any more. Booking confirmations, tickets and sign-in codes are not affected.</p>
+        <p>Changed your mind? Turn offers back on any time in <a href="{{ account_url }}">My account</a>.</p>
+      {% elif state == 'already' %}
+        <h1>You're already unsubscribed</h1>
+        <p>You don't get promotional emails from us. You can turn them on again in <a href="{{ account_url }}">My account</a>.</p>
+      {% elif state == 'test' %}
+        <h1>This was a test email</h1>
+        <p>Unsubscribe links only work in a real campaign, so nothing was changed.</p>
+      {% else %}
+        <h1>This link doesn't work</h1>
+        <p>It may have been copied incompletely. You can manage promotional emails in <a href="{{ account_url }}">My account</a>.</p>
+      {% endif %}
+      <p class="note"><a href="{{ site_url }}">Back to TheBookMyVenues</a></p>
+    </div>
+  </main>
+</body>
+</html>

@@ -187,6 +187,17 @@ class BookingsExportTests(EventTestCase):
             with self.subTest(status=status):
                 self.assertExports(self.objs(*names), status=status)
 
+    def test_booking_and_payment_state_columns(self):
+        # Appended columns: the SAME separate answers the Bookings page badges
+        # show (bookings/status_view.py) — booking, then payment.
+        rows = {r['Record ID']: r for r in self.rows()}
+        done = rows[self.v_done.id]
+        self.assertEqual((done['Booking State'], done['Payment State']), ('Completed', 'Completed'))
+        abandoned = rows[self.v_abandoned.id]
+        self.assertEqual((abandoned['Booking State'], abandoned['Payment State']), ('Expired', 'Not paid'))
+        failed = rows[self.e_failed.id]
+        self.assertEqual((failed['Booking State'], failed['Payment State']), ('Not confirmed', 'Failed'))
+
     def test_status_columns_keep_the_stored_value(self):
         rows = {r['Record ID']: r for r in self.rows()}
         self.assertEqual(rows[self.v_done.id]['Payment Status'], 'confirmed')
@@ -363,7 +374,8 @@ class BookingsExportTests(EventTestCase):
         self.assertTrue(response.content.startswith(b'PK'))  # a zip container
         ws = self.sheet(response)
         self.assertEqual(ws.freeze_panes, 'A2')
-        self.assertEqual(ws.auto_filter.ref, f'A1:O{len(self.ALL_LIVE) + 1}')
+        # A–Q: the original 15 columns plus Booking State / Payment State.
+        self.assertEqual(ws.auto_filter.ref, f'A1:Q{len(self.ALL_LIVE) + 1}')
         self.assertTrue(ws['A1'].font.bold)
         self.assertGreaterEqual(ws.column_dimensions['D'].width, 30)
         ids = [c.value for c in ws['B'][1:]]

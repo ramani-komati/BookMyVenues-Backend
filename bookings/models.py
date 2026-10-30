@@ -76,6 +76,14 @@ class Booking(models.Model):
     unit = models.PositiveSmallIntegerField(null=True, blank=True)
     unit_label = models.CharField(max_length=150, blank=True, default='')
 
+    # What was bought. '' = an ordinary slot booking (every row made before
+    # this existed); 'membership' | 'package' | 'surprise' = a gym
+    # membership, a resort package or a big screen surprise, whose own
+    # details live in offerings/models.py. Those kinds never take part in
+    # the slot overlap checks (see views._active_bookings) — they have
+    # capacity rules of their own (offerings/availability.py).
+    kind = models.CharField(max_length=12, blank=True, default='')
+
     date = models.DateField()
     slots = models.JSONField(default=list)      # ["19:30 – 21:00", ...]
     per_slot = models.PositiveIntegerField(default=0)  # hourly rate (₹)
@@ -105,8 +113,9 @@ class Booking(models.Model):
     #                                              succeeded (verified)
     #   confirmed       → refund_pending → refunded
     #   unpaid          → removed                 super-admin soft delete
-    # 'payment_pending' holds the slot for PENDING_HOLD_MINUTES until paid;
-    # 'completed' is derived from the date (display_status).
+    # 'payment_pending' holds the slot until hold_expires_at (5 minutes —
+    # bookings/holds.py) or until paid; 'completed' is derived from the date
+    # (display_status).
     status = models.CharField(max_length=20, default='confirmed')
     # Razorpay linkage (empty for pay-at-venue / walk-ins / legacy bookings).
     # Part payment: what was charged online vs owed in cash at the venue.
@@ -146,6 +155,11 @@ class Booking(models.Model):
         related_name='checked_in_bookings',
     )
     created_at = models.DateTimeField(auto_now_add=True)
+    # When an unpaid ('payment_pending') row stops holding its slot: set ONCE,
+    # from the server clock, when the hold is created (bookings/holds.py) and
+    # never extended. Null on rows from before holds were timed this way —
+    # those fall back to created_at + HOLD_MINUTES.
+    hold_expires_at = models.DateTimeField(null=True, blank=True)
     # The booking's invoice number ("INV-2627-000123"): issued ONCE by
     # bookings/invoices.py when the row is first inserted, from the series
     # event orders share, and never changed. It says the booking exists — NOT
@@ -189,19 +203,26 @@ class Booking(models.Model):
     @property
     def hold_expired(self):
         """An unpaid booking whose slot hold has lapsed — an abandoned
-        checkout. The SAME cutoff _active_bookings uses to stop the hold
-        blocking the slot (bookings.views.PENDING_HOLD_MINUTES), so the panel
-        calls a hold abandoned exactly when availability frees it."""
-        import datetime
-
-        from django.utils import timezone
-
-        from .views import PENDING_HOLD_MINUTES
+        checkout. The SAME rule _active_bookings uses to stop the hold
+        blocking the slot (bookings/holds.py), so the panel calls a hold
+        abandoned exactly when availability frees it."""
+        from . import holds
 
         if self.status != 'payment_pending' or self.created_at is None:
             return False
-        cutoff = timezone.now() - datetime.timedelta(minutes=PENDING_HOLD_MINUTES)
-        return self.created_at < cutoff
+        return not holds.is_live(self)
+
+    @property
+    def hold_expiry(self):
+        from . import holds
+        return holds.expires_at(self)
+
+    @property
+    def hold_state(self):
+        """'held' | 'payment_pending' | 'expired' for an unpaid row, else
+        None (bookings/holds.py)."""
+        from . import holds
+        return holds.hold_state(self)
 
     @property
     def display_status(self):
@@ -212,6 +233,12 @@ class Booking(models.Model):
         if self.status and self.status != 'confirmed':
             return self.status
         today = today_ist()
+        if self.kind == 'membership':
+            # A membership is "completed" when its validity ends, not on the
+            # day it started (its `date`).
+            membership = getattr(self, 'membership', None)
+            ends = membership.ends_on if membership else self.date
+            return 'completed' if ends < today else 'confirmed'
         if self.date < today:
             return 'completed'
         if self.date == today:
@@ -303,7 +330,32 @@ class Booking(models.Model):
             # vendor and the admin — never on a public endpoint.
             'invoiceNumber': self.invoice_number or None,
             **payment_time_fields(self),
+            # Booking status and payment status as two separate answers
+            # (bookings/status_view.py) — `status` above stays as it was.
+            **self.state_fields(),
+            # Unpaid rows only: 'held' (reserved at checkout), 'payment_pending'
+            # (payment started) or 'expired' — and when the 5-minute hold
+            # ends (bookings/holds.py). Null on every other row.
+            'holdState': self.hold_state,
+            'holdExpiresAt': (
+                self.hold_expiry.isoformat()
+                if self.status == 'payment_pending' and self.hold_expiry else None
+            ),
+            # Additive: 'slot' for ordinary bookings, else what was bought,
+            # with its details (offerings/summary.py; None for slots).
+            'kind': self.kind or 'slot',
+            'offering': self.offering_summary(),
         }
+
+    def offering_summary(self):
+        if not self.kind:
+            return None
+        from offerings.summary import offering_summary
+        return offering_summary(self)
+
+    def state_fields(self):
+        from .status_view import booking_states, state_fields
+        return state_fields(booking_states(self))
 
     def __init__(self, *args, **kwargs):
         # Rows loaded from the database arrive positionally (Model.from_db);

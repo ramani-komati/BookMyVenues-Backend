@@ -19,6 +19,7 @@ from django.utils import timezone
 from .models import Booking
 from . import tests as base
 from .tests import TOMORROW, BookingTestBase
+from .holds import HOLD_MINUTES
 from .views import PENDING_HOLD_MINUTES
 
 
@@ -40,8 +41,12 @@ class VenuePaymentStateTests(BookingTestBase):
         return Booking.objects.get(pk=response.data['bookingId'])
 
     def age(self, booking, minutes):
+        # Holds store their own end (Booking.hold_expires_at, 5 minutes after
+        # creation — bookings/holds.py), so ageing a hold moves both.
+        created = timezone.now() - datetime.timedelta(minutes=minutes)
         Booking.objects.filter(pk=booking.pk).update(
-            created_at=timezone.now() - datetime.timedelta(minutes=minutes)
+            created_at=created,
+            hold_expires_at=created + datetime.timedelta(minutes=HOLD_MINUTES),
         )
         booking.refresh_from_db()
 
@@ -67,21 +72,23 @@ class VenuePaymentStateTests(BookingTestBase):
     # ---- hold expiry --------------------------------------------------------
 
     def test_hold_lasts_the_configured_window(self):
+        # Venue holds are 5 minutes now; event tickets keep their 30.
+        self.assertEqual(HOLD_MINUTES, 5)
         self.assertEqual(PENDING_HOLD_MINUTES, 30)
         booking = self.pending()
-        self.age(booking, PENDING_HOLD_MINUTES - 1)
+        self.age(booking, HOLD_MINUTES - 1)
         self.assertFalse(booking.hold_expired)
         self.assertFalse(self.slot_free())        # still held
 
     def test_hold_expired_flips_when_availability_frees_the_slot(self):
         booking = self.pending()
-        self.age(booking, PENDING_HOLD_MINUTES + 1)
+        self.age(booking, HOLD_MINUTES + 1)
         self.assertTrue(booking.hold_expired)
         self.assertTrue(self.slot_free())
 
     def test_only_unpaid_holds_can_expire(self):
         booking = self.pending()
-        self.age(booking, PENDING_HOLD_MINUTES + 60)
+        self.age(booking, HOLD_MINUTES + 60)
         for status in ('confirmed', 'failed', 'cancelled', 'refunded', 'removed'):
             booking.status = status
             self.assertFalse(booking.hold_expired, status)

@@ -10,6 +10,7 @@ progress circle always matches what submit will say.
 A bucket counts only when ALL its required items are filled.
 Mirrors the frontend's own formula (contract: submit gates in 4.7).
 """
+from .regions import location_problems
 
 
 def _filled(bucket, key):
@@ -38,12 +39,61 @@ def _location(location):
         missing.append('Pincode')
     if not _filled(location, 'stateName'):
         missing.append('State')
+    if not _filled(location, 'district'):
+        missing.append('District')
+    if not _filled(location, 'city'):
+        missing.append('City / Town')
     if not _filled(location, 'mapsLink'):
         missing.append('Google Maps link')
+    # Present but not a real Indian state / district / PIN for that state
+    # (venues/regions.py — every state and union territory is accepted).
+    missing.extend(location_problems(location))
     return missing
 
 
+def _enabled_rows(block, key, priced=('price',)):
+    """Entries of block[key] that are switched on and carry a price."""
+    rows = (block or {}).get(key) if isinstance(block, dict) else None
+    out = []
+    for row in rows or []:
+        if not isinstance(row, dict) or row.get('enabled') is False:
+            continue
+        if all(_filled(row, field) for field in priced):
+            out.append(row)
+    return out
+
+
+def _offering_details(venue_type, details):
+    """The submit gate for the three venue types that sell memberships,
+    packages or surprises instead of hourly slots (offerings app)."""
+    missing = []
+    if venue_type == 'Gym':
+        # Memberships are THE product of a gym listing — mandatory.
+        if not _enabled_rows(details.get('fitness'), 'plans'):
+            missing.append('At least one membership plan with a price')
+    elif venue_type == 'Resort':
+        # New resorts sell packages; a resort registered before packages
+        # existed keeps its hourly lawn pricing as an alternative.
+        legacy = _filled(details, 'capacity') and details.get('packages')
+        if not _enabled_rows(details.get('resort'), 'packages') and not legacy:
+            missing.append('At least one resort package with a price')
+    elif venue_type == 'Big Screen Surprise':
+        surprise = details.get('surprise') if isinstance(details.get('surprise'), dict) else {}
+        if not _filled(surprise, 'price'):
+            missing.append('Price per surprise')
+        if not _enabled_rows(surprise, 'shows', priced=('movie',)):
+            missing.append('At least one show (movie, screen and timings)')
+    return missing
+
+
+OFFERING_VENUE_TYPES = ('Gym', 'Resort', 'Big Screen Surprise')
+
+
 def _details(details):
+    venue_type = str(details.get('primaryCategory') or '').strip()
+    if venue_type in OFFERING_VENUE_TYPES:
+        return _offering_details(venue_type, details)
+
     missing = []
     if not _filled(details, 'primaryCategory'):
         missing.append('Venue category')
@@ -72,12 +122,17 @@ REQUIRED_PAYOUT_FIELDS = [
 ]
 
 
-def _payout(payout):
-    return [
+def _payout(payout, venue_type=''):
+    missing = [
         label
         for key, label in REQUIRED_PAYOUT_FIELDS
         if not _filled(payout, key)
     ]
+    # The Fitness / Resort / Big Screen Surprise forms ask the owner to
+    # accept the platform commission and terms with their bank details.
+    if venue_type in OFFERING_VENUE_TYPES and payout.get('agreedToTerms') is not True:
+        missing.append('Agreement to the platform commission and terms')
+    return missing
 
 
 def _photos(photos):
@@ -93,7 +148,10 @@ def compute_completion(draft):
         _basics(data.get('basics') or {}),
         _location(data.get('location') or {}),
         _details(data.get('details') or {}),
-        _payout(data.get('payout') or {}),
+        _payout(
+            data.get('payout') or {},
+            str((data.get('details') or {}).get('primaryCategory') or '').strip(),
+        ),
         _photos(data.get('photos') or {}),
     ]
 

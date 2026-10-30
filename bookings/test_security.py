@@ -335,7 +335,7 @@ class OfferPerUserLimitTests(GatewayBookingMixin, APITestCase):
         """A failed payment must not burn the allowance forever."""
         self.assertEqual(self.book(slot=0).status_code, 201)
         stale = timezone.now() - datetime.timedelta(minutes=90)
-        Booking.objects.filter(status='payment_pending').update(created_at=stale)
+        Booking.objects.filter(status='payment_pending').update(created_at=stale, hold_expires_at=stale)
         self.assertEqual(self.book(slot=1).status_code, 201)
 
     def test_code_less_offers_are_limited_by_title(self):
@@ -590,7 +590,7 @@ class PlatformPromoPerUserLimitTests(GatewayBookingMixin, APITestCase):
     def test_an_expired_hold_stops_counting(self):
         self.assertEqual(self.book(slot=0).status_code, 201)
         stale = timezone.now() - datetime.timedelta(minutes=90)
-        Booking.objects.filter(status='payment_pending').update(created_at=stale)
+        Booking.objects.filter(status='payment_pending').update(created_at=stale, hold_expires_at=stale)
         self.assertEqual(self.book(slot=1).status_code, 201)
 
     def test_platform_and_venue_allowances_stay_separate(self):

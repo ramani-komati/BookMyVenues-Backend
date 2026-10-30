@@ -4,7 +4,7 @@ Photo upload/delete routes join in Phase 3.
 """
 from django.urls import path
 
-from . import business_views, favorites, geocoding, maps, public_views, views
+from . import business_views, favorites, geocoding, maps, public_views, subcategory_views, views
 
 urlpatterns = [
     # Google Maps short-link resolver (P2) — public, no auth.
@@ -13,6 +13,11 @@ urlpatterns = [
     # until a provider is configured — see venues/geocoding.py).
     path('geo/search', geocoding.PlaceSearchView.as_view(), name='geo-search'),
     path('geo/reverse', geocoding.PlaceReverseView.as_view(), name='geo-reverse'),
+    # As-you-type suggestions + the picked place (Google Places API (New)).
+    path('geo/autocomplete', geocoding.PlaceAutocompleteView.as_view(), name='geo-autocomplete'),
+    path('geo/place', geocoding.PlaceDetailsView.as_view(), name='geo-place'),
+    # Every Indian state / UT and its districts (static, no provider needed).
+    path('geo/regions', geocoding.RegionListView.as_view(), name='geo-regions'),
     # Customer wishlist sync (User JWT).
     path('users/me/favorites', favorites.FavoritesView.as_view(), name='favorites'),
     # Vendor: publish / delete listings (contract 3.5, 3.6)
@@ -87,6 +92,8 @@ urlpatterns = [
     path('venues/drafts/<uuid:draft_id>/seed', views.DraftSeedView.as_view(), name='draft-seed'),
     # Public browsing (contract 1.1, 1.2). The catch-all <id_or_slug>
     # route MUST stay last so it never shadows /venues/drafts.
+    # Approved custom sub-categories for the registration wizard.
+    path('subcategories', subcategory_views.PublicSubCategoriesView.as_view(), name='public-subcategories'),
     path('venues', public_views.PublicVenueListView.as_view(), name='public-venue-list'),
     path('venues/<str:id_or_slug>', public_views.PublicVenueDetailView.as_view(), name='public-venue-detail'),
 ]

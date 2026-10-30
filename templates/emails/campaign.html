@@ -1,0 +1,182 @@
+{% comment %}
+Promotional campaign email (campaigns/content.py renders it).
+
+Deliberately its OWN shell, not emails/_base.html: promotional mail carries
+an unsubscribe footer and a hidden preview line that transactional mail must
+not, and keeping the files apart means a campaign change can never alter an
+OTP or booking email.
+
+Same rules as _base.html: table layout, inline styles, 600px max, no reliance
+on remote images for meaning (every image has alt text). The <style> block is
+progressive enhancement only — clients that strip it still get a readable,
+single-column email.
+
+Values that are already HTML-safe (heading_html, blocks, caption_html) were
+escaped in Python before formatting was applied.
+{% endcomment %}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="x-apple-disable-message-reformatting">
+<title>{{ subject }}</title>
+<style>
+  @media only screen and (max-width: 620px) {
+    /* A fixed 600px table never shrinks inside an auto-width cell on its own. */
+    table.bmv-wrap { width: 100% !important; }
+    img.bmv-img { width: 100% !important; height: auto !important; }
+    .bmv-pad { padding-left: 20px !important; padding-right: 20px !important; }
+    .bmv-h1 { font-size: 22px !important; line-height: 29px !important; }
+    .bmv-btn a { display: block !important; }
+  }
+</style>
+</head>
+<body style="margin:0;padding:0;background-color:#EEF1F6;">
+{% if preview_text %}
+<div style="display:none;max-height:0;overflow:hidden;mso-hide:all;font-size:1px;line-height:1px;color:#EEF1F6;opacity:0;">
+  {{ preview_text }}&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;&#847;&zwnj;&nbsp;
+</div>
+{% endif %}
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
+       style="background-color:#EEF1F6;margin:0;padding:28px 10px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" class="bmv-wrap"
+             style="width:600px;max-width:100%;border-collapse:collapse;">
+
+        {% if is_test %}
+        <tr>
+          <td style="background-color:#FFF4D6;color:#6B4E00;padding:10px 16px;border-radius:10px;
+                     font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                     font-size:13px;font-weight:700;text-align:center;">
+            TEST EMAIL — only you received this. The unsubscribe link below is inactive in tests.
+          </td>
+        </tr>
+        <tr><td style="height:12px;line-height:12px;font-size:0;">&nbsp;</td></tr>
+        {% endif %}
+
+        <!-- Header -->
+        <tr>
+          <td class="bmv-pad" style="background-color:#06152C;padding:22px 32px;border-radius:12px 12px 0 0;">
+            <a href="{{ site_url }}" style="text-decoration:none;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                {% if logo_url %}
+                <td>
+                  <img src="{{ logo_url }}" alt="TheBookMyVenues" width="170"
+                       style="display:block;border:0;outline:none;height:auto;max-width:170px;">
+                </td>
+                {% else %}
+                <td width="38" style="width:38px;">
+                  <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="38" height="38"
+                         style="width:38px;height:38px;background-color:#0C1A32;border-radius:10px;">
+                    <tr>
+                      <td align="center" valign="middle"
+                          style="font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                                 font-size:22px;font-weight:800;color:#F1252E;line-height:38px;">B</td>
+                    </tr>
+                  </table>
+                </td>
+                <td style="padding-left:12px;font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                           font-size:18px;font-weight:800;letter-spacing:-0.3px;color:#FFFFFF;">
+                  The<span style="color:#F1252E;">Book</span>MyVenues
+                </td>
+                {% endif %}
+              </tr>
+            </table>
+            </a>
+          </td>
+        </tr>
+
+        {% if banner %}
+        <!-- Banner (first image) -->
+        <tr>
+          <td style="background-color:#FFFFFF;padding:0;line-height:0;font-size:0;">
+            {% if banner.link %}<a href="{{ banner.link }}" style="text-decoration:none;">{% endif %}
+            <img src="{{ banner.url }}" alt="{{ banner.alt }}" width="600" class="bmv-img"
+                 style="display:block;width:100%;max-width:600px;height:auto;border:0;outline:none;">
+            {% if banner.link %}</a>{% endif %}
+          </td>
+        </tr>
+        {% if banner.caption_html %}
+        <tr>
+          <td class="bmv-pad" style="background-color:#FFFFFF;padding:10px 32px 0 32px;
+                     font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                     font-size:13px;line-height:19px;color:#7789A6;">{{ banner.caption_html|safe }}</td>
+        </tr>
+        {% endif %}
+        {% endif %}
+
+        <!-- Body -->
+        <tr>
+          <td class="bmv-pad" style="background-color:#FFFFFF;padding:30px 32px 8px 32px;
+                     font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;color:#06152C;">
+            <div class="bmv-h1" style="font-size:25px;font-weight:800;line-height:32px;letter-spacing:-0.4px;color:#06152C;">
+              {{ heading_html|safe }}
+            </div>
+            {% for kind, content in blocks %}
+              {% if kind == 'ul' %}
+              <ul style="margin:14px 0 0 0;padding:0 0 0 20px;font-size:15px;line-height:24px;color:#45577A;">
+                {% for item in content %}<li style="margin:0 0 6px 0;">{{ item|safe }}</li>{% endfor %}
+              </ul>
+              {% else %}
+              <p style="margin:14px 0 0 0;font-size:15px;line-height:24px;color:#45577A;">{{ content|safe }}</p>
+              {% endif %}
+            {% endfor %}
+          </td>
+        </tr>
+
+        {% for image in gallery %}
+        <tr>
+          <td class="bmv-pad" style="background-color:#FFFFFF;padding:20px 32px 0 32px;">
+            {% if image.link %}<a href="{{ image.link }}" style="text-decoration:none;">{% endif %}
+            <img src="{{ image.url }}" alt="{{ image.alt }}" width="536" class="bmv-img"
+                 style="display:block;width:100%;max-width:536px;height:auto;border:0;outline:none;border-radius:10px;">
+            {% if image.link %}</a>{% endif %}
+            {% if image.caption_html %}
+            <div style="padding-top:8px;font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                        font-size:14px;line-height:21px;color:#45577A;">{{ image.caption_html|safe }}</div>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+
+        <!-- Call to action -->
+        <tr>
+          <td class="bmv-pad" style="background-color:#FFFFFF;padding:26px 32px 32px 32px;">
+            {% if cta_label and cta_url %}
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0" class="bmv-btn">
+              <tr>
+                <td align="center" style="background-color:#F1252E;border-radius:10px;">
+                  <a href="{{ cta_url }}"
+                     style="display:inline-block;padding:14px 28px;font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                            font-size:15px;font-weight:800;color:#FFFFFF;text-decoration:none;border-radius:10px;">{{ cta_label }}</a>
+                </td>
+              </tr>
+            </table>
+            {% endif %}
+          </td>
+        </tr>
+
+        <!-- Footer: unsubscribe is ALWAYS present on promotional mail -->
+        <tr>
+          <td class="bmv-pad" style="background-color:#FFFFFF;border-top:1px solid #D6DEEA;
+                     padding:20px 32px 26px 32px;border-radius:0 0 12px 12px;
+                     font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                     font-size:12px;line-height:19px;color:#7789A6;">
+            You are receiving this because you chose to get offers from TheBookMyVenues.
+            <a href="{{ unsubscribe_url }}" style="color:#45577A;text-decoration:underline;">Unsubscribe</a>
+            — booking confirmations and sign-in codes are not affected.
+            {% if postal_address %}<div style="padding-top:8px;">{{ postal_address }}</div>{% endif %}
+            <div style="padding-top:10px;">
+              <a href="{{ site_url }}" style="color:#45577A;text-decoration:underline;">{{ site_domain }}</a>
+            </div>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
+</body>
+</html>

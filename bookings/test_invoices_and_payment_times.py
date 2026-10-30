@@ -342,8 +342,11 @@ class VenuePaymentTimeTests(BookingTestBase):
                                 content_type='application/json', HTTP_X_RAZORPAY_SIGNATURE=sig)
 
     def age(self, booking, minutes):
+        # Holds store their own end (Booking.hold_expires_at, 5 minutes after
+        # creation — bookings/holds.py), so ageing a hold moves both.
+        created = timezone.now() - datetime.timedelta(minutes=minutes)
         Booking.objects.filter(pk=booking.pk).update(
-            created_at=timezone.now() - datetime.timedelta(minutes=minutes))
+            created_at=created, hold_expires_at=created + datetime.timedelta(minutes=5))
         booking.refresh_from_db()
 
     def test_verified_checkout_records_a_payment_time_distinct_from_creation(self):

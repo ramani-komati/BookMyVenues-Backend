@@ -35,6 +35,12 @@ urlpatterns = [
     path('api/', include('bookings.urls')),
     # Event ticketing (its own /events/* namespace — no overlap with venues).
     path('api/', include('events.urls')),
+    # Memberships / resort packages / big screen surprises. Before venues:
+    # its venues/<id>/offerings route must not meet the detail catch-all.
+    path('api/', include('offerings.urls')),
+    # Promotional email: the customer's opt-in, unsubscribe links and the
+    # Resend delivery webhook (campaigns/urls.py).
+    path('api/', include('campaigns.urls')),
     path('api/', include('venues.urls')),
     # Super-admin panel (cookie-session auth, {"detail"} errors) — /api/admin/
     path('api/admin/', include('adminpanel.urls')),

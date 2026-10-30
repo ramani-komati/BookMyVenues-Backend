@@ -169,6 +169,10 @@ class GeocoderFailureTests(APITestCase):
         self.assertEqual(r.data['results'], [{
             'label': 'Medipally, Medchal–Malkajgiri', 'locality': 'Medipally',
             'city': 'Medchal–Malkajgiri', 'lat': MEDPALLY[0], 'lng': MEDPALLY[1],
+            # Matched to the India dataset's spelling, even without a state
+            # in the provider's answer (the district name is unique).
+            'district': 'Medchal Malkajgiri', 'state': 'Telangana', 'country': 'India',
+            'formattedAddress': 'Medipally, Telangana, India',
         }])
         self.assertNotIn('server-secret-key', str(r.content))
 

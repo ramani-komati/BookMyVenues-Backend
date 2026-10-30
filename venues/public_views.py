@@ -81,7 +81,7 @@ def _summary(listing, ratings=None):
         # customer whose booking is paid (bookings/contact.py).
         if key not in ('detail', 'contactPhone')
     }
-    from .taxonomy import canonical_category, sub_categories_for
+    from .taxonomy import canonical_category, category_group, sub_categories_for
 
     summary['id'] = str(listing.id)
     summary['status'] = listing.status
@@ -94,6 +94,8 @@ def _summary(listing, ratings=None):
         summary.get('category') or listing.category
     )
     summary['subCategories'] = sub_categories_for(listing)
+    # The primary category it browses under ('celebrate', 'sports', …).
+    summary['categoryGroup'] = category_group(summary['category'])
     summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
     # The venue's map pin (derived from the vendor's maps link), or null.
@@ -267,14 +269,21 @@ class PublicVenueDetailView(APIView):
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
 
         from bookings.ratings import venue_rating
-        from .taxonomy import canonical_category, sub_categories_for
+        from .taxonomy import canonical_category, category_group, sub_categories_for
         record = dict(listing.record)
         record['slug'] = listing.slug
         record['meta'] = _derive_meta(listing)
         record['category'] = canonical_category(
             record.get('category') or listing.category
         )
+        record['categoryGroup'] = category_group(record['category'])
         record['subCategories'] = sub_categories_for(listing)
+        # Custom sub-categories still waiting for (or refused) super admin
+        # approval never reach customers (venues/subcategories.py).
+        from .subcategories import category_for_type, public_detail
+        record['detail'] = public_detail(
+            category_for_type(record['category']), record.get('detail'),
+        )
         # Same pin the list rows carry, so the page can show "x km away"
         # from the customer's selected location (computed in the browser —
         # this cached response never depends on who is asking).
@@ -302,6 +311,12 @@ class PublicVenueDetailView(APIView):
         # public, unauthenticated page. The customer site never displayed it.
         detail.pop('contactPhone', None)
         record.pop('contactPhone', None)
+        # The venue's saved timings (venues/timings.py), normalised, plus the
+        # line the venue page prints ("Open 24 hours", "9:00 AM – 10:00 PM").
+        from .timings import listing_timings, timings_label
+        timings = listing_timings(listing)
+        detail['timings'] = timings
+        detail['timingsLabel'] = timings_label(timings)
         record['detail'] = detail
         # The vendor's opening hours, upcoming closures and booking
         # instructions (venues/business.py); null when never configured, i.e.
