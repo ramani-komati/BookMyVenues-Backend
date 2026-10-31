@@ -21,6 +21,7 @@ from .geo import (
     LocationParamError,
     bounding_box,
     coordinates_payload,
+    has_coordinates,
     parse_location_params,
     rank_by_distance,
 )
@@ -29,6 +30,11 @@ from .models import Listing
 CACHE_SECONDS = 60
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
+# Venues without a usable map pin returned beside a radius search
+# (?includeUnmapped=1) — enough for a "Distance unknown" shelf.
+MAX_UNMAPPED = 50
+# Offers carried on each list row so the home cards need no detail call.
+MAX_CARD_OFFERS = 3
 # How long a venue wears the "New" badge (also exposed in GET /api/config).
 NEW_BADGE_DAYS = 15
 
@@ -97,7 +103,17 @@ def _summary(listing, ratings=None):
     # The primary category it browses under ('celebrate', 'sports', …).
     summary['categoryGroup'] = category_group(summary['category'])
     summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
+    from .places import display_place
+    summary['location'] = display_place(summary.get('location'))
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
+    # The card's offer strip (QA audit 2026-10-30: the homepage fetched each
+    # venue's full record just for these). Only what a card shows.
+    detail = (listing.record or {}).get('detail')
+    raw_offers = detail.get('offers') if isinstance(detail, dict) else None
+    summary['offers'] = [
+        offer for offer in (raw_offers if isinstance(raw_offers, list) else [])
+        if isinstance(offer, dict) and offer.get('enabled', True) is not False
+    ][:MAX_CARD_OFFERS]
     # The venue's map pin (derived from the vendor's maps link), or null.
     # Public on purpose: the venue page already embeds the same pin.
     summary['coordinates'] = coordinates_payload(listing.latitude, listing.longitude)
@@ -128,6 +144,13 @@ class PublicVenueListView(APIView):
       sort=distance   ORDERS nearest first; venues without a pin go last.
       radius=<km>     EXCLUDES venues farther than that — and venues without
                       a pin, which cannot be shown to be inside it.
+      includeUnmapped=1
+                      ALSO returns the venues (same filters) that have no
+                      usable pin as `distanceUnknown` (+ `distanceUnknownTotal`),
+                      so a customer still sees them — in their own "Distance
+                      unknown" section, never mixed into the nearby list and
+                      never with an invented distance. Not paginated (first
+                      MAX_UNMAPPED, newest first).
     """
 
     permission_classes = [AllowAny]
@@ -168,17 +191,24 @@ class PublicVenueListView(APIView):
             )
 
         queryset = Listing.objects.filter(status=Listing.Status.LIVE)
+        include_unmapped = str(params.get('includeUnmapped', '')).lower() in ('1', 'true', 'yes')
 
         q = params.get('q', '').strip()
+        from django.db.models import Q
+        from events.location import place_terms
         if q:
-            from django.db.models import Q
-            queryset = queryset.filter(
-                Q(name__icontains=q) | Q(locality__icontains=q) | Q(category__icontains=q)
-            )
+            # Every spelling of a place matches (Hanamkonda = Hanumakonda = …).
+            match = Q()
+            for term in place_terms(q) or (q,):
+                match |= Q(name__icontains=term) | Q(locality__icontains=term) | Q(category__icontains=term)
+            queryset = queryset.filter(match)
         if params.get('category'):
             queryset = queryset.filter(category__iexact=params['category'])
         if params.get('locality'):
-            queryset = queryset.filter(locality__icontains=params['locality'])
+            match = Q()
+            for term in place_terms(params['locality']) or (params['locality'],):
+                match |= Q(locality__icontains=term)
+            queryset = queryset.filter(match)
         if params.get('pincode'):
             queryset = queryset.filter(pincode=params['pincode'])
 
@@ -186,6 +216,18 @@ class PublicVenueListView(APIView):
         # without a pin, so the order is always deterministic.
         queryset = queryset.order_by(SORTS.get(sort, SORTS['new']))
         start = offset if offset is not None else (page - 1) * limit
+
+        # Same filters, no pin — computed BEFORE the bounding box narrows the
+        # queryset to pinned rows.
+        unmapped_rows, unmapped_total = [], 0
+        if include_unmapped and origin is not None:
+            unpinned = [
+                pk for pk, lat, lng in queryset.values_list('pk', 'latitude', 'longitude')
+                if not has_coordinates(lat, lng)
+            ]
+            unmapped_total = len(unpinned)
+            by_pk = Listing.objects.in_bulk(unpinned[:MAX_UNMAPPED])
+            unmapped_rows = [by_pk[pk] for pk in unpinned[:MAX_UNMAPPED] if pk in by_pk]
 
         distances = {}
         if origin is not None and (radius is not None or sort == 'distance'):
@@ -209,7 +251,7 @@ class PublicVenueListView(APIView):
 
         from bookings.ratings import venue_ratings_map
         from .geo import distance_km
-        ratings = venue_ratings_map(rows)   # two queries for the whole page
+        ratings = venue_ratings_map(rows + unmapped_rows)   # two queries in all
         venues = []
         for row in rows:
             summary = _summary(row, ratings)
@@ -219,7 +261,23 @@ class PublicVenueListView(APIView):
                     else distance_km(origin, row.latitude, row.longitude)
                 )
             venues.append(summary)
-        return Response({'venues': venues, 'total': total})
+        body = {'venues': venues, 'total': total}
+        if include_unmapped and origin is not None:
+            if radius is None:
+                # Without a radius the unpinned venues are already in `venues`
+                # (at the end when sorted by distance) — don't list them twice.
+                body['distanceUnknown'] = []
+                body['distanceUnknownTotal'] = 0
+            else:
+                unknown = []
+                for row in unmapped_rows:
+                    summary = _summary(row, ratings)
+                    summary['distanceKm'] = None
+                    summary['distanceUnknown'] = True
+                    unknown.append(summary)
+                body['distanceUnknown'] = unknown
+                body['distanceUnknownTotal'] = unmapped_total
+        return Response(body)
 
 
 def detail_cache_keys(listing):
@@ -273,6 +331,8 @@ class PublicVenueDetailView(APIView):
         record = dict(listing.record)
         record['slug'] = listing.slug
         record['meta'] = _derive_meta(listing)
+        from .places import display_place
+        record['location'] = display_place(record.get('location'))
         record['category'] = canonical_category(
             record.get('category') or listing.category
         )

@@ -10,6 +10,9 @@ to the panel in full — counts, and masked addresses in delivery reports.
     POST   campaigns                    create a draft
     GET    campaigns/options            segments, states/cities, categories, delivery mode
     POST   campaigns/audience           {audience} -> estimated recipient count
+    POST   campaigns/audience/recipients {audience, page, search} -> the eligible
+                                        customers (name, email, city/state,
+                                        interests, why they qualify) — ADMIN only
     POST   campaigns/preview            {fields} -> rendered HTML (unsaved edits)
     GET    campaigns/images             image library (past campaign + banner art)
     POST   campaigns/images             upload one image (multipart)
@@ -195,6 +198,8 @@ class CampaignOptionsView(_View):
             'segments': [{'key': k, 'label': v} for k, v in audience_mod.SEGMENTS.items()],
             'locations': audience_mod.location_options(),
             'categories': audience_mod.category_options(),
+            # What customers' own bookings / favourites / tickets show interest in.
+            'interests': audience_mod.interest_options(),
             'delivery': _delivery_info(),
             'limits': {**content.LIMITS, 'images': content.MAX_IMAGES,
                        'testRecipients': sender.MAX_TEST_RECIPIENTS},
@@ -209,6 +214,30 @@ class CampaignAudienceView(_View):
         except audience_mod.AudienceError as error:
             return detail(str(error), status.HTTP_400_BAD_REQUEST)
         result = audience_mod.estimate(chosen)
+        result['audience'] = chosen
+        result['label'] = audience_mod.describe(chosen)
+        return Response(result)
+
+
+class CampaignAudienceRecipientsView(_View):
+    """The customers the chosen audience reaches — the SAME list a send would
+    freeze (audience.recipients). Full addresses: this is the super admin's
+    own audience check, behind IsAdmin like every campaign route. Nothing is
+    sent from here."""
+    PAGE = 25
+
+    def post(self, request):
+        body = self._body(request)
+        try:
+            chosen = audience_mod.clean_audience(body.get('audience'))
+        except audience_mod.AudienceError as error:
+            return detail(str(error), status.HTTP_400_BAD_REQUEST)
+        try:
+            page = max(1, int(body.get('page') or 1))
+        except (TypeError, ValueError):
+            page = 1
+        search = str(body.get('search') or '')[:100]
+        result = audience_mod.recipient_page(chosen, page=page, page_size=self.PAGE, search=search)
         result['audience'] = chosen
         result['label'] = audience_mod.describe(chosen)
         return Response(result)

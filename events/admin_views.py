@@ -58,6 +58,7 @@ _STATUS_ALIASES = {
     'unpublish': Event.Status.PAUSED,
     'unpublished': Event.Status.PAUSED,
     'paused': Event.Status.PAUSED,
+    'ended': Event.Status.ENDED,
     'draft': Event.Status.DRAFT,
     # Kept so the legacy vendor-submission queue (pending / rejected) can
     # still be worked through from the same page.
@@ -180,6 +181,8 @@ class AdminEventsView(_AdminEventView):
     """
 
     def get(self, request):
+        from .lifecycle import maybe_archive_ended_events
+        maybe_archive_ended_events()   # over → "ended" before listing
         from adminpanel.formatters import format_events
         return Response({'events': format_events()})
 

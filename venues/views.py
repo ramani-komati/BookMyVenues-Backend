@@ -177,6 +177,26 @@ class DraftSubmitView(APIView):
                 status.HTTP_400_BAD_REQUEST,
             )
 
+        # QA audit 2026-10-30: 15 of 18 live venues had no coordinates and so
+        # vanished from "near me" searches. A submission must now carry a
+        # usable pin — never guessed from the address.
+        from .geo import draft_location_pin
+        if draft_location_pin((draft.data or {}).get('location') or {}) is None:
+            return Response(
+                {
+                    'message': (
+                        'Add your venue’s exact map location before submitting: '
+                        'tap “Use my current location” while at the venue, enter the '
+                        'latitude and longitude, or paste the full Google Maps link '
+                        'from your browser’s address bar (short share links don’t '
+                        'contain the pin).'
+                    ),
+                    'code': 'MAP_LOCATION_REQUIRED',
+                    'field': 'latitude',
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # Sub-categories typed with the "Others" option join the shared list
         # (venues/subcategories.py): pending for a vendor, approved when the
         # super admin is registering the venue on the owner's behalf.

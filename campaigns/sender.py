@@ -40,7 +40,7 @@ from django.db.models.functions import Coalesce, Lower
 from django.utils import timezone
 
 from . import content, resend_client
-from .audience import segment_queryset
+from .audience import recipients as audience_recipients
 from .models import Campaign, CampaignRecipient, EmailPreference, EmailSuppression
 
 logger = logging.getLogger(__name__)
@@ -221,15 +221,12 @@ def queue(campaign_id, *, admin, expected_count, version, base):
         if problems:
             raise QueueRefused(next(iter(problems.values())), 'INCOMPLETE', problems=problems)
 
-        rows = (segment_queryset(campaign.audience).order_by('pk')
-                .values_list('pk', 'email_lower', 'name'))
-        recipients, seen = [], set()
-        for user_id, email, name in rows.iterator(chunk_size=2000):
-            if email in seen:
-                continue
-            seen.add(email)
-            recipients.append(CampaignRecipient(
-                campaign=campaign, user_id=user_id, email=email, name=name or ''))
+        # The SAME list the panel counted and showed (audience.recipients):
+        # opted-in, not suppressed, valid, one row per address.
+        recipients = [
+            CampaignRecipient(campaign=campaign, user_id=user_id, email=email, name=name)
+            for user_id, email, name in audience_recipients(campaign.audience)
+        ]
         if not recipients:
             raise QueueRefused('No customers match this audience right now.', 'NO_RECIPIENTS')
         if expected_count is None or int(expected_count) != len(recipients):

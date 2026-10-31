@@ -17,11 +17,15 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from BookMyVenue import admin_security
 from adminpanel.homepage import PublicHomepageView
 from adminpanel.public_views import PublicBannersView, PublicConfigView
 
+# Django admin: failed-login lockout, configurable path, can be switched off
+# (BookMyVenue/admin_security.py).
+admin_security.install()
+
 urlpatterns = [
-    path('admin/', admin.site.urls),
     # Public: admin-managed homepage banners (customer hero carousel).
     path('api/banners', PublicBannersView.as_view(), name='public-banners'),
     # The Explore homepage's admin-controlled sections in one cached read.
@@ -47,6 +51,8 @@ urlpatterns = [
     # Utility routes (health, me, refresh) — /api/v1/
     path('api/v1/', include('accounts.urls')),
 ]
+if admin_security.admin_enabled():
+    urlpatterns.insert(0, path(admin_security.admin_path(), admin.site.urls))
 
 # JSON error bodies for unmatched URLs (P5b), instead of Django's HTML pages.
 handler404 = 'BookMyVenue.handlers.not_found'

@@ -37,6 +37,21 @@ PROVIDERS (settings.GEOCODER_PROVIDER, set from the environment)
               by HTTP referrer (Google refuses referrer-restricted keys on
               server calls with REQUEST_DENIED).
 
+FAILURES (QA audit 2026-10-30: production logged REQUEST_DENIED — billing
+off — on every request)
+
+  * A refusal that will not fix itself (REQUEST_DENIED, OVER_DAILY_LIMIT,
+    HTTP 401/403) opens a CIRCUIT for GEOCODER_BREAKER_SECONDS (15 min): no
+    request reaches Google until it closes, so a misconfigured project costs
+    one log line per window instead of one per customer.
+  * A transient failure (timeout, dropped connection, HTTP 5xx,
+    OVER_QUERY_LIMIT) is retried ONCE after a short pause.
+  * While Google is unavailable, search and reverse fall back to
+    OpenStreetMap Nominatim when GEOCODER_CONTACT_EMAIL is set (its usage
+    policy needs a contact); requests to it are spaced ≥1.1 s apart.
+  * A failed lookup is remembered for a minute, so retries from the same
+    page do not multiply provider calls.
+
 Results are restricted to GEOCODER_COUNTRY (default 'in'). State and district
 names are matched to the platform's India dataset (venues/regions.py), so a
 place always reports the same spelling the vendor wizard stores. The
@@ -46,6 +61,8 @@ logged or stored here; responses are cached briefly in the process cache.
 import hashlib
 import logging
 import re
+import threading
+import time
 
 import requests
 from django.conf import settings
@@ -70,6 +87,16 @@ MIN_QUERY, MAX_QUERY = 2, 100
 CACHE_SECONDS = 60 * 60 * 24   # place names and pins change rarely
 BIAS_RADIUS_M = 50000          # autocomplete prefers places within ~50 km of a hint
 
+BREAKER_KEY = 'geo:breaker:google'
+BREAKER_SECONDS = 60 * 15        # a denied project is not retried for 15 min
+FAILURE_SECONDS = 60             # a failed lookup is not repeated for 1 min
+RETRY_PAUSE = 0.5                # before the one retry of a transient error
+NOMINATIM_GAP = 1.1              # Nominatim allows ~1 request per second
+# Google answers that will not fix themselves on retry.
+_PERMANENT_STATUSES = {'REQUEST_DENIED', 'OVER_DAILY_LIMIT', 'INVALID_REQUEST'}
+_nominatim_lock = threading.Lock()
+_nominatim_last = [0.0]
+
 _SESSION = re.compile(r'^[A-Za-z0-9_-]{8,64}$')
 _PLACE_ID = re.compile(r'^[A-Za-z0-9_-]{10,300}$')
 
@@ -80,6 +107,32 @@ class GeocoderError(Exception):
 
 class GeocoderNotConfigured(GeocoderError):
     """No provider (or an incomplete one) is configured."""
+
+
+class GeocoderDenied(GeocoderError):
+    """The provider refused the project itself (billing, key, API off) —
+    retrying cannot help until someone fixes the account."""
+
+
+class GeocoderTransient(GeocoderError):
+    """A failure worth exactly one retry (timeout, 5xx, rate limit)."""
+
+
+def breaker_open():
+    """True while Google is known to refuse this project."""
+    return bool(cache.get(BREAKER_KEY))
+
+
+def _open_breaker(reason):
+    seconds = int(getattr(settings, 'GEOCODER_BREAKER_SECONDS', BREAKER_SECONDS) or BREAKER_SECONDS)
+    if not cache.get(BREAKER_KEY):
+        logger.error('Google geocoding disabled for %ss: %s', seconds, reason)
+    cache.set(BREAKER_KEY, str(reason)[:300], seconds)
+
+
+def _fallback_available():
+    """OpenStreetMap can stand in for Google (needs an identifying contact)."""
+    return bool(getattr(settings, 'GEOCODER_CONTACT_EMAIL', ''))
 
 
 def _provider():
@@ -171,6 +224,11 @@ def _nominatim_get(path, params):
     base = str(getattr(settings, 'NOMINATIM_BASE_URL', '') or
                'https://nominatim.openstreetmap.org').rstrip('/')
     contact = settings.GEOCODER_CONTACT_EMAIL
+    with _nominatim_lock:  # usage policy: at most ~1 request/second
+        wait = _nominatim_last[0] + NOMINATIM_GAP - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _nominatim_last[0] = time.monotonic()
     response = requests.get(
         f'{base}/{path}',
         params={**params, 'format': 'jsonv2', 'addressdetails': 1, 'email': contact},
@@ -237,12 +295,28 @@ PLACES_URL = 'https://places.googleapis.com/v1'
 PLACE_FIELDS = 'id,formattedAddress,location,addressComponents'
 
 
+def _http_status(response):
+    code = getattr(response, 'status_code', 200)
+    return code if isinstance(code, int) else 200
+
+
 def _google_get(params):
-    response = requests.get(
-        GOOGLE_URL,
-        params={**params, 'key': settings.GOOGLE_GEOCODING_API_KEY},
-        timeout=TIMEOUT,
-    )
+    if breaker_open():
+        raise GeocoderDenied('Google geocoding is paused after a refusal.')
+    try:
+        response = requests.get(
+            GOOGLE_URL,
+            params={**params, 'key': settings.GOOGLE_GEOCODING_API_KEY},
+            timeout=TIMEOUT,
+        )
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise GeocoderTransient(type(exc).__name__) from None
+    code = _http_status(response)
+    if code in (401, 403):
+        _open_breaker(f'HTTP {code}')
+        raise GeocoderDenied(f'HTTP {code}')
+    if code >= 500 or code == 429:
+        raise GeocoderTransient(f'HTTP {code}')
     response.raise_for_status()
     data = response.json()
     status_text = data.get('status') if isinstance(data, dict) else None
@@ -253,7 +327,13 @@ def _google_get(params):
         # to the SERVER LOG only (it names the cause: API not enabled, key
         # restricted by referrer, billing off), never to the public.
         detail = str((data or {}).get('error_message') or '')[:300] if isinstance(data, dict) else ''
-        raise GeocoderError(f'Google geocoding status {status_text!r}' + (f': {detail}' if detail else '.'))
+        reason = f'Google geocoding status {status_text!r}' + (f': {detail}' if detail else '.')
+        if status_text in _PERMANENT_STATUSES:
+            _open_breaker(reason)
+            raise GeocoderDenied(reason)
+        if status_text in ('OVER_QUERY_LIMIT', 'UNKNOWN_ERROR'):
+            raise GeocoderTransient(reason)
+        raise GeocoderError(reason)
     return data.get('results') or []
 
 
@@ -328,8 +408,18 @@ def _places_call(method, path, **kwargs):
     """One Places API (New) request. Errors carry Google's status + message
     for the server log (never the key — it travels in a header)."""
     headers = {'X-Goog-Api-Key': _places_key(), **kwargs.pop('headers', {})}
-    response = requests.request(method, f'{PLACES_URL}/{path}', headers=headers,
-                                timeout=TIMEOUT, **kwargs)
+    if breaker_open():
+        raise GeocoderDenied('Google Places is paused after a refusal.')
+    try:
+        response = requests.request(method, f'{PLACES_URL}/{path}', headers=headers,
+                                    timeout=TIMEOUT, **kwargs)
+    except (requests.ConnectionError, requests.Timeout) as exc:
+        raise GeocoderTransient(type(exc).__name__) from None
+    code = _http_status(response)
+    if code in (401, 403):
+        _open_breaker(f'Places API HTTP {code}')
+    if code >= 500 or code == 429:
+        raise GeocoderTransient(f'Places API HTTP {code}')
     if response.status_code != 200:
         try:
             error = (response.json() or {}).get('error') or {}
@@ -399,14 +489,39 @@ def _provider_failure(exc):
     return GeocoderError(f'{type(exc).__name__}' + (f' (HTTP {code})' if code else ''))
 
 
-def _cached(key, compute, empty=None):
+def _attempt(compute):
+    """compute(), retried once after a transient failure."""
+    try:
+        return compute()
+    except GeocoderTransient:
+        time.sleep(RETRY_PAUSE)
+        return compute()
+
+
+def _cached(key, compute, empty=None, fallback=None):
+    """A cached provider answer. On failure: Nominatim `fallback` when one is
+    given and allowed, else GeocoderError — remembered for FAILURE_SECONDS so
+    the same lookup does not reach the provider again straight away."""
     cached = cache.get(key)
     if cached is not None:
+        if isinstance(cached, dict) and cached.get('__failed__'):
+            raise GeocoderError('Recent lookup failed; not retried yet.')
         return cached if cached != {} else empty
     try:
-        value = compute()
-    except (requests.RequestException, ValueError) as exc:
-        raise _provider_failure(exc) from None
+        value = _attempt(compute)
+    except (GeocoderError, requests.RequestException, ValueError) as exc:
+        error = exc if isinstance(exc, GeocoderError) else _provider_failure(exc)
+        if fallback is not None and not isinstance(error, GeocoderNotConfigured) and _fallback_available():
+            try:
+                value = fallback()
+            except (requests.RequestException, ValueError, GeocoderError) as fb_exc:
+                logger.warning('Geocoding fallback failed too: %s', type(fb_exc).__name__)
+            else:
+                # Short cache: Google may be back once billing is fixed.
+                cache.set(key, value if value is not None else {}, FAILURE_SECONDS * 10)
+                return value
+        cache.set(key, {'__failed__': True}, FAILURE_SECONDS)
+        raise error from None
     cache.set(key, value if value is not None else {}, CACHE_SECONDS)
     return value
 
@@ -415,11 +530,38 @@ def _digest(*parts):
     return hashlib.sha256('|'.join(str(p) for p in parts).encode()).hexdigest()
 
 
+def scope_results(rows, state='', district=''):
+    """Places in the requested state (and district) first, each marked
+    `inScope`. When ANY row is in the requested state, rows from other states
+    are dropped: "Kazipet" scoped to Telangana must not offer a same-named
+    place elsewhere in India as if it were local."""
+    rows = [dict(row) for row in rows or []]
+    want_state = regions.canonical_state(state) or ''
+    want_district = (regions.find_district(want_state, district) if want_state else None) or ''
+    if not want_state:
+        return rows  # unscoped search: provider order, shape unchanged
+    for row in rows:
+        same_state = regions.canonical_state(row.get('state')) == want_state
+        row['inScope'] = same_state and (not want_district or row.get('district') == want_district)
+        row['_state'] = same_state
+    if any(row['_state'] for row in rows):
+        rows = [row for row in rows if row['_state']]
+    rows.sort(key=lambda row: not row['inScope'])  # stable: provider order kept
+    for row in rows:
+        row.pop('_state', None)
+    return rows
+
+
 def search_places(query, state='', district=''):
     provider = _provider()
     text = _scoped_query(query, state, district)
     key = 'geo:search:' + _digest(provider, text.lower())
-    return _cached(key, lambda: _nominatim_search(text) if provider == 'nominatim' else _google_search(text))
+    rows = _cached(
+        key,
+        lambda: _nominatim_search(text) if provider == 'nominatim' else _google_search(text),
+        fallback=(lambda: _nominatim_search(text)) if provider == 'google' else None,
+    )
+    return scope_results(rows, state, district)
 
 
 def reverse_place(lat, lng):
@@ -429,7 +571,8 @@ def reverse_place(lat, lng):
     lat, lng = round(lat, 3), round(lng, 3)
     key = f'geo:reverse:{provider}:{lat}:{lng}'
     return _cached(key, lambda: _nominatim_reverse(lat, lng) if provider == 'nominatim'
-                   else _google_reverse(lat, lng))
+                   else _google_reverse(lat, lng),
+                   fallback=(lambda: _nominatim_reverse(lat, lng)) if provider == 'google' else None)
 
 
 def autocomplete_places(query, session='', bias=None):

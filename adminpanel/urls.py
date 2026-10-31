@@ -8,7 +8,7 @@ from campaigns import admin_views as campaign_views
 from events import admin_views as event_admin_views
 from reports.views import AdminExportView
 
-from . import homepage, ratings_admin, subcategories_admin, venue_edit, views
+from . import data_review, homepage, ratings_admin, subcategories_admin, venue_edit, views
 
 urlpatterns = [
     path('auth/login', views.AdminLoginView.as_view(), name='admin-login'),
@@ -18,6 +18,8 @@ urlpatterns = [
     # Writes (Phase 2)
     path('approvals/<uuid:listing_id>', views.AdminApprovalUpdateView.as_view(), name='admin-approval'),
     path('venues/<uuid:listing_id>', views.AdminVenueUpdateView.as_view(), name='admin-venue'),
+    # Read-only list of records that look like test data (adminpanel/data_review.py).
+    path('data-review', data_review.AdminDataReviewView.as_view(), name='admin-data-review'),
     # All venues → Edit: every vendor-submitted detail except bank details.
     path('venues/<uuid:listing_id>/edit', venue_edit.AdminVenueEditView.as_view(), name='admin-venue-edit'),
     # Must precede the <int:vendor_id> route so 'token' is never read as an id.
@@ -106,6 +108,8 @@ urlpatterns = [
     path('campaigns', campaign_views.CampaignsView.as_view(), name='admin-campaigns'),
     path('campaigns/options', campaign_views.CampaignOptionsView.as_view(), name='admin-campaign-options'),
     path('campaigns/audience', campaign_views.CampaignAudienceView.as_view(), name='admin-campaign-audience'),
+    path('campaigns/audience/recipients', campaign_views.CampaignAudienceRecipientsView.as_view(),
+         name='admin-campaign-audience-recipients'),
     path('campaigns/preview', campaign_views.CampaignPreviewView.as_view(), name='admin-campaign-preview'),
     path('campaigns/images', campaign_views.CampaignImagesView.as_view(), name='admin-campaign-images'),
     path('campaigns/<uuid:campaign_id>', campaign_views.CampaignDetailView.as_view(), name='admin-campaign'),

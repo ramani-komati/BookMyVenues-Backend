@@ -9,7 +9,10 @@ under the SAME exactness rule as the frontend's utils/maps.js exactPinCoords:
   * the LAST `!3d<lat>!4d<lng>` pair in a place URL — the place marker itself
     (earlier pairs describe other map elements), or
   * a destination-style parameter whose value IS a coordinate pair
-    (q / query / destination / daddr / ll).
+    (q / query / destination / daddr / ll, optionally prefixed "loc:"), or
+  * a /maps/place|search|dir/ path segment that IS a coordinate pair — in
+    decimal ("17.9689,79.5941") or degrees-minutes-seconds
+    (17°58'08.0"N 79°35'38.8"E — what a dropped pin's link carries).
 
 A short share link (maps.app.goo.gl) or a plain search link carries no pin, so
 it yields None. Nothing is ever guessed from a venue's name or address, and
@@ -27,7 +30,7 @@ stored. The frontend rounds them to 3 decimals (~110 m) before sending.
 """
 import math
 import re
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote_plus, urlparse
 
 # Mean Earth radius in km. The frontend's utils/geo.js uses the same constant,
 # so a distance computed in the browser matches the one the API returns.
@@ -39,8 +42,15 @@ EARTH_RADIUS_KM = 6371.0
 MAX_RADIUS_KM = 500
 
 _MARKER = re.compile(r'!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)')
-_PAIR = re.compile(r'^\s*(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$')
+_PAIR = re.compile(r'^\s*(?:loc:\s*)?(-?\d{1,3}(?:\.\d+)?)\s*,\s*(-?\d{1,3}(?:\.\d+)?)\s*$', re.I)
 _PIN_PARAMS = ('q', 'query', 'destination', 'daddr', 'll')
+# One hemisphere-suffixed degrees-minutes-seconds coordinate: 17°58'08.0"N
+_DMS = re.compile(
+    r'(\d{1,3})\s*°\s*(\d{1,2})\s*[\'′]\s*(\d{1,2}(?:\.\d+)?)\s*(?:"|″|\'\')?\s*([NSEW])', re.I,
+)
+# Path segments Google uses for a point: /maps/place/<pt>, /maps/search/<pt>,
+# /maps/dir/<from>/<pt> (the LAST stop is the destination).
+_PATH_KINDS = ('place', 'search', 'dir')
 
 
 class LocationParamError(ValueError):
@@ -66,6 +76,44 @@ def valid_coordinates(lat, lng):
     return lat, lng
 
 
+def _dms_pair(text):
+    """(lat, lng) from a degrees-minutes-seconds pair, or None."""
+    found = _DMS.findall(str(text or ''))
+    if len(found) != 2:
+        return None
+    values = {}
+    for deg, minutes, seconds, hemi in found:
+        if int(minutes) >= 60 or float(seconds) >= 60:
+            return None
+        value = int(deg) + int(minutes) / 60 + float(seconds) / 3600
+        hemi = hemi.upper()
+        values['lat' if hemi in 'NS' else 'lng'] = -value if hemi in 'SW' else value
+    if set(values) != {'lat', 'lng'}:
+        return None
+    return valid_coordinates(round(values['lat'], 7), round(values['lng'], 7))
+
+
+def _point_text(text):
+    """A coordinate pair written as text (decimal or DMS), or None."""
+    match = _PAIR.match(text)
+    if match:
+        return valid_coordinates(match.group(1), match.group(2))
+    return _dms_pair(text)
+
+
+def _path_point(path):
+    """A coordinate pair that IS a /maps/place|search|dir/ path segment."""
+    segments = [unquote_plus(part) for part in str(path or '').split('/')]
+    for index, segment in enumerate(segments):
+        if segment not in _PATH_KINDS:
+            continue
+        tail = [p for p in segments[index + 1:] if p and not p.startswith(('@', 'data='))]
+        if not tail:
+            return None
+        return _point_text(tail[-1] if segment == 'dir' else tail[0])
+    return None
+
+
 def pin_from_maps_link(link):
     """The exact pin carried by a maps link as (lat, lng), or None."""
     text = str(link or '').strip()
@@ -75,7 +123,8 @@ def pin_from_maps_link(link):
     if markers:
         return valid_coordinates(*markers[-1])
     try:
-        query = parse_qs(urlparse(text).query)
+        parsed = urlparse(text)
+        query = parse_qs(parsed.query)
     except ValueError:
         return None
     for key in _PIN_PARAMS:
@@ -84,7 +133,34 @@ def pin_from_maps_link(link):
         match = _PAIR.match(values[0]) if values else None
         if match:
             return valid_coordinates(match.group(1), match.group(2))
-    return None
+    return _path_point(parsed.path)
+
+
+def place_text_from_maps_link(link):
+    """The place NAME a maps link points at ("Stayfit Sports Zone, plot 6, …
+    Hanamkonda") — from /maps/place/<name>/ or a text q/query parameter — or
+    ''. A short link's resolved URL often carries only this (plus Google's
+    internal place id), never coordinates. It is search text for an admin to
+    confirm — never a location by itself."""
+    text = str(link or '').strip()
+    if not text:
+        return ''
+    try:
+        parsed = urlparse(text)
+        query = parse_qs(parsed.query)
+    except ValueError:
+        return ''
+    segments = parsed.path.split('/')
+    if 'place' in segments:
+        index = segments.index('place')
+        name = unquote_plus(segments[index + 1]).strip() if index + 1 < len(segments) else ''
+        if name and not name.startswith('@') and _point_text(name) is None:
+            return name[:300]
+    for key in ('q', 'query', 'destination', 'daddr'):
+        value = (query.get(key) or [''])[0].strip()
+        if value and _point_text(value) is None:
+            return value[:300]
+    return ''
 
 
 def record_maps_link(record):
@@ -129,6 +205,19 @@ def record_map_pin(record):
     if not isinstance(pin, dict):
         return None
     return valid_coordinates(pin.get('lat'), pin.get('lng'))
+
+
+def draft_location_pin(location):
+    """The pin a wizard Location section will publish: the exact pin in its
+    maps link, else the vendor's confirmed latitude/longitude — or None."""
+    location = location if isinstance(location, dict) else {}
+    point = pin_from_maps_link(location.get('mapsLink'))
+    if point is not None:
+        return point
+    lat, lng = location.get('latitude'), location.get('longitude')
+    if lat in (None, '') or lng in (None, ''):
+        return None
+    return valid_coordinates(lat, lng)
 
 
 def coordinates_payload(lat, lng):
@@ -206,6 +295,11 @@ def parse_location_params(params):
                 f'radius must be between 0 and {MAX_RADIUS_KM} km.'
             )
     return origin, radius
+
+
+def has_coordinates(lat, lng):
+    """True when a stored point is a usable pin (the rule distance_km uses)."""
+    return lat is not None and lng is not None and valid_coordinates(lat, lng) is not None
 
 
 def rank_by_distance(rows, origin, radius_km=None, *, nearest_first=False):

@@ -4,9 +4,11 @@ Photo upload/delete routes join in Phase 3.
 """
 from django.urls import path
 
-from . import business_views, favorites, geocoding, maps, public_views, subcategory_views, views
+from . import business_views, favorites, geocoding, maps, public_views, seo_views, subcategory_views, views
 
 urlpatterns = [
+    # The customer site's sitemap (Vercel rewrites /sitemap.xml here).
+    path('sitemap.xml', seo_views.SitemapView.as_view(), name='sitemap'),
     # Google Maps short-link resolver (P2) — public, no auth.
     path('maps/resolve', maps.MapsResolveView.as_view(), name='maps-resolve'),
     # Customer location picker: place search / locality name (public; OFF
@@ -20,6 +22,11 @@ urlpatterns = [
     path('geo/regions', geocoding.RegionListView.as_view(), name='geo-regions'),
     # Customer wishlist sync (User JWT).
     path('users/me/favorites', favorites.FavoritesView.as_view(), name='favorites'),
+    path(
+        'users/me/favorites/<str:venue_id>',
+        favorites.FavoriteItemView.as_view(),
+        name='favorite-item',
+    ),
     # Vendor: publish / delete listings (contract 3.5, 3.6)
     path('vendors/me/listings', views.VendorListingPublishView.as_view(), name='listing-publish'),
     path(

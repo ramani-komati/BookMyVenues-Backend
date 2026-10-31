@@ -4,6 +4,7 @@ Tests for the venue-registration draft endpoints (contract Group 4).
 import uuid
 from unittest.mock import patch
 
+from django.utils import timezone
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APITestCase
 
@@ -23,6 +24,10 @@ FULL_DATA = {
         'district': 'Bengaluru Urban',
         'city': 'Bengaluru',
         'mapsLink': 'https://maps.google.com/?q=grand+palace',
+        # A submission needs a usable pin (QA audit 2026-10-30) — this link
+        # has none, so the vendor's confirmed map location supplies it.
+        'latitude': '12.9756',
+        'longitude': '77.6050',
     },
     'details': {
         'primaryCategory': 'hall',
@@ -184,6 +189,29 @@ class DraftSubmitTests(DraftTestBase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data['status'], 'pending')
         self.assertIsNotNone(response.data['submittedAt'])
+
+    def test_submit_without_a_usable_map_location_is_refused(self):
+        draft = self.make_full_draft()
+        location = dict(draft.data['location'])
+        location.update({'latitude': '', 'longitude': '',
+                         'mapsLink': 'https://maps.app.goo.gl/NoPinHere'})
+        draft.data = {**draft.data, 'location': location}
+        draft.save()
+        response = self.submit(draft)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data['code'], 'MAP_LOCATION_REQUIRED')
+        self.assertIn('exact map location', response.data['message'])
+        draft.refresh_from_db()
+        self.assertEqual(draft.status, VenueDraft.Status.DRAFT)
+
+    def test_an_exact_maps_link_alone_satisfies_the_map_location(self):
+        draft = self.make_full_draft()
+        location = dict(draft.data['location'])
+        location.update({'latitude': '', 'longitude': '',
+                         'mapsLink': 'https://www.google.com/maps/place/X/data=!3d12.97!4d77.60'})
+        draft.data = {**draft.data, 'location': location}
+        draft.save()
+        self.assertEqual(self.submit(draft).status_code, 200)
 
     def test_submit_is_idempotent(self):
         draft = self.make_full_draft()
@@ -885,6 +913,82 @@ class FavoritesTests(APITestCase):
     def test_anonymous_401(self):
         self.client.force_authenticate(user=None)
         self.assertEqual(self.client.get(self.URL).status_code, 401)
+
+    # --- Audit 2026-10-30: a page load must never be able to wipe the list.
+
+    def test_post_adds_one_without_touching_the_rest(self):
+        self.put([{'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'}])
+        response = self.client.post(
+            self.URL, {'venueId': str(self.other.id)}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        ids = {f['venueId'] for f in response.data['favorites']}
+        self.assertEqual(ids, {str(self.base.id), str(self.other.id)})
+
+    def test_post_is_idempotent_and_folds_siblings(self):
+        self.client.post(self.URL, {'venueId': str(self.base.id),
+                                    'addedAt': '2026-08-01T10:00:00Z'}, format='json')
+        response = self.client.post(
+            self.URL, {'venueId': str(self.sibling.id)}, format='json'
+        )
+        favorites = response.data['favorites']
+        self.assertEqual(len(favorites), 1)
+        self.assertEqual(favorites[0]['venueId'], str(self.base.id))
+        self.assertTrue(favorites[0]['addedAt'].startswith('2026-08-01'))
+
+    def test_post_unknown_venue_404_and_cap(self):
+        self.assertEqual(
+            self.client.post(self.URL, {'venueId': 'junk'}, format='json').status_code, 404
+        )
+        from venues.models import Favorite, Listing
+        for i in range(100):
+            listing = Listing.objects.create(
+                id=uuid.uuid4(), vendor=self.vendor, slug=f'cap-{i}',
+                record={'name': f'Cap {i}', 'detail': {}}, name=f'Cap {i}',
+                category='hall', locality='x', pincode='560001',
+            )
+            Favorite.objects.create(user=self.customer, listing=listing,
+                                    added_at=timezone.now())
+        response = self.client.post(self.URL, {'venueId': str(self.base.id)}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_delete_removes_only_that_venue(self):
+        self.put([
+            {'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'},
+            {'venueId': str(self.other.id), 'addedAt': '2026-08-02T10:00:00Z'},
+        ])
+        response = self.client.delete(f'{self.URL}/{self.sibling.id}')  # folds to base
+        self.assertEqual(response.status_code, 200)
+        ids = [f['venueId'] for f in response.data['favorites']]
+        self.assertEqual(ids, [str(self.other.id)])
+        # Retried / unknown removals are harmless.
+        self.assertEqual(self.client.delete(f'{self.URL}/{self.base.id}').status_code, 200)
+        self.assertEqual(self.client.delete(f'{self.URL}/not-a-uuid').status_code, 200)
+
+    def test_empty_put_cannot_wipe_saved_favourites(self):
+        self.put([{'venueId': str(self.base.id), 'addedAt': '2026-08-01T10:00:00Z'}])
+        response = self.put([])  # what the old homepage load sent
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.data['code'], 'CLEAR_NOT_CONFIRMED')
+        ids = [f['venueId'] for f in self.client.get(self.URL).data['favorites']]
+        self.assertEqual(ids, [str(self.base.id)])  # still saved
+        # An explicit clear still works.
+        response = self.client.put(
+            self.URL, {'favorites': [], 'confirmClear': True}, format='json'
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, {'favorites': []})
+
+    def test_empty_put_on_empty_list_is_fine(self):
+        self.assertEqual(self.put([]).status_code, 200)
+
+    def test_item_routes_need_sign_in(self):
+        self.client.force_authenticate(user=None)
+        self.assertEqual(
+            self.client.post(self.URL, {'venueId': str(self.base.id)}, format='json').status_code,
+            401,
+        )
+        self.assertEqual(self.client.delete(f'{self.URL}/{self.base.id}').status_code, 401)
 
 
 class MapsResolveTests(APITestCase):

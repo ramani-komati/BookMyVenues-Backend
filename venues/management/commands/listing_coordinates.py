@@ -23,7 +23,7 @@ ever guessed from a name or an address.
 from django.core.management.base import BaseCommand
 
 from events.models import Event
-from venues.geo import pin_from_maps_link, record_maps_link, record_pin
+from venues.geo import pin_from_maps_link, place_text_from_maps_link, record_maps_link, record_pin
 from venues.maps import MapsError, _is_allowed, resolve_short_link
 from venues.models import Listing
 
@@ -89,7 +89,12 @@ class Command(BaseCommand):
             return f' → could not resolve ({error})'
         point = pin_from_maps_link(full)
         if point is None:
-            return ' → resolved, but the full link has no exact pin either'
+            # Google's place links often carry only the place name + an
+            # internal id. Show the name so an admin can find the place,
+            # confirm the pin, and save it (All venues → Edit → Map location).
+            name = place_text_from_maps_link(full)
+            return (' → resolved, but the full link has no exact pin either'
+                    + (f' (place: "{name}") — set the pin by hand' if name else ''))
         if not apply:
             return f' → would pin at {point[0]:.6f}, {point[1]:.6f}'
         record = dict(listing.record or {})

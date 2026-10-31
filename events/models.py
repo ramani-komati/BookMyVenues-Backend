@@ -73,6 +73,8 @@ class Event(models.Model):
         PAUSED = 'paused', 'Paused'         # UNPUBLISHED — hidden, sold tickets stay valid
         REJECTED = 'rejected', 'Rejected'   # LEGACY: vendor submission refused
         DELETED = 'deleted', 'Deleted'      # soft-deleted; orders keep working
+        ENDED = 'ended', 'Ended'            # last date is over — archived automatically
+                                            # (events/lifecycle.py); orders keep working
 
     # Statuses a customer may buy a ticket for. Everything else is invisible
     # to the public catalogue AND refused at order time.

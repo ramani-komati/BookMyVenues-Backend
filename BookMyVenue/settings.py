@@ -296,6 +296,13 @@ CAMPAIGN_POSTAL_ADDRESS = os.environ.get('CAMPAIGN_POSTAL_ADDRESS', '')
 # https://bookmyvenues-backend.onrender.com). Blank = taken from the admin's
 # request when the campaign is sent.
 PUBLIC_API_BASE_URL = os.environ.get('PUBLIC_API_BASE_URL', '')
+# Django admin protection (BookMyVenue/admin_security.py).
+DJANGO_ADMIN_ENABLED = os.environ.get('DJANGO_ADMIN_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no', 'off')
+DJANGO_ADMIN_PATH = os.environ.get('DJANGO_ADMIN_PATH', 'admin/')
+ADMIN_LOGIN_MAX_FAILURES = int(os.environ.get('ADMIN_LOGIN_MAX_FAILURES', '5') or 5)
+ADMIN_LOGIN_LOCK_SECONDS = int(os.environ.get('ADMIN_LOGIN_LOCK_SECONDS', '900') or 900)
+# Public origin of the CUSTOMER site — the URLs inside /api/sitemap.xml.
+PUBLIC_SITE_URL = os.environ.get('PUBLIC_SITE_URL', 'https://thebookmyvenues.in')
 # Signing secret of the Resend webhook (Resend dashboard -> Webhooks), for
 # delivered / bounced / opened / clicked stats. Blank = the webhook endpoint
 # refuses everything and the reports show sent / failed only.

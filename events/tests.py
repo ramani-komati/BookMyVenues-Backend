@@ -1529,10 +1529,15 @@ class PublicEventCatalogueTests(EventTestCase):
             event=event, date=today_ist() - datetime.timedelta(days=3),
             capacity=100,
         )
-        card = next(
-            e for e in self.client.get(reverse('public-event-list')).data['events']
-            if e['name'] == 'Finished Run'
-        )
+        # QA audit 2026-10-30: a finished event is now ARCHIVED (status
+        # 'ended', events/lifecycle.py) and leaves the list altogether — it
+        # can never be advertised as bookable. Its page still opens, marked
+        # ended, with nothing on sale.
+        names = [e['name'] for e in self.client.get(reverse('public-event-list')).data['events']]
+        self.assertNotIn('Finished Run', names)
+        event.refresh_from_db()
+        self.assertEqual(event.status, Event.Status.ENDED)
+        card = self.client.get(reverse('public-event-detail', args=[event.slug])).data
         self.assertFalse(card['bookable'])
         self.assertTrue(card['ended'])
         self.assertEqual(card['dates'], [])

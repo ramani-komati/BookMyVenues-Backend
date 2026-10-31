@@ -231,6 +231,8 @@ class PublicEventListView(APIView):
     throttle_scope = 'public'
 
     def get(self, request):
+        from .lifecycle import maybe_archive_ended_events
+        maybe_archive_ended_events()   # ended events leave the list (throttled)
         params = request.query_params
         try:
             limit = int(params.get('limit', DEFAULT_LIMIT))
@@ -332,14 +334,21 @@ class PublicEventDetailView(APIView):
     throttle_scope = 'public'
 
     def get(self, request, id_or_slug):
-        queryset = live_events()
+        from .lifecycle import maybe_archive_ended_events
+        maybe_archive_ended_events()
+        # An ENDED event still opens from a shared link or a ticket — marked
+        # `ended`, with nothing on sale (only LIVE events are bookable).
+        queryset = (Event.objects.filter(status__in=(Event.Status.LIVE, Event.Status.ENDED))
+                    .prefetch_related('dates', 'ticket_types'))
         try:
             event = queryset.filter(pk=uuid.UUID(str(id_or_slug))).first()
         except ValueError:
             event = queryset.filter(slug=id_or_slug).first()
         if event is None:
             return _message('Event not found.', status.HTTP_404_NOT_FOUND)
-        return Response(event_record(event))
+        record = event_record(event)
+        record['ended'] = event.status == Event.Status.ENDED
+        return Response(record)
 
 
 class PublicEventAvailabilityView(APIView):
