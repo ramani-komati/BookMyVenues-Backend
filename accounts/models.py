@@ -134,6 +134,8 @@ class VendorSettings(models.Model):
     )
     business_email = models.EmailField(blank=True, default='')
     business_address = models.CharField(max_length=300, blank=True, default='')
+    business_city = models.CharField(max_length=100, blank=True, default='')
+    business_state = models.CharField(max_length=100, blank=True, default='')
 
     notify_booking_email = models.BooleanField(default=True)
     notify_booking_sms = models.BooleanField(default=True)

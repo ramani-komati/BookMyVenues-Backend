@@ -28,6 +28,7 @@ from django.db import transaction
 from django.db.models import Sum
 from django.utils import timezone
 
+from bookings.demand import demand_band
 from bookings.slots import today_ist
 from bookings.views import PENDING_HOLD_MINUTES
 
@@ -188,6 +189,8 @@ def availability(event, event_date, *, include_counts=False):
         'soldOut': sold_out,
         'available': ok and not sold_out,
         'reason': '' if ok else message,
+        # Coarse band only — the number stays server-side (see date_rows).
+        'demand': demand_band(remaining, event_date.capacity) if ok else None,
     }
     if include_counts:
         payload.update({

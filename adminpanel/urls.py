@@ -8,7 +8,7 @@ from campaigns import admin_views as campaign_views
 from events import admin_views as event_admin_views
 from reports.views import AdminExportView
 
-from . import data_review, homepage, ratings_admin, subcategories_admin, venue_edit, views
+from . import data_review, homepage, ratings_admin, subcategories_admin, vendor_profile, venue_edit, views
 
 urlpatterns = [
     path('auth/login', views.AdminLoginView.as_view(), name='admin-login'),
@@ -25,6 +25,7 @@ urlpatterns = [
     # Must precede the <int:vendor_id> route so 'token' is never read as an id.
     path('vendors/token', views.AdminVendorTokenView.as_view(), name='admin-vendor-token'),
     path('vendors/<int:vendor_id>', views.AdminVendorUpdateView.as_view(), name='admin-vendor'),
+    path('vendors/<int:vendor_id>/profile', vendor_profile.AdminVendorProfileView.as_view(), name='admin-vendor-profile'),
     path('users/<int:user_id>', views.AdminUserUpdateView.as_view(), name='admin-user'),
     # Must precede bookings/<str:booking_id> so 'export' is never read as an id.
     path('bookings/export', views.AdminBookingsExportView.as_view(), name='admin-bookings-export'),

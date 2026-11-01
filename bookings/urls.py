@@ -37,6 +37,12 @@ urlpatterns = [
         views.AvailabilityView.as_view(),
         name='venue-availability',
     ),
+    # Per-day summary for the customer's date strip (bookings/day_summary.py).
+    path(
+        'venues/<uuid:listing_id>/availability/days',
+        views.AvailabilityDaysView.as_view(),
+        name='venue-availability-days',
+    ),
     path(
         'venues/<uuid:listing_id>/ratings',
         ratings.RateVenueView.as_view(),

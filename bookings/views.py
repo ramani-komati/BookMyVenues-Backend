@@ -939,6 +939,49 @@ class AvailabilityView(APIView):
         return Response(_availability(listing, date, viewer=viewer))
 
 
+class AvailabilityDaysView(APIView):
+    """GET /api/venues/<id>/availability/days?from=YYYY-MM-DD&days=7 (public).
+
+    One summary row per day for the customer's date strip — free vs offered
+    one-hour start times and a demand band (bookings/day_summary.py). Read
+    only and UNCACHED like AvailabilityView; the per-date availability and
+    the booking check under the listing lock stay the authority."""
+
+    authentication_classes = [OptionalJWTAuthentication]
+    permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = 'public'
+
+    def get(self, request, listing_id):
+        from .day_summary import MAX_AHEAD_DAYS, MAX_DAYS, summary
+
+        listing = Listing.objects.filter(
+            pk=listing_id, status=Listing.Status.LIVE
+        ).first()
+        if listing is None:
+            return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
+
+        today = today_ist()
+        raw_from = request.query_params.get('from')
+        try:
+            start = parse_date(raw_from) if raw_from else today
+        except SlotError as error:
+            return _slot_error_response(error)
+        if start < today:
+            return _message('from cannot be in the past.', status.HTTP_400_BAD_REQUEST)
+        if start > today + datetime.timedelta(days=MAX_AHEAD_DAYS):
+            return _message('from is too far ahead.', status.HTTP_400_BAD_REQUEST)
+
+        try:
+            days = int(request.query_params.get('days') or 7)
+        except (TypeError, ValueError):
+            return _message('days must be a whole number.', status.HTTP_400_BAD_REQUEST)
+        days = max(1, min(days, MAX_DAYS))
+
+        viewer = request.user if getattr(request.user, 'is_authenticated', False) else None
+        return Response(summary(listing, start, days, viewer=viewer))
+
+
 def validate_booking_request(body, user=None, hold_only=False):
     """
     Full server-side validation + pricing for a customer booking request.

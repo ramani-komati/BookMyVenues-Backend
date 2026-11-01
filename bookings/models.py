@@ -345,6 +345,10 @@ class Booking(models.Model):
             # with its details (offerings/summary.py; None for slots).
             'kind': self.kind or 'slot',
             'offering': self.offering_summary(),
+            # Additive: what was actually refunded (a partial refund is less
+            # than `amount`); null when no refund was issued. My bookings and
+            # the vendor dashboard already read it.
+            'refundAmount': self.refund_amount,
         }
 
     def offering_summary(self):

@@ -40,6 +40,7 @@ from adminpanel.formatters import (
 from adminpanel.models import AuditEntry, Payout
 from bookings.models import Booking
 from events.models import Event, EventOrder
+from venues.geo import pin_info
 from venues.models import Listing
 
 from . import common as c
@@ -300,10 +301,30 @@ VENUE_STATUSES = ('All', 'live', 'paused', 'deletion_requested', 'pending',
                   'rejected', 'draft', 'deleted')
 
 
+def venue_search_fields(listing, ctx):
+    record = listing.record or {}
+    vendor = listing.vendor
+    from venues.taxonomy import CATEGORY_GROUPS, category_group
+    district, city = _district_and_city(listing, ctx)
+    category = listing.category or record.get('category') or ''
+    group = {g['key']: g['label'] for g in CATEGORY_GROUPS}.get(category_group(category), '')
+    return [
+        listing.id, listing.name or record.get('name'), vendor.name or vendor.phone,
+        ctx.business_names.get(vendor.id, ''), category, group, city, district,
+        listing.locality or record.get('locality'),
+    ]
+
+
 def venues_filters(params):
     scope = c.choice(params, 'scope', ('all', 'live'), 'all')
     status = c.choice(params, 'status', VENUE_STATUSES, 'All')
-    return {'scope': scope, 'status': status if scope == 'all' else 'All'}
+    return {
+        'scope': scope,
+        'status': status if scope == 'all' else 'All',
+        'q': c.query(params),
+        # Live venues' "without a valid map location" filter.
+        'pin': c.choice(params, 'pin', ('All', 'unpinned'), 'All'),
+    }
 
 
 @report('venues', 'admin_venues', 'venues', 'venues', venues_filters)
@@ -327,6 +348,12 @@ def venues_report(f):
         if f['scope'] == 'live' and status not in ('live', 'deletion_requested'):
             continue
         if f['status'] != 'All' and status != f['status']:
+            continue
+        # The Live / All venues search box reads exactly these fields
+        # (SuperAdmin features/venues/venueSearch.js).
+        if f['q'] and not c.matches(f['q'], venue_search_fields(listing, ctx)):
+            continue
+        if f['pin'] == 'unpinned' and pin_info(listing)['pinStatus'] == 'ok':
             continue
         selected.append((listing, status))
     c.check_size(len(selected))

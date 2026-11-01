@@ -17,6 +17,7 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from bookings.demand import demand_band
 from bookings.slots import SlotError, parse_date, today_ist
 from venues.geo import (
     LocationParamError,
@@ -77,6 +78,10 @@ def date_rows(event, *, only_sellable=True, include_counts=False):
             'available': ok and remaining != 0,
             'reason': '' if ok else reason,
             'isPast': event_date.date < today,
+            # A coarse band only (available / filling_fast / almost_full /
+            # sold_out; null for an unlimited night) — never the count
+            # itself, which stays behind include_counts below.
+            'demand': demand_band(remaining, event_date.capacity) if ok else None,
         }
         if include_counts:
             row['capacity'] = event_date.capacity

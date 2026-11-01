@@ -14,7 +14,7 @@ from collections import defaultdict
 
 from django.utils import timezone
 
-from accounts.models import User, vendor_accounts_q
+from accounts.models import User, VendorSettings, vendor_accounts_q
 from bookings.models import Booking, Rating
 from bookings.part_payment import read_config as read_part_payment
 from bookings.payment_record import payment_time_fields
@@ -78,6 +78,11 @@ class BootstrapContext:
         }
 
         self.drafts = {str(draft.id): draft for draft in VenueDraft.objects.all()}
+
+        # Vendors' business names (their Settings), for the venue search.
+        self.business_names = dict(
+            VendorSettings.objects.exclude(business_name='').values_list('user_id', 'business_name')
+        )
 
     def rating_for(self, listing):
         base = self.base_of.get(str(listing.id), str(listing.id))
@@ -162,6 +167,14 @@ def _venue_status(listing):
     return 'draft'
 
 
+def _business_name(vendor_id, ctx=None):
+    if ctx is not None:
+        return ctx.business_names.get(vendor_id, '')
+    return (
+        VendorSettings.objects.filter(user_id=vendor_id).values_list('business_name', flat=True).first() or ''
+    )
+
+
 def venue_row(listing, ctx=None):
     record = listing.record or {}
     detail = record.get('detail') or {}
@@ -173,6 +186,7 @@ def venue_row(listing, ctx=None):
         bookings = list(listing.bookings.exclude(status='removed'))
         average, _count = venue_rating(listing)
     district, city = _district_and_city(listing, ctx)
+    from venues.geo import pin_info
     from venues.taxonomy import category_group
     from venues.timings import timings_label, validate_timings, TimingsError
     try:
@@ -184,6 +198,9 @@ def venue_row(listing, ctx=None):
         'id': str(listing.id),
         'name': listing.name or record.get('name') or '',
         'vendor': listing.vendor.name or listing.vendor.phone,
+        # The vendor's business name, when they set one — the venue search
+        # matches it as well as the contact name. Never bank details.
+        'vendorBusiness': _business_name(listing.vendor_id, ctx),
         'category': category,
         # The primary category it browses under ('celebrate', 'sports', …).
         'categoryGroup': category_group(category),
@@ -215,6 +232,10 @@ def venue_row(listing, ctx=None):
         'revenueNum': sum(b.amount for b in bookings),
         'amenities': detail.get('amenities') or [],
         'photo': record.get('image') or '',
+        # Where the venue is on the map (venues/geo.py pin_info): its saved
+        # coordinates, 'ok' / 'missing' / 'outside_india', and the pin's
+        # source — so the panel can list venues customers can't find nearby.
+        **pin_info(listing),
     }
 
 

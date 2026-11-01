@@ -321,3 +321,48 @@ def rank_by_distance(rows, origin, radius_km=None, *, nearest_first=False):
     if nearest_first:
         keys.sort(key=lambda key: (distances[key] is None, distances[key] or 0.0))
     return keys, distances
+
+
+def in_india(lat, lng):
+    """The same generous box around India the wizard's map-location check
+    uses (venues/draft_validation.py) — catches swapped lat/lng, a missing
+    minus sign or a pin dropped in the wrong country."""
+    from .draft_validation import INDIA_LAT, INDIA_LNG
+    return INDIA_LAT[0] <= lat <= INDIA_LAT[1] and INDIA_LNG[0] <= lng <= INDIA_LNG[1]
+
+
+def pin_source(record):
+    """Where a listing record's pin comes from: 'link' (the maps link carries
+    it), 'resolved' (its short link was resolved), 'pin' (the confirmed map
+    location) — or '' when it has none. Mirrors record_pin's precedence."""
+    if pin_from_maps_link(record_maps_link(record)) is not None:
+        return 'link'
+    detail = record.get('detail') if isinstance(record, dict) else None
+    detail = detail if isinstance(detail, dict) else {}
+    resolved = detail.get('mapsLinkResolved')
+    link = record_maps_link(record)
+    if (link and isinstance(resolved, dict) and str(resolved.get('source') or '').strip() == link
+            and pin_from_maps_link(resolved.get('url')) is not None):
+        return 'resolved'
+    return 'pin' if record_map_pin(record) is not None else ''
+
+
+def pin_info(listing):
+    """The admin panel's view of a venue's location: its saved coordinates,
+    whether customers can see it by distance, and where the pin came from.
+
+    status: 'ok' — a usable pin inside India;
+            'missing' — no pin, so the venue shows under "Distance unknown";
+            'outside_india' — a pin that is almost certainly wrong."""
+    lat, lng = listing.latitude, listing.longitude
+    if not has_coordinates(lat, lng):
+        status = 'missing'
+    elif not in_india(lat, lng):
+        status = 'outside_india'
+    else:
+        status = 'ok'
+    return {
+        'coordinates': coordinates_payload(lat, lng),
+        'pinStatus': status,
+        'pinSource': pin_source(listing.record or {}) if status != 'missing' else '',
+    }

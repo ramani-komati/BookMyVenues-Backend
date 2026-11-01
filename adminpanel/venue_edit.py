@@ -36,7 +36,22 @@ Concurrency: GET returns `version` (the listing's updated_at); PUT must send
 it back. If the vendor (or another admin) saved in between, the PUT is
 refused with 409 STALE_VERSION instead of overwriting their change.
 
-Every save is audited (who, when, which fields).
+LOCATION. The pin customers are measured against (Listing.latitude /
+longitude) is derived from the record on save (venues/geo.py record_pin):
+the exact pin in the maps link, else the confirmed map location. An edit
+that MOVES that pin — or adds or clears it — must say so with
+`locationConfirmed: true` (the admin saw it on the map), else 400
+LOCATION_UNCONFIRMED: nothing is ever guessed into place. Typed coordinates
+must be real and inside India (PIN_INVALID / PIN_OUTSIDE_INDIA), and typing
+coordinates that disagree with the exact pin the maps link carries is
+refused (PIN_CONFLICT) — the link's pin would silently win, so the admin
+replaces the link (or clears the coordinates) instead.
+
+Every save is audited (who, when, which fields — with old → new values for
+the name, category and pin) and kept as a VenueEditRevision: the venue
+before and after, and every photo the save took off it, so a correction can
+be reviewed and a removed photo restored. Photo files are never deleted
+from storage by an edit.
 """
 import re
 
@@ -47,6 +62,10 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from venues.draft_validation import validate_section
+from venues.geo import (
+    haversine_km, in_india, pin_from_maps_link, pin_info, place_text_from_maps_link,
+    record_maps_link, record_pin, valid_coordinates,
+)
 from venues.models import Listing, VenueDraft
 from venues.taxonomy import CATEGORIES, OTHERS, VENUE_TYPES, canonical_category
 from venues.timings import TimingsError, from_draft, validate_timings
@@ -54,6 +73,7 @@ from venues.views import PRIVATE_RECORD_KEYS, _extract_listing_columns, _strip_p
 
 from .auth import CsrfExemptSessionAuthentication, IsAdmin
 from .formatters import venue_row
+from .models import VenueEditRevision
 
 EDITABLE_SECTIONS = ('basics', 'location', 'details')
 
@@ -130,6 +150,51 @@ def version_of(listing):
     return listing.updated_at.isoformat() if listing.updated_at else ''
 
 
+# Two pins closer than this are the same place (GPS noise / rounding).
+SAME_PLACE_KM = 0.1
+REVISIONS_SHOWN = 20
+
+
+def _point(lat, lng):
+    if lat is None or lng is None:
+        return None
+    return valid_coordinates(lat, lng)
+
+
+def _moved(before, after):
+    """True when two (lat, lng)-or-None points are not the same place."""
+    if before is None or after is None:
+        return before != after
+    return haversine_km(before[0], before[1], after[0], after[1]) > 0.001
+
+
+def _photo_urls(sections, record):
+    """{url: gallery} of every photo a venue shows — the draft's galleries
+    and the record's cover / gallery."""
+    urls = {}
+    for gallery, items in ((sections or {}).get('photos') or {}).items():
+        for item in items or []:
+            if isinstance(item, dict) and item.get('url'):
+                urls.setdefault(str(item['url']), gallery)
+    for url in [(record or {}).get('image')] + list((record or {}).get('gallery') or []):
+        if url:
+            urls.setdefault(str(url), 'venuePhotos')
+    return urls
+
+
+def revision_rows(listing):
+    return [
+        {
+            'id': rev.pk,
+            'admin': rev.admin,
+            'at': rev.created_at.isoformat() if rev.created_at else None,
+            'changed': rev.changed,
+            'removedPhotos': rev.removed_photos,
+        }
+        for rev in VenueEditRevision.objects.filter(listing_id=str(listing.pk))[:REVISIONS_SHOWN]
+    ]
+
+
 def editable_payload(listing):
     """GET shape. Never includes the draft's payout section."""
     draft = VenueDraft.objects.filter(pk=listing.pk).first()
@@ -155,6 +220,13 @@ def editable_payload(listing):
         'version': version_of(listing),
         'siblingCount': len(_siblings(listing)),
         'bankDetailsEditable': False,
+        # The pin customers are measured against right now, and the place
+        # name a pin-less maps link points at (search text to confirm).
+        'location': {
+            **pin_info(listing),
+            'placeText': place_text_from_maps_link(record_maps_link(listing.record or {})),
+        },
+        'revisions': revision_rows(listing),
     }
 
 
@@ -200,6 +272,35 @@ def _validate_photos(photos):
     return out
 
 
+def _validate_location(location):
+    """Typed coordinates must be a real point inside India, sent as a pair;
+    a maps link's own exact pin must be inside India too."""
+    raw_lat = str(location.get('latitude') if location.get('latitude') is not None else '').strip()
+    raw_lng = str(location.get('longitude') if location.get('longitude') is not None else '').strip()
+    if raw_lat or raw_lng:
+        if not (raw_lat and raw_lng):
+            raise EditError('Enter both the latitude and the longitude, or neither.', code='PIN_INVALID')
+        point = valid_coordinates(raw_lat, raw_lng)
+        if point is None:
+            raise EditError('The latitude / longitude are not a valid map point.', code='PIN_INVALID')
+        if not in_india(*point):
+            raise EditError(
+                'That map point is outside India — check that the latitude and longitude '
+                'are not swapped.', code='PIN_OUTSIDE_INDIA',
+            )
+    link_pin = pin_from_maps_link(location.get('mapsLink'))
+    if link_pin is not None and not in_india(*link_pin):
+        raise EditError('The Google Maps link points outside India.', code='PIN_OUTSIDE_INDIA')
+
+
+def typed_pin(location):
+    location = location or {}
+    lat, lng = location.get('latitude'), location.get('longitude')
+    if lat in (None, '') or lng in (None, ''):
+        return None
+    return valid_coordinates(lat, lng)
+
+
 def validate_edit(body):
     """(sections, photos, record) — validated, or raises EditError."""
     if not isinstance(body, dict):
@@ -226,6 +327,8 @@ def validate_edit(body):
         value = sections.get(key)
         if value is None:
             continue
+        if key == 'location' and isinstance(value, dict):
+            _validate_location(value)       # first, for its specific error codes
         error = validate_section(key, value)
         if error:
             raise EditError(error)
@@ -352,6 +455,38 @@ def apply_edit(listing, body, admin=None):
             )
         before = dict(listing.record or {})
         record = _merged_record(before, incoming)
+        if 'location' in sections and 'mapPin' not in (incoming.get('detail') or {}):
+            # The form cleared the coordinates — the merge must not keep the
+            # stored pin alive (the record mapper omits mapPin when empty).
+            record['detail'].pop('mapPin', None)
+        draft = VenueDraft.objects.select_for_update().filter(pk=listing.pk).first()
+        stored_location = ((draft.data or {}).get('location') or {}) if draft is not None else {}
+        new_location = sections.get('location')
+        if new_location is not None:
+            merged_location = {**stored_location, **new_location}
+            link_pin = pin_from_maps_link(merged_location.get('mapsLink'))
+            typed = typed_pin(merged_location)
+            # Only checked when the admin touched the location: an older
+            # draft that already disagrees must not block unrelated edits.
+            touched = any(
+                str(merged_location.get(k) or '') != str(stored_location.get(k) or '')
+                for k in ('mapsLink', 'latitude', 'longitude')
+            )
+            if touched and link_pin and typed and haversine_km(*link_pin, *typed) > SAME_PLACE_KM:
+                raise EditError(
+                    'The Google Maps link already pins a different spot, and that pin is '
+                    'what customers see. Replace the link with one for the correct place '
+                    '(or clear the latitude / longitude) and save again.',
+                    code='PIN_CONFLICT',
+                )
+        old_pin = _point(listing.latitude, listing.longitude)
+        new_pin = record_pin(record)
+        if _moved(old_pin, new_pin) and body.get('locationConfirmed') is not True:
+            raise EditError(
+                'This save changes where the venue is on the map. Check the map '
+                'preview and confirm the location before saving.',
+                code='LOCATION_UNCONFIRMED',
+            )
         siblings = _siblings(listing)
         if siblings and resource_signature(record.get('detail')) != resource_signature(before.get('detail')):
             raise EditError(
@@ -361,9 +496,10 @@ def apply_edit(listing, body, admin=None):
                 code='RESOURCES_CHANGED', http_status=status.HTTP_409_CONFLICT,
             )
 
-        draft = VenueDraft.objects.select_for_update().filter(pk=listing.pk).first()
+        before_sections = {}
         if draft is not None:
             data = dict(draft.data or {})
+            before_sections = {key: data[key] for key in (*EDITABLE_SECTIONS, 'photos') if key in data}
             for key, value in sections.items():
                 merged = {**(data.get(key) or {}), **value}
                 if key == 'details':
@@ -392,6 +528,10 @@ def apply_edit(listing, body, admin=None):
                 'name': f'{record["name"]} — {label}' if label else own.get('name'),
                 'detail': {**own_detail, **shared},
             }
+            if 'mapPin' not in shared:
+                # A cleared pin must clear on every pitch / screen too — they
+                # are one physical place with the base venue.
+                updated['detail'].pop('mapPin', None)
             _save_listing(sibling, _strip_private_keys(updated))
 
         from venues.public_views import invalidate_listing_cache
@@ -401,8 +541,60 @@ def apply_edit(listing, body, admin=None):
         changed = _changed_keys(before, record)
         if photos is not None:
             changed.append('photos')
+        after_sections = {**before_sections, **sections}
+        if photos is not None:
+            after_sections['photos'] = photos
+        kept = _photo_urls(after_sections, record)
+        removed = [
+            {'gallery': gallery, 'url': url}
+            for url, gallery in _photo_urls(before_sections, before).items() if url not in kept
+        ]
+        VenueEditRevision.objects.create(
+            listing_id=str(listing.pk),
+            admin_id=str(getattr(admin, 'pk', '') or ''),
+            admin=(getattr(admin, 'name', '') or getattr(admin, 'phone', '')) if admin else '',
+            changed=changed,
+            before_record=before,
+            after_record=record,
+            before_sections=before_sections,
+            removed_photos=removed,
+        )
     listing.refresh_from_db()
-    return editable_payload(listing), changed
+    summary = {
+        'changed': changed,
+        'removed': removed,
+        'name': (before.get('name'), record.get('name')),
+        'category': (before.get('category'), record.get('category')),
+        'pin': (old_pin, _point(listing.latitude, listing.longitude)),
+    }
+    return editable_payload(listing), summary
+
+
+def _pin_text(point):
+    return f'{point[0]:.6f},{point[1]:.6f}' if point else 'none'
+
+
+AUDIT_LIMIT = 250        # AuditEntry.change is 300 chars; record_audit may append a reason
+
+
+def audit_change(summary):
+    """The audit line: old → new for what matters most, then the rest of
+    the changed keys. The full before / after is in VenueEditRevision."""
+    parts = []
+    for key in ('name', 'category'):
+        old, new = summary[key]
+        if old != new:
+            parts.append(f'{key}: {old or "—"} → {new or "—"}')
+    old_pin, new_pin = summary['pin']
+    if _moved(old_pin, new_pin):
+        parts.append(f'pin: {_pin_text(old_pin)} → {_pin_text(new_pin)}')
+    if summary['removed']:
+        parts.append(f'{len(summary["removed"])} photo(s) removed')
+    rest = [k for k in summary['changed'] if k not in ('name', 'category')]
+    if rest:
+        parts.append('changed: ' + ', '.join(rest))
+    text = ' · '.join(parts) or 'no changes'
+    return text if len(text) <= AUDIT_LIMIT else text[:AUDIT_LIMIT - 1] + '…'
 
 
 class AdminVenueEditView(APIView):
@@ -437,13 +629,12 @@ class AdminVenueEditView(APIView):
     def put(self, request, listing_id):
         try:
             listing = self._listing(listing_id)
-            payload, changed = apply_edit(listing, request.data, admin=request.user)
+            payload, summary = apply_edit(listing, request.data, admin=request.user)
         except EditError as error:
             return Response({'detail': error.message, 'code': error.code}, status=error.http_status)
         from .views import record_audit
         record_audit(
             request, 'Edited venue details', payload['venue'].get('name') or str(listing_id),
-            ('changed: ' + ', '.join(changed[:20]) + (' …' if len(changed) > 20 else '')) if changed else 'no changes',
-            target_id=str(listing_id), subject=listing.vendor,
+            audit_change(summary), target_id=str(listing_id), subject=listing.vendor,
         )
         return Response(payload)

@@ -6,7 +6,7 @@ read-only view of the account's standing.
     PATCH /api/vendors/me/settings {business?: {...}, notifications?: {...}}
 
 What a vendor may change here: the business name, a business phone / email /
-address, and which booking alerts they receive. What they may NOT: their
+address / city / state, and which booking alerts they receive. What they may NOT: their
 sign-in phone (identity), role, KYC, active flag or venue approvals — those
 stay with sign-in and the super admin. The account block is read-only.
 
@@ -28,7 +28,7 @@ NOTIFICATION_FIELDS = {
     'ticketEmail': 'notify_ticket_email',
     'ticketSms': 'notify_ticket_sms',
 }
-TEXT_LIMITS = {'name': 150, 'address': 300}
+TEXT_LIMITS = {'name': 150, 'address': 300, 'city': 100, 'state': 100}
 
 
 def settings_of(user):
@@ -84,6 +84,8 @@ def payload(user):
             'phone': row.business_phone,
             'email': row.business_email,
             'address': row.business_address,
+            'city': row.business_city,
+            'state': row.business_state,
         },
         'notifications': {key: getattr(row, field) for key, field in NOTIFICATION_FIELDS.items()},
         'account': _account(user),

@@ -145,3 +145,30 @@ class AuditEntry(models.Model):
 
     class Meta:
         ordering = ['-created_at']
+
+
+class VenueEditRevision(models.Model):
+    """One super-admin save on All venues → Edit (adminpanel/venue_edit.py):
+    who saved, when, which fields changed, and the venue as it was BEFORE
+    and AFTER — so a wrong correction can be reviewed and undone by hand,
+    and a photo the admin removed is never lost (its URL stays here; the
+    file itself is never deleted from storage by an edit).
+
+    Never holds bank / payout details: the records are the public listing
+    (bank keys are stripped at publish) and the draft's basics / location /
+    details sections only. Append-only; keyed by the listing's id as text so
+    the history outlives the listing row."""
+
+    listing_id = models.CharField(max_length=64, db_index=True)
+    admin_id = models.CharField(max_length=64, blank=True, default='')
+    admin = models.CharField(max_length=150, blank=True, default='')
+    changed = models.JSONField(default=list, blank=True)
+    before_record = models.JSONField(default=dict, blank=True)
+    after_record = models.JSONField(default=dict, blank=True)
+    before_sections = models.JSONField(default=dict, blank=True)
+    # [{gallery, url}] — photos this save took off the venue.
+    removed_photos = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created_at']
