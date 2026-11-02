@@ -61,6 +61,11 @@ def gateway_book(client, body):
     return _GatewayBooking(booking)
 
 
+
+# A bookable venue publishes its hours (QA audit 2026-11-02: no hours =
+# not bookable online). "Open 24 hours" = the full booking grid.
+OPEN_ALL_DAY = {'open': '', 'close': '', 'open24Hours': True}
+
 class AdminAuthTests(APITestCase):
     def setUp(self):
         from django.core.cache import cache
@@ -359,7 +364,7 @@ class AdminPhase3Tests(APITestCase):
         customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=vendor, slug='h',
-            record={'name': 'H', 'price': 600, 'detail': {}},
+            record={'name': 'H', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='H', category='hall', locality='x', pincode='560001',
         )
         self.client.force_authenticate(user=customer)
@@ -804,7 +809,7 @@ class ConsolidatedRoundTests(APITestCase):
         self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
         import datetime as dt
@@ -1006,7 +1011,7 @@ class PlatformFeeTests(APITestCase):
         self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
 
@@ -1218,7 +1223,7 @@ class CustomerVendorIdentityTests(APITestCase):
         )
         listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
         # The vendor books a venue as a customer:
@@ -1270,7 +1275,7 @@ class PayoutGenerationTests(APITestCase):
         self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
         # Last week (fully completed): Monday of this week minus 7/6 days.

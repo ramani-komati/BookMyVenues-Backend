@@ -132,8 +132,17 @@ class TimingsEngineTests(ListingFixtureMixin, APITestCase):
         check_bookable(listing, self.day, [(11 * H, 12 * H)])   # inside: fine
 
     def test_no_timings_keeps_the_platform_default(self):
+        """Was: no timings meant the 06:00–24:00 platform default. Since the
+        QA audit of 2026-11-02 a venue without published hours has NO open
+        periods (it is not bookable online) — never an invented default."""
         listing = self.make_listing(self.vendor)
-        self.assertEqual(open_periods(None, self.day, listing=listing)[0], [(6 * H, 24 * H)])
+        periods, why = open_periods(None, self.day, listing=listing)
+        self.assertEqual(periods, [])
+        self.assertEqual(why['kind'], 'unpublished')
+        from bookings.slots import SlotError
+        with self.assertRaises(SlotError) as caught:
+            check_bookable(listing, self.day, [(11 * H, 12 * H)])
+        self.assertEqual(caught.exception.code, 'HOURS_NOT_PUBLISHED')
 
     def test_weekly_hours_from_business_controls_win(self):
         listing = self.make_listing(self.vendor, {'open': '10:00', 'close': '20:00', 'open24Hours': False})

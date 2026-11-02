@@ -15,6 +15,11 @@ from .slots import SlotError, overlaps, parse_slot, parse_slots, today_ist
 
 TOMORROW = (today_ist() + datetime.timedelta(days=1)).isoformat()
 
+# A venue fixture that is meant to be BOOKABLE publishes its hours: since the
+# QA audit of 2026-11-02 a venue with no hours is not bookable online.
+# "Open 24 hours" is the full 06:00–24:00 grid these tests were written for.
+OPEN_ALL_DAY = {'open': '', 'close': '', 'open24Hours': True}
+
 RECORD = {
     'name': 'Grand Palace Hall',
     'category': 'hall',
@@ -33,6 +38,7 @@ RECORD = {
         'packages': [{'label': 'Birthday Deluxe', 'price': 5000}],
         'extraPersonPrice': '200',
         'maxExtraPersons': '4',
+        'timings': OPEN_ALL_DAY,
     },
 }
 
@@ -762,6 +768,7 @@ PLAYZONE_RECORD = {
              'unitPrices': ['599', '1999']},
         ],
         'addons': [],
+        'timings': OPEN_ALL_DAY,
     },
 }
 
@@ -781,6 +788,7 @@ OFFER_RECORD = {
             {'title': 'Old', 'code': 'OLD', 'type': 'percent',
              'value': '50', 'minAmount': '', 'maxDiscount': '', 'expiry': '2020-01-01'},
         ],
+        'timings': OPEN_ALL_DAY,
     },
 }
 
@@ -1525,7 +1533,7 @@ class WeekendPricingTests(BookingTestBase):
             id=uuid.uuid4(), vendor=self.vendor, slug='weekend-hall',
             record={
                 'name': 'Weekend Hall', 'price': 600, 'weekendPrice': 900,
-                'detail': {'addons': []},
+                'detail': {'addons': [], 'timings': OPEN_ALL_DAY},
             },
             name='Weekend Hall', category='hall', locality='x', pincode='560001',
         )
@@ -1561,7 +1569,7 @@ class WeekendPricingTests(BookingTestBase):
     def test_per_unit_weekend_prices(self):
         turf = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='weekend-turf',
-            record={'name': 'Turf', 'price': 500, 'detail': {'addons': [], 'sports': [
+            record={'name': 'Turf', 'price': 500, 'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'sports': [
                 {'name': 'Box Cricket', 'units': 2,
                  'unitPrices': ['600', '700'],
                  # The wizard's own spelling.
@@ -1585,7 +1593,7 @@ class WeekendPricingTests(BookingTestBase):
     def test_alias_spelling_also_works(self):
         turf = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='alias-turf',
-            record={'name': 'Alias', 'price': 500, 'detail': {'addons': [], 'sports': [
+            record={'name': 'Alias', 'price': 500, 'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'sports': [
                 {'name': 'Box Cricket', 'units': 1,
                  'unitPrices': ['600'], 'weekendUnitPrices': ['950']},
             ]}},
@@ -1601,7 +1609,7 @@ class WeekendPricingTests(BookingTestBase):
     def test_blank_weekend_entry_falls_back_to_weekday(self):
         turf = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='partial-turf',
-            record={'name': 'Partial', 'price': 500, 'detail': {'addons': [], 'sports': [
+            record={'name': 'Partial', 'price': 500, 'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'sports': [
                 {'name': 'Box Cricket', 'units': 2,
                  'unitPrices': ['600', '700'],
                  'unitWeekendPrices': ['900', '']},   # pitch 2 has none

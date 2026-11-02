@@ -379,10 +379,22 @@ class PublicVenueDetailView(APIView):
         detail['timingsLabel'] = timings_label(timings)
         record['detail'] = detail
         # The vendor's opening hours, upcoming closures and booking
-        # instructions (venues/business.py); null when never configured, i.e.
-        # the default 6 AM – midnight. Saving them invalidates this cache.
-        from .business import public_schedule
+        # instructions (venues/business.py); null when never configured.
+        # Saving them invalidates this cache.
+        from .business import hours_published, public_schedule
         record['business'] = public_schedule(listing)
+        # False when neither weekly hours nor Venue Timings exist: the venue
+        # page says so and online booking stays closed (no invented hours).
+        record['hoursPublished'] = hours_published(listing)
+        # True when a booking must include one of the venue's packages
+        # (vendor's switch, or no real hourly price) — bookings.views.
+        from bookings.views import package_required
+        record['packageRequired'] = package_required(listing)
+        # True when the vendor has time / day / date price rules, so the page
+        # can say a slot's price may differ from the table (never the rules
+        # themselves — those stay the vendor's).
+        from .business import _active_rules, settings_for
+        record['priceRulesActive'] = bool(_active_rules(settings_for(listing)))
 
         cache.set(cache_key, record, CACHE_SECONDS)
         return Response(record)

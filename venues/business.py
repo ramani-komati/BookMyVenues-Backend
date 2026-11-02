@@ -544,23 +544,42 @@ def special_on(settings, day):
 
 def default_periods(listing):
     """The open periods a venue has when no weekly hours are configured:
-    its saved Venue Timings on the booking grid, else 06:00–24:00."""
+    its saved Venue Timings on the booking grid, else NONE — a venue that
+    never published its hours is not bookable online (QA audit 2026-11-02:
+    the old 06:00–24:00 fallback sold hours the venue never offered)."""
     from .timings import bookable_periods, listing_timings
-    return bookable_periods(listing_timings(listing))
+    timings = listing_timings(listing)
+    return bookable_periods(timings) if timings else []
+
+
+UNPUBLISHED = {'kind': 'unpublished', 'note': ''}
+
+
+def hours_published(listing, settings=None):
+    """Has the venue published opening hours — weekly hours, or the Venue
+    Timings saved with the listing ("open 24 hours" counts)?"""
+    from .timings import listing_timings
+    if settings is None:
+        settings = settings_for(listing)
+    if settings is not None and settings.hours is not None:
+        return True
+    return listing_timings(listing) is not None
 
 
 def open_periods(settings, day, listing=None):
     """(merged open periods, why) for `day`. `why` is None on an ordinary
-    day, else {'kind': 'closure'|'special'|'weekly', 'note': ...} explaining
-    a closed or changed day.
+    day, else {'kind': 'closure'|'special'|'weekly'|'unpublished', 'note':
+    ...} explaining a closed or changed day.
 
     Without weekly hours the venue's saved Venue Timings apply (`listing`,
     else the settings row's own venue); weekly hours, special dates and
-    closures are more specific and always win."""
+    closures are more specific and always win. With neither, the day has no
+    open periods (kind 'unpublished') — never an invented default."""
     if listing is None and settings is not None:
         listing = settings.listing
     if settings is None:
-        return default_periods(listing), None
+        periods = default_periods(listing)
+        return periods, (None if periods else dict(UNPUBLISHED))
     closure = closure_on(settings, day)
     if closure is not None:
         return [], {'kind': 'closure', 'note': closure.get('reason') or ''}
@@ -569,7 +588,8 @@ def open_periods(settings, day, listing=None):
         periods = _merge(_stored_periods(special.get('periods')))
         return periods, {'kind': 'special', 'note': special.get('note') or ''}
     if settings.hours is None:
-        return default_periods(listing), None
+        periods = default_periods(listing)
+        return periods, (None if periods else dict(UNPUBLISHED))
     periods = _merge(_stored_periods((settings.hours or {}).get(str(day.weekday()))))
     return periods, (None if periods else {'kind': 'weekly', 'note': ''})
 
@@ -588,10 +608,15 @@ def closed_ranges(periods):
 
 def blocks_for(listing, day, base=None):
     """The SlotBlock rows covering this listing on `day`."""
+    return blocks_between(listing, day, day, base)
+
+
+def blocks_between(listing, first, last, base=None):
+    """blocks_for over a date range (inclusive) in one query."""
     base = base or base_listing(listing)
     own = str(listing.pk)
     return [
-        block for block in SlotBlock.objects.filter(listing=base, date=day)
+        block for block in SlotBlock.objects.filter(listing=base, date__gte=first, date__lte=last)
         if not block.resources or own in block.resources
     ]
 
@@ -635,6 +660,12 @@ def check_bookable(listing, day, intervals, *, enforce_hours=True, settings=None
         settings = VenueBusinessSettings.objects.filter(listing=base).first()
     if enforce_hours:
         periods, why = open_periods(settings, day, listing=base)
+        if not periods and (why or {}).get('kind') == 'unpublished':
+            raise SlotError(
+                'This venue hasn’t published its opening hours yet, so it can’t '
+                'be booked online. Please check back soon.',
+                code='HOURS_NOT_PUBLISHED',
+            )
         if not periods:
             reason = (why or {}).get('note') if (why or {}).get('kind') == 'closure' else ''
             raise SlotError(
@@ -1099,9 +1130,10 @@ def calendar(base, start_day, days):
 
 
 def public_schedule(listing):
-    """What customers see on the venue page: the weekly hours (None = the
-    default 6 AM – midnight), closures from today on, and the venue's
-    booking instructions."""
+    """What customers see on the venue page: the weekly hours (None = not
+    set; the Venue Timings then apply, and with neither the venue is not
+    bookable online), closures from today on, and the venue's booking
+    instructions."""
     settings = settings_for(listing)
     if settings is None:
         return None

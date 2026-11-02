@@ -20,7 +20,7 @@ import uuid
 from accounts.models import User
 from bookings.models import Booking
 from bookings.slots import today_ist
-from bookings.tests import BookingTestBase
+from bookings.tests import OPEN_ALL_DAY, BookingTestBase
 
 from .models import Listing, SlotBlock, VenueBusinessSettings
 
@@ -393,13 +393,17 @@ class OpeningHoursTests(BusinessTestBase):
         self.assertEqual(self.book_on(self.monday, ['12:00 – 14:00'], 1220).status_code, 201)
 
     def test_extra_hours_must_fit_too(self):
+        # Extra hours extend a package (QA audit 2026-11-02): a 1-hour package
+        # + 2 extra hours from 18:00 runs to 21:00, past the 20:00 close.
         self.listing.record = {**self.listing.record, 'detail': {
-            **self.listing.record['detail'], 'extraHourPrice': '300', 'maxExtraHours': '2'}}
+            **self.listing.record['detail'], 'extraHourPrice': '300', 'maxExtraHours': '2',
+            'packages': [{'label': 'Hour Pack', 'price': 600, 'duration': '1'}]}}
         self.listing.save()
         self.put_schedule(hours=week(**{'0': [{'start': '09:00', 'end': '20:00'}]}))
         response = self.book_on(
-            self.monday, ['18:00 – 19:00'], 920,
-            addons=[{'name': 'Extra hour', 'qty': 2, 'price': 300}],
+            self.monday, ['18:00 – 21:00'], 600 + 600 + 20,
+            addons=[{'name': 'Package — Hour Pack', 'qty': 1},
+                    {'name': 'Extra hour', 'qty': 2, 'price': 300}],
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.data['code'], 'OUTSIDE_HOURS')
@@ -655,7 +659,8 @@ class OwnershipTests(BusinessTestBase):
         stray = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.other_vendor, slug='stray',
             record={'name': 'Stray', 'price': 600,
-                    'detail': {'unitOf': str(self.listing.id), 'unitLabel': 'Pitch 9'}},
+                    'detail': {'unitOf': str(self.listing.id), 'unitLabel': 'Pitch 9',
+                               'timings': OPEN_ALL_DAY}},
             name='Stray', category='hall', locality='x', pincode='560001',
         )
         self.assertEqual(self.book_on(self.monday, ['10:00 – 11:00'], 620, listing=stray).status_code, 201)

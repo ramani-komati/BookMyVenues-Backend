@@ -17,7 +17,7 @@ from venues.models import Listing
 
 from .models import Booking
 from .slots import today_ist
-from .tests import PLAYZONE_RECORD, RECORD, TOMORROW
+from .tests import OPEN_ALL_DAY, PLAYZONE_RECORD, RECORD, TOMORROW
 
 
 class FreeOnlineBookingTests(APITestCase):
@@ -381,6 +381,7 @@ class PackagePricingTests(GatewayBookingMixin, APITestCase):
             **RECORD, 'id': 'pkg', 'status': 'live',
             'price': 600,                      # ₹600/hour if booked hourly
             'detail': {
+                'timings': OPEN_ALL_DAY,
                 'addons': [{'name': 'Cake', 'price': 500}],
                 'extraPersonPrice': '200', 'maxExtraPersons': '4',
                 'packages': [
@@ -509,7 +510,7 @@ class PlatformPromoPerUserLimitTests(GatewayBookingMixin, APITestCase):
         self.customer = User.objects.create_user(phone='9400000002', name='Asha')
         self.other = User.objects.create_user(phone='9400000003', name='Ravi')
         record = {**RECORD, 'id': 'pp', 'status': 'live', 'price': 600,
-                  'detail': {'addons': []}}
+                  'detail': {'addons': [], 'timings': OPEN_ALL_DAY}}
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='pp-hall',
             record=record, name='Promo Hall', category='hall',
@@ -597,7 +598,7 @@ class PlatformPromoPerUserLimitTests(GatewayBookingMixin, APITestCase):
         """A banner promo must not eat a venue offer's allowance."""
         self.listing.record = {
             **self.listing.record,
-            'detail': {'addons': [], 'offers': [
+            'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'offers': [
                 {'title': 'Venue one', 'code': 'ONESHOT', 'type': 'flat',
                  'value': '100', 'minAmount': '', 'maxDiscount': '',
                  'expiry': '', 'perUserLimit': '1'},
@@ -633,6 +634,7 @@ class ExtraHourPricingTests(GatewayBookingMixin, APITestCase):
         record = {
             **RECORD, 'id': 'eh', 'status': 'live', 'price': 600,
             'detail': {
+                'timings': OPEN_ALL_DAY,
                 'addons': [{'name': 'Cake', 'price': 500}],
                 'extraPersonPrice': '199', 'maxExtraPersons': '10',
                 'extraHourPrice': '499', 'maxExtraHours': '3',
@@ -650,7 +652,7 @@ class ExtraHourPricingTests(GatewayBookingMixin, APITestCase):
         self.plain = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='plain-hall',
             record={**RECORD, 'id': 'plain', 'status': 'live', 'price': 600,
-                    'detail': {'addons': []}},
+                    'detail': {'addons': [], 'timings': OPEN_ALL_DAY}},
             name='Plain Hall', category='hall', locality='X', pincode='560002',
         )
         self.client.force_authenticate(user=self.customer)
@@ -661,24 +663,43 @@ class ExtraHourPricingTests(GatewayBookingMixin, APITestCase):
             'slots': slots, 'addons': addons, 'perSlot': 600, 'amount': amount,
         })
 
+    # Since the QA audit of 2026-11-02 an extra hour only EXTENDS A PACKAGE
+    # (an hourly customer books a longer duration instead), so these use the
+    # 3-hour Party Pack; the pricing rules they guard are unchanged.
+
     def test_extra_hour_priced_from_the_venue_not_the_request(self):
         """A tampered price must not win — same rule as every other line."""
         r = self.book(
-            ['18:00 – 20:00'],                        # 2h x 600 = 1200
-            [{'name': 'Extra hour', 'qty': 1, 'price': 1}],   # claims ₹1
-            1220 + 1,                                 # what the client hopes for
+            ['18:00 – 22:00'],                        # 3h package + 1 extra
+            [{'name': 'Package — Party Pack', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1, 'price': 1}],   # claims ₹1
+            5000 + 1 + 20,                            # what the client hopes for
         )
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.data['code'], 'AMOUNT_MISMATCH')
-        self.assertEqual(r.data['expectedAmount'], 1200 + 499 + 20)
+        self.assertEqual(r.data['expectedAmount'], 5000 + 499 + 20)
 
     def test_extra_hours_bill_at_the_venue_rate(self):
         r = self.book(
-            ['18:00 – 20:00'],
-            [{'name': 'Extra hour', 'qty': 2}],
-            1200 + 998 + 20,
+            ['18:00 – 23:00'],                        # 3h package + 2 extra
+            [{'name': 'Package — Party Pack', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 2}],
+            5000 + 998 + 20,
         )
         self.assertEqual(r.status_code, 201, r.data)
+
+    def test_an_hourly_booking_cannot_add_extra_hours(self):
+        """QA audit 2026-11-02: 2h + 1 extra hour at ₹499 undercut a 3-hour
+        booking at ₹600/h. Hourly customers choose the longer duration."""
+        r = self.book(
+            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 1}],
+            1200 + 499 + 20,
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data['code'], 'EXTRA_HOURS_NEED_PACKAGE')
+        self.assertFalse(Booking.objects.exists())
+        # The same three hours as a plain booking bill at the hourly rate.
+        self.assertEqual(self.book(['18:00 – 21:00'], [], 1800 + 20).status_code, 201)
 
     def test_the_cap_is_enforced(self):
         r = self.book(
@@ -718,18 +739,21 @@ class ExtraHourPricingTests(GatewayBookingMixin, APITestCase):
 
     def test_extra_hours_stack_with_persons_and_addons(self):
         r = self.book(
-            ['18:00 – 20:00'],
-            [{'name': 'Extra hour', 'qty': 1},
+            ['18:00 – 22:00'],
+            [{'name': 'Package — Party Pack', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1},
              {'name': 'Extra persons', 'qty': 2},
              {'name': 'Cake', 'qty': 1}],
-            1200 + 499 + 398 + 500 + 20,
+            5000 + 499 + 398 + 500 + 20,
         )
         self.assertEqual(r.status_code, 201, r.data)
 
     def test_the_line_is_persisted_and_echoed(self):
         r = self.book(
-            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 2}],
-            1200 + 998 + 20,
+            ['18:00 – 23:00'],
+            [{'name': 'Package — Party Pack', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 2}],
+            5000 + 998 + 20,
         )
         booking = Booking.objects.get(pk=r.data['bookingId'])
         line = next(a for a in booking.addons if a['name'] == 'Extra hour')
@@ -816,8 +840,10 @@ class ExtraHourReservationTests(GatewayBookingMixin, APITestCase):
 
     PACKAGE: the picker already books the whole block, so the slots arrive
              covering package + extra hours. Reserve as sent.
-    HOURLY:  the extra hour sits outside the chosen slots, so the reservation
-             has to grow or the customer pays for an hour nobody blocked.
+    HOURLY:  (until the QA audit of 2026-11-02) the extra hour sat outside
+             the chosen slots, so the reservation had to grow. Extra hours now
+             only extend a package; an hourly booking that sends one is
+             refused, so no paid hour can ever be left unblocked.
     """
 
     def setUp(self):
@@ -829,6 +855,7 @@ class ExtraHourReservationTests(GatewayBookingMixin, APITestCase):
         record = {
             **RECORD, 'id': 'ehr', 'status': 'live', 'price': 600,
             'detail': {
+                'timings': OPEN_ALL_DAY,
                 'addons': [],
                 'extraHourPrice': '499', 'maxExtraHours': '3',
                 'packages': [{'label': 'bday', 'price': 5000, 'duration': '2'}],
@@ -876,21 +903,25 @@ class ExtraHourReservationTests(GatewayBookingMixin, APITestCase):
     # ---------------- hourly ----------------
 
     def test_hourly_extra_hour_extends_the_reservation(self):
-        """Billed for 3 hours, so all 3 must be blocked."""
+        """Was: billed for 3 hours, so all 3 blocked. Now the hourly extra
+        hour is refused outright — nothing billed, nothing reserved."""
         r = self.book(
             ['18:00 – 20:00'],                       # customer picked 2h
             [{'name': 'Extra hour', 'qty': 1}],
             1200 + 499 + 20,
         )
-        self.assertEqual(r.status_code, 201, r.data)
-        booking = Booking.objects.get(pk=r.data['bookingId'])
-        self.assertEqual(booking.slots, ['18:00 – 21:00'])   # grown to 3h
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(r.data['code'], 'EXTRA_HOURS_NEED_PACKAGE')
+        self.assertFalse(Booking.objects.exists())
 
     def test_the_extra_hour_is_actually_protected(self):
-        """The bug: the third hour was paid for but left open to anyone."""
+        """The bug: the third hour was paid for but left open to anyone.
+        A package's extra hour is inside the block it reserves."""
         self.book(
-            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 1}],
-            1200 + 499 + 20,
+            ['18:00 – 21:00'],
+            [{'name': 'Package — bday', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1}],
+            5000 + 499 + 20,
         )
         self.client.force_authenticate(user=self.other)
         clash = self.book(['20:00 – 21:00'], [], 620)
@@ -898,12 +929,14 @@ class ExtraHourReservationTests(GatewayBookingMixin, APITestCase):
 
     def test_two_extra_hours_extend_by_two(self):
         r = self.book(
-            ['18:00 – 19:00'], [{'name': 'Extra hour', 'qty': 2}],
-            600 + 998 + 20,
+            ['18:00 – 22:00'],                       # 2h package + 2 extra
+            [{'name': 'Package — bday', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 2}],
+            5000 + 998 + 20,
         )
         self.assertEqual(r.status_code, 201, r.data)
         booking = Booking.objects.get(pk=r.data['bookingId'])
-        self.assertEqual(booking.slots, ['18:00 – 21:00'])
+        self.assertEqual(booking.slots, ['18:00 – 22:00'])
 
     def test_hourly_without_extra_hours_is_untouched(self):
         r = self.book(['18:00 – 20:00'], [], 1220)
@@ -912,17 +945,21 @@ class ExtraHourReservationTests(GatewayBookingMixin, APITestCase):
         self.assertEqual(booking.slots, ['18:00 – 20:00'])
 
     def test_extending_past_closing_is_refused(self):
+        """An hourly booking can no longer be stretched at all (it used to
+        be refused only when the stretch passed closing time)."""
         r = self.book(
             ['22:00 – 23:00'], [{'name': 'Extra hour', 'qty': 3}],
             600 + 1497 + 20,
         )
         self.assertEqual(r.status_code, 400)
-        self.assertIn('past closing time', r.data['message'])
+        self.assertEqual(r.data['code'], 'EXTRA_HOURS_NEED_PACKAGE')
 
     def test_availability_reports_the_extended_block(self):
         self.book(
-            ['18:00 – 20:00'], [{'name': 'Extra hour', 'qty': 1}],
-            1200 + 499 + 20,
+            ['18:00 – 21:00'],
+            [{'name': 'Package — bday', 'qty': 1},
+             {'name': 'Extra hour', 'qty': 1}],
+            5000 + 499 + 20,
         )
         Booking.objects.update(status='confirmed')
         self.client.force_authenticate(user=None)

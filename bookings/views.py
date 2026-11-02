@@ -8,6 +8,7 @@ concurrent bookings for the same venue to run one after another.
 Error shape everywhere: {"message": "..."}.
 """
 import datetime
+import re
 from collections import defaultdict
 
 from django.db import transaction
@@ -148,13 +149,20 @@ def _active_bookings(listing, date):
     payment holds (a live 5-minute hold still blocks the slot; a lapsed one
     frees it at once — bookings/holds.py). Availability and the overlap check
     both read exactly this queryset so they can never disagree."""
-    from .holds import expired_hold_q
     # Slot bookings only: memberships, resort packages and big screen
     # surprises (Booking.kind) hold places by their own capacity rules
     # (offerings/availability.py) — a 10-guest pool package must not block
     # the resort's hourly lawn bookings.
+    return active_bookings_between(listing, date, date)
+
+
+def active_bookings_between(listing, first, last):
+    """_active_bookings for every date from `first` to `last` inclusive, in
+    ONE query — the date strip's two-week summary reads this instead of one
+    query per day (bookings/day_summary.py)."""
+    from .holds import expired_hold_q
     return exclude_dead(
-        Booking.objects.filter(listing=listing, date=date, kind='')
+        Booking.objects.filter(listing=listing, date__gte=first, date__lte=last, kind='')
     ).exclude(expired_hold_q())
 
 
@@ -219,12 +227,17 @@ def _unit_count(entry):
 
 
 def _price_at(values, unit):
-    """values[unit-1] as an int, or None when absent/blank."""
+    """values[unit-1] as an int, or None when absent/blank/zero.
+
+    A zero is "no price set", not a free hour: the wizard stores '0' for a
+    screen priced only through packages (QA audit 2026-11-02 — a ₹0 rate
+    let an hourly booking through for the fee alone)."""
     values = values or []
     if unit is None or not (1 <= unit <= len(values)):
         return None
     raw = str(values[unit - 1]).strip()
-    return _to_int(raw, 'unit price') if raw else None
+    rate = _to_int(raw, 'unit price') if raw else None
+    return rate or None
 
 
 # The wizard writes `unitWeekendPrices`; `weekendUnitPrices` is accepted as an
@@ -242,8 +255,62 @@ def _weekend_price_at(source, unit):
 
 
 def _amount_or_none(value, field):
+    """A configured price as an int, or None when blank or zero (unset)."""
     text = str(value or '').strip()
-    return _to_int(text, field) if text else None
+    return (_to_int(text, field) or None) if text else None
+
+
+def _has_positive(values):
+    for value in values or []:
+        try:
+            if int(str(value).strip() or 0) > 0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def hourly_price_configured(listing):
+    """Has the vendor set a real per-hour price for this venue?
+
+    Sports venues price per sport / pitch. Halls, theatres and lawns price
+    per unit (`detail.unitPrices`, one entry per screen / hall). A venue
+    registered with packages only has no unit price — the wizard then
+    copies its CHEAPEST PACKAGE into the top-level `price` for the "from ₹x"
+    card, which is not an hourly rate and must never be sold as one.
+    Records from before per-unit prices existed fall back to `price`."""
+    record = listing.record or {}
+    detail = record.get('detail') or {}
+    sports = detail.get('sports') or []
+    if sports:
+        return any(
+            _has_positive([entry.get('price')]) or _has_positive(entry.get('unitPrices'))
+            for entry in sports if isinstance(entry, dict)
+        )
+    unit_prices = detail.get('unitPrices')
+    if isinstance(unit_prices, list) and unit_prices:
+        return _has_positive(unit_prices)
+    return _has_positive([record.get('price')])
+
+
+def _package_rows(listing):
+    detail = (listing.record or {}).get('detail') or {}
+    return [
+        p for p in detail.get('packages') or []
+        if isinstance(p, dict) and (str(p.get('label') or p.get('name') or '').strip() or _has_positive([p.get('price')]))
+    ]
+
+
+def package_required(listing):
+    """Must a booking here include one of the venue's packages?
+
+    Yes when the vendor turned on "Customers must choose a package"
+    (`detail.packageRequired`), and automatically when the venue sells
+    packages but has no real hourly price (see hourly_price_configured)."""
+    detail = (listing.record or {}).get('detail') or {}
+    if not _package_rows(listing):
+        return False
+    return _is_true(detail.get('packageRequired')) or not hourly_price_configured(listing)
 
 
 def base_rate(listing, weekend=False):
@@ -365,11 +432,24 @@ def _package_minutes(package):
     for key in ('duration', 'hours', 'durationHrs', 'durationHours'):
         raw = str(package.get(key) or '').strip()
         if raw:
-            try:
-                return int(round(float(raw) * 60))
-            except (TypeError, ValueError):
+            # The leading number, like the customer page's parseFloat: "3",
+            # "1.5" and "3 hrs" are all hours. float("3 hrs") used to fail,
+            # which left such a package with NO length limit at all.
+            match = _LEADING_NUMBER.match(raw)
+            if not match:
                 return None
+            minutes = int(round(float(match.group(1)) * 60))
+            return minutes or None
     return None
+
+
+_LEADING_NUMBER = re.compile(r'^\s*(\d+(?:\.\d+)?)')
+
+
+def _contiguous(intervals):
+    """True when the ranges form one unbroken block of time."""
+    ordered = sorted(intervals)
+    return all(ordered[i][1] == ordered[i + 1][0] for i in range(len(ordered) - 1))
 
 
 def _addon_total(listing, requested_addons):
@@ -704,7 +784,8 @@ def _apply_offer(listing, base, offer_request, user=None):
 
 
 def compute_amount(listing, intervals, requested_addons, rate=None,
-                   offer_request=None, weekend=False, user=None, date=None):
+                   offer_request=None, weekend=False, user=None, date=None,
+                   breakdown=None):
     """
     Server-side total:
         base     = round(rate x minutes / 60) + sum(addon.price x qty)
@@ -725,6 +806,16 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     (amount, cleaned_addons, applied_offer, discount, fee, extra_hours,
     has_package) — `fee` is what was actually charged, stored on the booking
     for payout math; the last two tell the caller how much time to RESERVE.
+
+    ONE PRICE PER BOOKING, WHATEVER THE PATH (QA audit 2026-11-02):
+      * a venue that requires a package (package_required) refuses an
+        hourly booking — the package can't be skipped for a cheaper bill;
+      * an hourly booking needs a real hourly price (never ₹0);
+      * extra hours only extend a PACKAGE — an hourly customer books a
+        longer duration at the hourly rate / price rules instead, so "1 hr
+        + 2 extra" can't undercut a 3-hour booking;
+      * a package is one continuous block of time.
+    `breakdown` (a dict) is filled with the itemised bill for the quote.
     """
     if rate is None:
         rate = base_rate(listing, weekend)
@@ -734,6 +825,22 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     )
 
     if package is None:
+        if package_required(listing):
+            raise SlotError(
+                'Please choose one of this venue’s packages to book.',
+                code='PACKAGE_REQUIRED',
+            )
+        if extra_hours:
+            raise SlotError(
+                'Extra hours can only be added to a package — choose a longer '
+                'duration instead.',
+                code='EXTRA_HOURS_NEED_PACKAGE',
+            )
+        if not rate or rate <= 0:
+            raise SlotError(
+                'This venue has not published an hourly price yet.',
+                code='PRICE_NOT_SET',
+            )
         if date is not None:
             from venues.business import slot_charge
             slot_base = slot_charge(listing, date, intervals, rate)
@@ -743,6 +850,10 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
         # The package price already buys the time — no hourly charge on top.
         slot_base = 0
         label, info, _qty = package
+        if not _contiguous(intervals):
+            raise SlotError(
+                f'"{label}" is booked as one continuous time — pick a single slot.',
+            )
         wanted = info['minutes']
         if wanted is not None:
             # "Extra hour" lines extend the block the package covers, and are
@@ -764,6 +875,20 @@ def compute_amount(listing, intervals, requested_addons, rate=None,
     discount, applied_offer = _apply_offer(listing, base, offer_request, user)
     fee = _booking_fee()
     amount = max(0, base - discount) + fee
+    if breakdown is not None:
+        breakdown.update({
+            'rate': None if package is not None else rate,
+            'minutes': booked_minutes,
+            'slotCharge': slot_base,
+            'package': package[0] if package is not None else None,
+            'lines': [dict(line, total=line['price'] * line['qty']) for line in cleaned],
+            'addonsTotal': addon_total,
+            'subtotal': base,
+            'discount': discount,
+            'fee': fee,
+            'amount': amount,
+            'isWeekend': bool(weekend),
+        })
     return (amount, cleaned, applied_offer, discount, fee,
             extra_hours, package is not None)
 
@@ -780,24 +905,31 @@ def _rates_for(listing, date):
     charged, so the client never has to guess weekday vs weekend."""
     weekend = is_weekend(date)
     detail = listing.record.get('detail') or {}
+    venue_rate = base_rate(listing, weekend)
+
+    def effective(sport, unit):
+        # Exactly what compute_amount charges per hour for this pitch: its
+        # own rate, else the venue's (validate_booking_request's fallback).
+        own = _unit_rate(listing, sport, unit, weekend)
+        return own if own is not None else venue_rate
+
     unit_rates = []
     for entry in detail.get('sports') or []:
         name = str(entry.get('name') or '')
         for unit in range(1, (_unit_count(entry) or 1) + 1):
-            unit_rates.append({
-                'sport': name, 'unit': unit,
-                'rate': _unit_rate(listing, name, unit, weekend),
-            })
+            unit_rates.append({'sport': name, 'unit': unit, 'rate': effective(name, unit)})
     if not unit_rates:
         for unit in range(1, min(len(detail.get('unitPrices') or []), MAX_UNITS) + 1):
-            unit_rates.append({
-                'sport': None, 'unit': unit,
-                'rate': _unit_rate(listing, '', unit, weekend),
-            })
+            unit_rates.append({'sport': None, 'unit': unit, 'rate': effective('', unit)})
+    required = package_required(listing)
     return {
-        'rate': base_rate(listing, weekend),
+        'rate': venue_rate,
         'isWeekend': weekend,
         'unitRates': unit_rates,
+        # Additive: the hourly path is closed — the customer must pick a
+        # package (vendor's choice, or no real hourly price exists).
+        'packageRequired': required,
+        'hourlyPriceSet': hourly_price_configured(listing),
     }
 
 
@@ -883,6 +1015,9 @@ def _business_fields(listing, date):
             (why or {}).get('note') or None
             if (why or {}).get('kind') == 'closure' else None
         ),
+        # False when the venue never published opening hours: nothing is
+        # bookable (venues.business.default_periods) — the page says why.
+        'hoursPublished': (why or {}).get('kind') != 'unpublished',
         'unavailable': unavailable_ranges(listing, date, settings=settings),
         'priceBands': price_bands(listing, date, settings=settings),
         'bookingInstructions': (settings.booking_instructions if settings else '') or None,
@@ -982,7 +1117,7 @@ class AvailabilityDaysView(APIView):
         return Response(summary(listing, start, days, viewer=viewer))
 
 
-def validate_booking_request(body, user=None, hold_only=False):
+def validate_booking_request(body, user=None, hold_only=False, quote=False):
     """
     Full server-side validation + pricing for a customer booking request.
     Shared by direct booking creation AND Razorpay order creation so the two
@@ -995,6 +1130,11 @@ def validate_booking_request(body, user=None, hold_only=False):
     but the bill is not final yet (the offer and payment split are chosen
     after), so the client's amount / offer are not checked here. The payment
     order re-validates everything in full before any money moves.
+
+    quote: the price check behind POST /api/bookings/quote — everything is
+    validated and priced (offer included) exactly as for the payment order,
+    but the client's amount is not required; the itemised bill comes back in
+    data['breakdown'] so the review step shows the SERVER's numbers.
     """
     # --- Resolve the venue -------------------------------------
     listing = None
@@ -1027,11 +1167,12 @@ def validate_booking_request(body, user=None, hold_only=False):
         # Sat/Sun (IST), falling back to the weekday rate when unset.
         weekend = is_weekend(date)
         rate = _unit_rate(listing, sport, unit, weekend)  # None -> base rate
+        breakdown = {}
         (amount, addons, applied_offer, discount, fee,
          extra_hours, has_package) = compute_amount(
             listing, intervals, body.get('addons'), rate=rate,
             offer_request=None if hold_only else body.get('offer'), weekend=weekend, user=user,
-            date=date,
+            date=date, breakdown=breakdown,
         )
         # A package's slots already cover its extra hours; an hourly booking's
         # do not, so the reservation has to grow to match the bill.
@@ -1045,7 +1186,7 @@ def validate_booking_request(body, user=None, hold_only=False):
         # under the listing lock when the order is created.
         from venues.business import check_bookable
         check_bookable(listing, date, intervals)
-        client_amount = amount if hold_only else _to_int(body.get('amount'), 'amount')
+        client_amount = amount if (hold_only or quote) else _to_int(body.get('amount'), 'amount')
         per_slot = _to_int(
             body.get('perSlot') or listing.record.get('price') or 0, 'perSlot'
         )
@@ -1073,7 +1214,7 @@ def validate_booking_request(body, user=None, hold_only=False):
 
     # Cross-check the client's INFORMATIONAL discountAmount (money math
     # always uses our recomputed value).
-    client_discount = None if hold_only else body.get('discountAmount')
+    client_discount = None if (hold_only or quote) else body.get('discountAmount')
     if client_discount not in (None, ''):
         try:
             client_discount = int(str(client_discount))
@@ -1117,6 +1258,7 @@ def validate_booking_request(body, user=None, hold_only=False):
         'discount': discount, 'fee': fee, 'amount': amount,
         'per_slot': per_slot, 'method': method, 'slots': slot_texts,
         'pay_now': pay_now, 'at_venue': at_venue, 'part_payment': part_config,
+        'breakdown': breakdown,
     }, None
 
 

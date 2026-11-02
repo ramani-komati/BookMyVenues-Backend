@@ -34,11 +34,9 @@ MAX_DAYS = 14                # one request covers at most two weeks
 MAX_AHEAD_DAYS = 366         # nothing is bookable further out than a year
 
 
-def _taken_intervals(listing, day, viewer=None):
-    from .views import _active_bookings
-
+def _intervals_of(bookings, viewer=None):
     out = []
-    for booking in _active_bookings(listing, day):
+    for booking in bookings:
         if (booking.status == 'payment_pending' and viewer is not None
                 and booking.user_id == viewer.pk):
             continue
@@ -50,13 +48,22 @@ def _taken_intervals(listing, day, viewer=None):
     return out
 
 
+def _taken_intervals(listing, day, viewer=None):
+    from .views import _active_bookings
+
+    return _intervals_of(_active_bookings(listing, day), viewer=viewer)
+
+
 def _hits(start, end, intervals):
     return any(start < e and s < end for s, e in intervals)
 
 
-def day_row(listing, day, *, settings=None, base=None, viewer=None, today=None, now_minute=None):
+def day_row(listing, day, *, settings=None, base=None, viewer=None, today=None, now_minute=None,
+            taken=None, blocked=None):
     """The summary for one day. `settings`/`base` may be passed in so a
-    multi-day request reads them once."""
+    multi-day request reads them once; so may the day's `taken` booking
+    intervals and `blocked` vendor-block intervals (summary() reads the
+    whole window in two queries)."""
     from venues.business import base_listing, blocks_for, open_periods
 
     base = base or base_listing(listing)
@@ -66,10 +73,14 @@ def day_row(listing, day, *, settings=None, base=None, viewer=None, today=None, 
         note = (why or {}).get('note') if (why or {}).get('kind') == 'closure' else None
         row.update({'status': 'closed', 'reason': note or None,
                     'freeSlots': 0, 'totalSlots': 0})
+        if (why or {}).get('kind') == 'unpublished':
+            row['hoursPublished'] = False
         return row
 
-    blocked = [(b.start_minute, b.end_minute) for b in blocks_for(listing, day, base)]
-    taken = _taken_intervals(listing, day, viewer=viewer)
+    if blocked is None:
+        blocked = [(b.start_minute, b.end_minute) for b in blocks_for(listing, day, base)]
+    if taken is None:
+        taken = _taken_intervals(listing, day, viewer=viewer)
     today = today or today_ist()
     cutoff = (now_minute if now_minute is not None else now_minutes_ist()) if day == today else -1
 
@@ -95,18 +106,41 @@ def day_row(listing, day, *, settings=None, base=None, viewer=None, today=None, 
 
 
 def summary(listing, start, days, *, viewer=None):
-    from venues.business import base_listing
+    """The rows for `days` days from `start`. The bookings and vendor blocks
+    of the whole window are read in ONE query each (QA audit 2026-11-02:
+    two queries per day made a two-week strip take ~3.5 s on production) —
+    from the same querysets the per-date check uses."""
+    from collections import defaultdict
+
+    from venues.business import base_listing, blocks_between
     from venues.models import VenueBusinessSettings
+
+    from .views import active_bookings_between
 
     base = base_listing(listing)
     settings = VenueBusinessSettings.objects.filter(listing=base).first()
     today = today_ist()
     now_minute = now_minutes_ist()
-    rows = [
-        day_row(listing, start + datetime.timedelta(days=i), settings=settings,
-                base=base, viewer=viewer, today=today, now_minute=now_minute)
-        for i in range(days)
-    ]
+    last = start + datetime.timedelta(days=days - 1)
+
+    by_day = defaultdict(list)
+    for booking in active_bookings_between(listing, start, last).only(
+        'date', 'slots', 'status', 'user_id',
+    ):
+        by_day[booking.date].append(booking)
+    blocks_by_day = defaultdict(list)
+    for block in blocks_between(listing, start, last, base):
+        blocks_by_day[block.date].append((block.start_minute, block.end_minute))
+
+    rows = []
+    for i in range(days):
+        day = start + datetime.timedelta(days=i)
+        rows.append(day_row(
+            listing, day, settings=settings, base=base, viewer=viewer,
+            today=today, now_minute=now_minute,
+            taken=_intervals_of(by_day.get(day, ()), viewer=viewer),
+            blocked=blocks_by_day.get(day, []),
+        ))
     return {
         'from': start.isoformat(),
         'days': rows,
