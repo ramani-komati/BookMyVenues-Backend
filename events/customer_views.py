@@ -26,7 +26,50 @@ def _message(text, http_status):
 def customer_order_record(row):
     """One ticket order as its OWN customer sees it (My event orders, and
     the unified booking history — bookings/history.py)."""
-    return {**row.as_record(), 'vendorContact': order_contact(row), **row.rating_fields()}
+    from .tickets import issuable
+    return {
+        **row.as_record(), 'vendorContact': order_contact(row), **row.rating_fields(),
+        # The PDF tickets can be downloaded (GET …/tickets.pdf) — verified-
+        # paid orders only; a pending, failed or refunded order has none.
+        'ticketPdf': issuable(row),
+    }
+
+
+class MyTicketsPdfView(APIView):
+    """GET /api/users/me/event-orders/<id>/tickets.pdf — the customer's own
+    PDF tickets, rebuilt on demand (the same ticket IDs and QR codes as the
+    emailed copy). Owner-scoped: another customer's order id is a 404. An
+    order without valid tickets (not verified-paid) is a 409, never a PDF."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, order_id):
+        from django.http import HttpResponse
+
+        from .ticket_pdf import TicketUnavailable, filename, render
+
+        order = EventOrder.objects.filter(
+            pk=order_id, user=request.user,
+        ).exclude(status='removed').select_related('event').first()
+        if order is None:
+            return _message('Order not found.', status.HTTP_404_NOT_FOUND)
+        try:
+            content = render(order)
+        except TicketUnavailable:
+            return _message(
+                'Tickets are only issued for paid, confirmed orders.', status.HTTP_409_CONFLICT,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception('Ticket PDF failed for order %s', order.pk)
+            return _message(
+                'Your tickets could not be generated right now. Please try again, or show '
+                'your booking ID at the entrance.', status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        response = HttpResponse(content, content_type='application/pdf')
+        response['Content-Disposition'] = f'attachment; filename="{filename(order)}"'
+        response['Cache-Control'] = 'private, no-store'
+        return response
 
 
 class MyEventOrdersView(APIView):

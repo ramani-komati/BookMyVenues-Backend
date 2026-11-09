@@ -21,7 +21,7 @@ from rest_framework.views import APIView
 from .auth import CsrfExemptSessionAuthentication, IsAdmin
 
 TEST_WORDS = re.compile(r'\b(demo|test|testing|dummy|sample|trial|fake)\b', re.I)
-BRAND_NAMES = {'bookmyvenue', 'bookmyvenues', 'thebookmyvenue', 'thebookmyvenues'}
+BRAND_NAMES = {'hapvoo', 'bookmyvenue', 'bookmyvenues', 'thebookmyvenue', 'thebookmyvenues'}
 SUSPICIOUS_PRICE = 10   # ₹ — no real venue rents for less per slot / hour
 
 

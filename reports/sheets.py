@@ -94,7 +94,7 @@ def event_sheets(events, *, owner=None):
             ]
         else:
             row += ['You' if event.vendor_id == owner.id else
-                    'TheBookMyVenues (at your venue)']
+                    'HAPVOO (at your venue)']
         row += [
             event.venue_name,
             event.location,

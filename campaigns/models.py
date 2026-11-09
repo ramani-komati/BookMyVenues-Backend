@@ -9,7 +9,15 @@ never stop a sign-in code or a booking receipt.
     EmailPreference     a customer's own marketing consent (opt-IN, default off)
     EmailSuppression    addresses that must never get promotional mail again
                         (hard bounce, spam complaint)
-    Campaign            one promotional email: content + audience + send state
+    Campaign            one email to many customers: content + audience + send
+                        state. Its KIND decides who may receive it:
+                          promotional  offers, discounts, sales, news — only
+                                       customers who opted in themselves
+                          service      booking / payment / account notices
+                                       and service announcements — every
+                                       registered customer the notice is
+                                       about, no marketing consent needed,
+                                       never carrying offers (content.py)
     CampaignRecipient   the frozen recipient list of a sent campaign, one row
                         per address, carrying its delivery status
     ResendWebhookEvent  webhook ids already applied (Resend retries deliveries)
@@ -21,12 +29,16 @@ from django.db import models
 
 
 class EmailPreference(models.Model):
-    """Marketing consent, set ONLY by the customer (My account toggle) or by
-    their own unsubscribe / spam complaint. A missing row means "never opted
+    """Marketing consent, set ONLY by the customer (My account toggle, or the
+    optional box when they sign up) or by their own unsubscribe / spam
+    complaint. A missing row means "never opted
     in" — no promotional email. Admins have no write path to this table."""
 
     class Source(models.TextChoices):
         ACCOUNT = 'account', 'My account'
+        # The optional, unticked box on the new-customer sign-up step — the
+        # customer's own choice, recorded the same way as the account toggle.
+        REGISTRATION = 'registration', 'Sign-up form'
         UNSUBSCRIBE_LINK = 'unsubscribe_link', 'Unsubscribe link'
         ONE_CLICK = 'one_click', 'One-click unsubscribe (mail app)'
         COMPLAINT = 'complaint', 'Marked as spam'
@@ -64,6 +76,17 @@ class EmailSuppression(models.Model):
 
 class Campaign(models.Model):
 
+    class Kind(models.TextChoices):
+        PROMOTIONAL = 'promotional', 'Promotional'
+        SERVICE = 'service', 'Service / transactional'
+
+    class ServiceTopic(models.TextChoices):
+        BOOKING = 'booking_update', 'Booking update'
+        PAYMENT = 'payment', 'Payment notification'
+        ACCOUNT = 'account', 'Account notice'
+        ANNOUNCEMENT = 'service_announcement', 'Service announcement'
+        POLICY = 'policy', 'Policy or terms update'
+
     class Status(models.TextChoices):
         DRAFT = 'draft', 'Draft'
         QUEUED = 'queued', 'Queued'
@@ -86,6 +109,12 @@ class Campaign(models.Model):
     cta_url = models.CharField(max_length=500, blank=True, default='')
     # {segment, state, city, category, days} — see campaigns/audience.py.
     audience = models.JSONField(default=dict, blank=True)
+    # Promotional (consent-gated) or service (operational). Every campaign
+    # created before the split was promotional, hence the default.
+    kind = models.CharField(max_length=12, choices=Kind.choices, default=Kind.PROMOTIONAL)
+    # What a service campaign is about (required to send one); '' otherwise.
+    service_topic = models.CharField(max_length=24, choices=ServiceTopic.choices,
+                                     blank=True, default='')
 
     status = models.CharField(max_length=10, choices=Status.choices, default=Status.DRAFT)
     # Bumped on every edit; a save carrying an older version is refused, so

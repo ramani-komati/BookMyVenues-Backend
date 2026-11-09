@@ -18,6 +18,15 @@ DUPLICATE-SEND GUARDS, outermost first:
      a retried batch re-renders byte-identical mail from frozen values — so
      even a request whose answer was lost cannot email anyone twice.
 
+CAMPAIGN KIND (Campaign.kind) changes three things and nothing else:
+  promotional  opted-in customers only (re-checked per batch), List-Unsubscribe
+               headers, stream tag 'marketing', CAMPAIGN_FROM
+  service      every registered customer not suppressed (re-checked per
+               batch), no marketing unsubscribe — the footer links to the
+               customer's email preferences — stream tag 'service',
+               CAMPAIGN_SERVICE_FROM (default RESEND_FROM). Never changes
+               anyone's marketing consent.
+
 BACKGROUND WORK without a task queue (the backend has none): queue() starts a
 daemon thread after the transaction commits. If the server restarts mid-send,
 the campaign is resumed by the next admin visit to the Campaigns page, or by
@@ -40,6 +49,7 @@ from django.db.models.functions import Coalesce, Lower
 from django.utils import timezone
 
 from . import content, resend_client
+from .audience import PROMOTIONAL, SERVICE, unsubscribed_addresses
 from .audience import recipients as audience_recipients
 from .models import Campaign, CampaignRecipient, EmailPreference, EmailSuppression
 
@@ -70,7 +80,9 @@ def delivery_mode():
     return mode if mode in ('off', 'dry-run', 'resend') else 'off'
 
 
-def from_address():
+def from_address(kind=PROMOTIONAL):
+    if kind == SERVICE:
+        return getattr(settings, 'CAMPAIGN_SERVICE_FROM', '') or settings.RESEND_FROM
     return getattr(settings, 'CAMPAIGN_FROM', '') or settings.RESEND_FROM
 
 
@@ -119,26 +131,31 @@ def public_base(request=None):
 # ---------------------------------------------------------------------------
 
 def _payload(campaign, rendered, *, to, name, unsub_url, test=False):
+    """unsub_url is the signed unsubscribe link for promotional mail, and the
+    customer's email-preferences page for a service email."""
     subject, html, text = content.personalize(rendered, name=name, unsubscribe_url=unsub_url)
+    service = content.is_service(campaign)
     payload = {
-        'from': from_address(),
+        'from': from_address(campaign.kind),
         'to': [to],
         'subject': subject,
         'html': html,
         'text': text,
-        # Lets mail apps show their own "Unsubscribe" button (RFC 2369) and
-        # unsubscribe in one click without a browser (RFC 8058) — Gmail and
-        # Yahoo require both for bulk senders.
-        'headers': {
-            'List-Unsubscribe': f'<{unsub_url}>',
-            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
-        },
         # Separates this stream from transactional mail in Resend's logs.
         'tags': [
-            {'name': 'stream', 'value': 'test' if test else 'marketing'},
+            {'name': 'stream', 'value': 'test' if test else 'service' if service else 'marketing'},
             {'name': 'campaign', 'value': str(campaign.pk)},
         ],
     }
+    if not service:
+        # Lets mail apps show their own "Unsubscribe" button (RFC 2369) and
+        # unsubscribe in one click without a browser (RFC 8058) — Gmail and
+        # Yahoo require both for bulk senders. A service notice has no
+        # marketing list to leave, so it carries neither.
+        payload['headers'] = {
+            'List-Unsubscribe': f'<{unsub_url}>',
+            'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        }
     reply_to = getattr(settings, 'CAMPAIGN_REPLY_TO', '')
     if reply_to:
         payload['reply_to'] = reply_to
@@ -178,11 +195,12 @@ def send_test(campaign, emails, *, admin, base):
         raise DeliveryOff()
     rendered = content.render_template(campaign, is_test=True)
     token = unsubscribe_token(admin.pk, campaign.pk, test=True)
+    link = (content.preferences_url() if content.is_service(campaign)
+            else unsubscribe_url(base, token))
     name = getattr(admin, 'name', '') or ''
     results = []
     for email in emails:
-        payload = _payload(campaign, rendered, to=email, name=name,
-                           unsub_url=unsubscribe_url(base, token), test=True)
+        payload = _payload(campaign, rendered, to=email, name=name, unsub_url=link, test=True)
         if mode == 'dry-run':
             results.append({'email': email, 'id': 'dry-run'})
             continue
@@ -222,10 +240,11 @@ def queue(campaign_id, *, admin, expected_count, version, base):
             raise QueueRefused(next(iter(problems.values())), 'INCOMPLETE', problems=problems)
 
         # The SAME list the panel counted and showed (audience.recipients):
-        # opted-in, not suppressed, valid, one row per address.
+        # not suppressed, valid, one row per address — and, for promotional
+        # campaigns, opted-in.
         recipients = [
             CampaignRecipient(campaign=campaign, user_id=user_id, email=email, name=name)
-            for user_id, email, name in audience_recipients(campaign.audience)
+            for user_id, email, name in audience_recipients(campaign.audience, campaign.kind)
         ]
         if not recipients:
             raise QueueRefused('No customers match this audience right now.', 'NO_RECIPIENTS')
@@ -343,7 +362,7 @@ def _claim(campaign):
     ).order_by('pk')[:BATCH_SIZE])
     if not due:
         return None, []
-    due = _drop_unsubscribed(due)
+    due = _drop_unsubscribed(due, campaign.kind)
     if not due:
         return '', []
     key = f'{campaign.pk.hex}-{uuid.uuid4().hex[:16]}'
@@ -354,21 +373,33 @@ def _claim(campaign):
     return key, due
 
 
-def _drop_unsubscribed(rows):
+def _drop_unsubscribed(rows, kind=PROMOTIONAL):
     """Consent is re-checked right before sending: someone who unsubscribed
-    (or bounced) after the campaign was queued is skipped, not mailed."""
+    (or bounced) after the campaign was queued is skipped, not mailed. A
+    service notice skips bounced / complained addresses and accounts
+    deactivated since queueing; an offers unsubscribe does not stop it."""
+    from accounts.models import User
+
     user_ids = [r.user_id for r in rows if r.user_id]
-    still_in = set(EmailPreference.objects.filter(
-        user_id__in=user_ids, marketing_opt_in=True).values_list('user_id', flat=True))
+    if kind == SERVICE:
+        still_in = set(User.objects.filter(
+            pk__in=user_ids, is_active=True).values_list('pk', flat=True))
+    else:
+        still_in = set(EmailPreference.objects.filter(
+            user_id__in=user_ids, marketing_opt_in=True).values_list('user_id', flat=True))
     suppressed = set(EmailSuppression.objects.annotate(e=Lower('email')).filter(
         e__in=[r.email for r in rows]).values_list('e', flat=True))
+    if kind != SERVICE:
+        # An unsubscribe from ANY account using the address covers it.
+        suppressed |= unsubscribed_addresses() & {r.email for r in rows}
     keep, skip = [], []
     for row in rows:
         (keep if row.user_id in still_in and row.email not in suppressed else skip).append(row)
     if skip:
         CampaignRecipient.objects.filter(pk__in=[r.pk for r in skip]).update(
             status=CampaignRecipient.Status.SKIPPED,
-            error='Unsubscribed or suppressed before sending.')
+            error=('Account deactivated or address suppressed before sending.' if kind == SERVICE
+                   else 'Unsubscribed or suppressed before sending.'))
     return keep
 
 
@@ -413,10 +444,13 @@ def _defer(rows, message):
 
 def _deliver(campaign, key, rows, rendered, dry_run):
     payloads = []
+    service = content.is_service(campaign)
     for row in rows:
-        token = unsubscribe_token(row.user_id, campaign.pk)
-        payloads.append(_payload(campaign, rendered, to=row.email, name=row.name,
-                                 unsub_url=unsubscribe_url(campaign.link_base, token)))
+        if service:
+            link = content.preferences_url()
+        else:
+            link = unsubscribe_url(campaign.link_base, unsubscribe_token(row.user_id, campaign.pk))
+        payloads.append(_payload(campaign, rendered, to=row.email, name=row.name, unsub_url=link))
     if dry_run:
         _mark_sent(rows, [f'dry-run-{uuid.uuid4().hex[:20]}' for _ in rows])
         return

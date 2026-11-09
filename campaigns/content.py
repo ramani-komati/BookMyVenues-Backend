@@ -13,6 +13,13 @@ any of it is applied:
 
 The SAME renderer serves the panel preview, the test email and the real send,
 so what the admin previews is exactly what customers receive.
+
+KINDS (Campaign.kind): a PROMOTIONAL email carries the "you chose to get
+offers" footer and an unsubscribe link. A SERVICE email (booking, payment,
+account notice) is operational: it carries a "why you got this" footer with
+a link to the customer's email preferences instead, needs a topic, and may
+not contain offer language — send_problems() refuses it, so marketing can
+never be sent without consent by labelling it "service".
 """
 import html as html_lib
 import re
@@ -33,6 +40,14 @@ FIRST_NAME_TOKEN = '{{first_name}}'
 # Stand-ins swapped for each recipient's values after ONE template render.
 _NAME_SLOT = '__BMV_FIRST_NAME__'
 _UNSUB_SLOT = '__BMV_UNSUBSCRIBE_URL__'
+
+# Words that make an email promotional. A service email containing any of
+# them is refused (send_problems) — the admin switches it to Promotional.
+_PROMO_PATTERN = re.compile(
+    r'(\d+\s*%\s*off\b|\bdiscount(s|ed)?\b|\bcoupons?\b|\bpromo(tion|tions|tional)?\b'
+    r'|\bpromo\s*codes?\b|\bcashback\b|\boffers?\b|\bdeals?\b|\bsale\b|\bflash\b'
+    r'|\blimited[-\s]time\b|\bsave\s+(up\s+to\s+)?(₹|rs\.?\s*|inr\s*)?\d)',
+    re.IGNORECASE)
 
 FIELD_MAP = {
     'name': 'name', 'subject': 'subject', 'previewText': 'preview_text',
@@ -92,9 +107,46 @@ def clean_images(raw):
     return images
 
 
+def apply_kind(campaign, body):
+    """Campaign type and service topic from a request body."""
+    from .models import Campaign
+    if 'kind' in body:
+        kind = str(body.get('kind') or '').strip().lower()
+        if kind not in Campaign.Kind.values:
+            raise ContentError('Choose a campaign type: Promotional or Service.', 'kind')
+        campaign.kind = kind
+    if 'serviceTopic' in body:
+        topic = str(body.get('serviceTopic') or '').strip()
+        if topic and topic not in Campaign.ServiceTopic.values:
+            raise ContentError('Choose what this service email is about.', 'serviceTopic')
+        campaign.service_topic = topic
+    if campaign.kind != Campaign.Kind.SERVICE:
+        campaign.service_topic = ''
+
+
+def is_service(campaign):
+    return getattr(campaign, 'kind', 'promotional') == 'service'
+
+
+def promotional_words(campaign):
+    """Offer language found in a campaign's text, in reading order (unique)."""
+    texts = [campaign.subject, campaign.preview_text, campaign.heading, campaign.body,
+             campaign.cta_label]
+    for image in campaign.images or []:
+        texts += [image.get('alt') or '', image.get('caption') or '']
+    found = []
+    for text in texts:
+        for match in _PROMO_PATTERN.finditer(str(text or '')):
+            word = match.group(0).strip().lower()
+            if word not in found:
+                found.append(word)
+    return found
+
+
 def apply_fields(campaign, body):
     """Copy the editable fields present in `body` onto the campaign.
     Lenient on completeness (it is a draft) but strict on shape and length."""
+    apply_kind(campaign, body)
     for key, attr in FIELD_MAP.items():
         if key not in body:
             continue
@@ -123,6 +175,16 @@ def send_problems(campaign):
         problems['ctaUrl' if campaign.cta_label.strip() else 'ctaLabel'] = (
             'A button needs both its text and its link.'
         )
+    if is_service(campaign):
+        if not campaign.service_topic:
+            problems['serviceTopic'] = 'Choose what this service email is about.'
+        words = promotional_words(campaign)
+        if words:
+            quoted = ', '.join(f'"{w}"' for w in words[:3])
+            problems['kind'] = (
+                f'This reads like a promotion ({quoted}). Service emails cannot carry offers or '
+                'marketing — remove that wording, or switch the type to Promotional so only '
+                'opted-in customers receive it.')
     return problems
 
 
@@ -172,11 +234,19 @@ def tracked(url, campaign):
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 
+def preferences_url():
+    """Where a service email's footer sends the customer: their own email
+    preferences in My account."""
+    return f'{_site()}/account'
+
+
 def render_template(campaign, *, is_test=False):
     """(subject, html, text) with the recipient's name and unsubscribe link
     still as placeholders — personalize() fills them per recipient. One
-    render per batch instead of one per customer."""
+    render per batch instead of one per customer. For a service email the
+    link slot carries the preferences link instead of an unsubscribe link."""
     site = _site()
+    service = is_service(campaign)
     images = [
         {**image, 'link': tracked(image.get('link'), campaign),
          'caption_html': _inline(image.get('caption') or '')}
@@ -197,6 +267,8 @@ def render_template(campaign, *, is_test=False):
         'postal_address': getattr(settings, 'CAMPAIGN_POSTAL_ADDRESS', ''),
         'unsubscribe_url': _UNSUB_SLOT,
         'is_test': is_test,
+        'is_service': service,
+        'service_topic': campaign.get_service_topic_display() if service and campaign.service_topic else '',
     }
     html = render_to_string('emails/campaign.html', context)
 
@@ -210,12 +282,20 @@ def render_template(campaign, *, is_test=False):
             lines.append(image['link'])
     if campaign.cta_label and campaign.cta_url:
         lines += ['', f'{campaign.cta_label}: {context["cta_url"]}']
-    lines += [
-        '', '—',
-        'You are receiving this because you chose to get offers from TheBookMyVenues.',
-        f'Unsubscribe: {_UNSUB_SLOT}',
-        'Booking confirmations and sign-in codes are not affected.',
-    ]
+    if service:
+        lines += [
+            '', '—',
+            f'{context["service_topic"] or "Service message"} from HAPVOO. You are '
+            'receiving this important notice about your account or bookings. It is not a promotion.',
+            f'Email preferences: {_UNSUB_SLOT}',
+        ]
+    else:
+        lines += [
+            '', '—',
+            'You are receiving this because you chose to get offers from HAPVOO.',
+            f'Unsubscribe: {_UNSUB_SLOT}',
+            'Booking confirmations and sign-in codes are not affected.',
+        ]
     if context['postal_address']:
         lines.append(context['postal_address'])
     subject = campaign.subject.replace(FIRST_NAME_TOKEN, _NAME_SLOT)

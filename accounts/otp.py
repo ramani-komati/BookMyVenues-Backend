@@ -51,6 +51,10 @@ def _fast2sms_params(phone: str, code: str) -> dict:
         # Approved text:
         #   "Your OTP for THEBOOKMY VENUES is {#var#}. This OTP is valid for
         #    10 minutes. Do not share this OTP with anyone."
+        # The wording (old brand included) lives at the carrier: changing it
+        # means registering a new HAPVOO template + header on DLT and then
+        # updating FAST2SMS_DLT_TEMPLATE_ID / FAST2SMS_SENDER_ID. Never edit
+        # the text here — the DLT route rejects unregistered wording.
         return {
             'route': 'dlt',
             'sender_id': settings.FAST2SMS_SENDER_ID,
@@ -64,7 +68,7 @@ def _fast2sms_params(phone: str, code: str) -> dict:
     return {
         'route': 'q',
         'message': (
-            f'{code} is your BookMyVenues verification code. '
+            f'{code} is your HAPVOO verification code. '
             'It expires in 5 minutes. Do not share it with anyone.'
         ),
         'language': 'english',

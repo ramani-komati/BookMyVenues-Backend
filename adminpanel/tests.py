@@ -573,6 +573,10 @@ class SoftDeleteTests(APITestCase):
         self.assertEqual(self.base.status, 'live')  # untouched
 
     def test_admin_registry_keeps_it_with_revenue(self):
+        # Revenue now counts only VERIFIED payments (reports/finance.py), so
+        # the past booking is a paid one — the protection is unchanged: a
+        # deleted venue keeps its money history in the admin registry.
+        Booking.objects.filter(pk=self.past.pk).update(razorpay_payment_id='pay_sd_hist')
         self.delete_it()
         self.client.force_authenticate(user=self.admin)
         data = self.client.get('/api/admin/bootstrap').data
@@ -580,6 +584,7 @@ class SoftDeleteTests(APITestCase):
         self.assertEqual(row['status'], 'deleted')
         self.assertIsNotNone(row['deletedAt'])
         self.assertEqual(row['revenueNum'], 900)   # history intact
+        self.assertEqual(row['bookingValueNum'], 900)
         self.assertEqual(row['bookings'], 1)
         # ...and it leaves the approvals queue.
         self.assertNotIn(str(self.base.id), {a['id'] for a in data['approvals']})

@@ -54,8 +54,39 @@ REVIEWS_MAX_PAGE = 20
 
 
 def visible_ratings():
-    """Ratings that count: everything except what moderation hid."""
+    """Ratings moderation has not hidden (the vendor's own ratings feed and
+    reply tools work on these)."""
     return Rating.objects.filter(hidden_at__isnull=True)
+
+
+# A rating counts toward an average, a review count and the public review
+# lists only while the visit it describes still stands as a PAID visit: its
+# booking / ticket order is confirmed with a verified gateway payment. A
+# booking refunded or cancelled after it was rated (or any row that somehow
+# lost its payment) drops out of every customer-facing number — the stored
+# rating itself is kept, untouched. The same test as _verified_paid below.
+COUNTED_Q = (
+    Q(booking__status='confirmed', booking__razorpay_payment_id__gt='')
+    | Q(event_order__status='confirmed', event_order__razorpay_payment_id__gt='')
+)
+
+
+def counted_ratings():
+    """Ratings that count: not hidden by moderation AND from a still-paid,
+    confirmed booking or ticket. One rating per booking / order is enforced by
+    the database (OneToOne), so nothing is ever counted twice. Every
+    aggregate (cards, venue and event pages, homepage, vendor insights,
+    admin panel) reads this one queryset."""
+    return visible_ratings().filter(COUNTED_Q)
+
+
+def rating_payload(average, count):
+    """The customer-facing rating keys, ALWAYS both present: {'rating': 4.5,
+    'ratingCount': 10} — or {'rating': None, 'ratingCount': 0} when no valid
+    rating exists, so a client can tell "not rated yet" from "not sent"."""
+    if not count or average is None:
+        return {'rating': None, 'ratingCount': 0}
+    return {'rating': average, 'ratingCount': count}
 
 
 def _base_id(listing):
@@ -89,7 +120,7 @@ def venue_rating(listing):
 
     Single-listing use only (venue detail page). For a LIST of venues use
     venue_ratings_map — this costs two queries per venue."""
-    result = visible_ratings().filter(
+    result = counted_ratings().filter(
         listing_id__in=venue_set_ids(listing)
     ).aggregate(avg=Avg('stars'), count=Count('id'))
     if not result['count']:
@@ -115,7 +146,7 @@ def venue_ratings_map(listings):
     # Ratings on the base venues themselves OR on any of their unit siblings,
     # fetched with each rated listing's record so we can fold without a second
     # round trip.
-    rows = visible_ratings().filter(
+    rows = counted_ratings().filter(
         Q(listing_id__in=list(bases))
         | Q(listing__record__detail__unitOf__in=list(bases))
     ).values_list('listing_id', 'stars', 'listing__record')
@@ -140,7 +171,7 @@ def venue_ratings_map(listings):
 
 def event_rating(event_id):
     """(average rounded to 4 decimals or None, count) for one event."""
-    result = visible_ratings().filter(event_id=event_id).aggregate(
+    result = counted_ratings().filter(event_id=event_id).aggregate(
         avg=Avg('stars'), count=Count('id'),
     )
     if not result['count']:
@@ -156,7 +187,7 @@ def event_ratings_map(event_ids):
     if not ids:
         return {}
     rows = (
-        visible_ratings().filter(event_id__in=ids)
+        counted_ratings().filter(event_id__in=ids)
         .values('event_id').annotate(avg=Avg('stars'), count=Count('id'))
     )
     found = {
@@ -452,7 +483,7 @@ class VendorRatingReplyView(APIView):
         if rating.reply_hidden_at is not None:
             reason = f' ({rating.reply_hidden_reason})' if rating.reply_hidden_reason else ''
             return _message(
-                f'Your reply was hidden by the TheBookMyVenues team{reason}. '
+                f'Your reply was hidden by the HAPVOO team{reason}. '
                 'You can delete it and contact support.',
                 status.HTTP_409_CONFLICT,
             )
@@ -646,7 +677,7 @@ class PublicVenueReviewsView(APIView):
         page, error = _page(request)
         if error:
             return error
-        queryset = visible_ratings().filter(listing_id__in=venue_set_ids(listing))
+        queryset = counted_ratings().filter(listing_id__in=venue_set_ids(listing))
         rows, total = review_rows(queryset, *page)
         average, count = venue_rating(listing)
         return Response({'reviews': rows, 'total': total, 'rating': average, 'count': count})
@@ -668,6 +699,6 @@ class PublicEventReviewsView(APIView):
         page, error = _page(request)
         if error:
             return error
-        rows, total = review_rows(visible_ratings().filter(event_id=event_id), *page)
+        rows, total = review_rows(counted_ratings().filter(event_id=event_id), *page)
         average, count = event_rating(event_id)
         return Response({'reviews': rows, 'total': total, 'rating': average, 'count': count})

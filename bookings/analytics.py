@@ -166,12 +166,12 @@ def _events_summary(user):
 
 
 def _ratings_summary(user):
-    from .ratings import visible_ratings
+    from .ratings import counted_ratings
 
     rows = list(
-        visible_ratings().filter(listing__vendor=user).values_list('stars', flat=True)
+        counted_ratings().filter(listing__vendor=user).values_list('stars', flat=True)
     ) + list(
-        visible_ratings().filter(event__vendor=user).values_list('stars', flat=True)
+        counted_ratings().filter(event__vendor=user).values_list('stars', flat=True)
     )
     if not rows:
         return {'average': None, 'count': 0, 'distribution': {str(i): 0 for i in range(1, 6)}}

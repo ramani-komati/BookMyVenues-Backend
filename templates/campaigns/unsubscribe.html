@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
-<title>Email preferences · TheBookMyVenues</title>
+<title>Email preferences · HAPVOO</title>
 <style>
   :root { color-scheme: light; }
   body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
@@ -30,15 +30,15 @@
     <div class="body">
       {% if state == 'confirm' %}
         <h1>Unsubscribe from offers?</h1>
-        <p>You will stop getting promotional emails from TheBookMyVenues.</p>
+        <p>You will stop getting promotional emails from HAPVOO.</p>
         <form method="post">
           <input type="hidden" name="token" value="{{ token }}">
           <button type="submit">Unsubscribe</button>
         </form>
-        <p class="note">Booking confirmations, tickets and sign-in codes will still reach you.</p>
+        <p class="note">Booking confirmations, tickets, sign-in codes and important account or service notices will still reach you.</p>
       {% elif state == 'done' %}
         <h1>You're unsubscribed</h1>
-        <p>We won't send you promotional emails any more. Booking confirmations, tickets and sign-in codes are not affected.</p>
+        <p>We won't send you promotional emails any more. Booking confirmations, tickets, sign-in codes and important account or service notices are not affected.</p>
         <p>Changed your mind? Turn offers back on any time in <a href="{{ account_url }}">My account</a>.</p>
       {% elif state == 'already' %}
         <h1>You're already unsubscribed</h1>
@@ -50,7 +50,7 @@
         <h1>This link doesn't work</h1>
         <p>It may have been copied incompletely. You can manage promotional emails in <a href="{{ account_url }}">My account</a>.</p>
       {% endif %}
-      <p class="note"><a href="{{ site_url }}">Back to TheBookMyVenues</a></p>
+      <p class="note"><a href="{{ site_url }}">Back to HAPVOO</a></p>
     </div>
   </main>
 </body>

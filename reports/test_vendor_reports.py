@@ -268,7 +268,7 @@ class EventsExportTests(VendorExportTestCase):
         self.assertEqual(own['Submitted By'], 'You')
         self.assertEqual(own['Paid Orders'], 1)
         self.assertEqual(own['Ticket Revenue (excl. fee)'], 1250)
-        self.assertEqual(events['Hall Night']['Submitted By'], 'TheBookMyVenues (at your venue)')
+        self.assertEqual(events['Hall Night']['Submitted By'], 'HAPVOO (at your venue)')
         self.assertNotIn('Vendor Phone', events['Hall Night'])        # admin-only column
         self.assertEqual({r['Event Name'] for r in sheets['Ticket Types']},
                          {'Vendor One Fest', 'Hall Night'})

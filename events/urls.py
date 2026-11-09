@@ -40,6 +40,11 @@ urlpatterns = [
         name='my-event-orders',
     ),
     path(
+        'users/me/event-orders/<str:order_id>/tickets.pdf',
+        customer_views.MyTicketsPdfView.as_view(),
+        name='my-event-order-tickets-pdf',
+    ),
+    path(
         'users/me/event-orders/<str:order_id>',
         customer_views.CancelEventOrderView.as_view(),
         name='cancel-event-order',

@@ -60,34 +60,66 @@ def _ticket_rows(order):
     return '\n'.join(lines)
 
 
-def notify_tickets_confirmed(order):
-    """Tell the CUSTOMER their tickets are booked and the VENDOR they sold
-    some. Only ever called for a VERIFIED payment (events/payments.
-    _notify_confirmed), which also guarantees it runs once per order.
-    Returns True when at least one message got through."""
+PDF_ATTACHED = (
+    'Your tickets are attached as a PDF — one page per ticket, each with its '
+    'own QR code. Show it (or the booking ID) at the entrance.'
+)
+PDF_MISSING = (
+    'We could not attach your PDF tickets this time. Download them from My '
+    'bookings, or show the booking ID at the entrance.'
+)
+
+
+def ticket_attachment(order):
+    """[(filename, bytes, 'application/pdf')] for a verified-paid order, or
+    [] when the PDF could not be made — the email then goes without it and
+    says where to get the tickets. Never raises."""
+    from .ticket_pdf import filename, render
+
+    try:
+        return [(filename(order), render(order), 'application/pdf')]
+    except Exception:
+        logger.exception('Ticket PDF failed for order %s — sending email without it', order.id)
+        return []
+
+
+def send_customer_tickets(order):
+    """The customer's confirmation email with the PDF tickets attached.
+    Returns True when the email got through. Used on confirmation and by the
+    super admin's "Resend tickets" (adminpanel/ticket_resend.py)."""
     from BookMyVenue.emails import render_tickets_email
 
-    when = _when(order)
-    tickets = _ticket_lines(order)
-    sent = False
-
     rows = [
-        ('Date & time', when),
+        ('Date & time', _when(order)),
         ('Venue', _venue_text(order)),
-        ('Tickets', _ticket_rows(order) or tickets),
+        ('Tickets', _ticket_rows(order) or _ticket_lines(order)),
         ('Subtotal', f'₹{order.subtotal:,}'),
         ('Booking fee', f'₹{order.fee:,}'),
         ('Booking ID', order.id),
     ]
+    attachments = ticket_attachment(order)
     maps_link = getattr(order.event, 'maps_link', '') or ''
     subject, html, text = render_tickets_email(
         event_name=order.event_name, rows=rows, amount=order.amount,
-        maps_link=maps_link,
+        maps_link=maps_link, ticket_note=PDF_ATTACHED if attachments else PDF_MISSING,
     )
-    sent |= _send(
+    return _send(
         'email', getattr(order.user, 'email', '') or '', text,
-        subject=subject, html=html,
+        subject=subject, html=html, attachments=attachments or None,
     )
+
+
+def notify_tickets_confirmed(order):
+    """Tell the CUSTOMER their tickets are booked (email with the PDF tickets
+    attached, plus SMS) and the VENDOR they sold some. Only ever called for a
+    VERIFIED payment (events/payments._notify_confirmed), which also
+    guarantees it runs once per order. Returns True when at least one message
+    got through."""
+    when = _when(order)
+    tickets = _ticket_lines(order)
+    sent = False
+
+    sent |= send_customer_tickets(order)
     sent |= _send(
         'sms', order.phone,
         f'Tickets confirmed: {order.event_name}, {when}. '

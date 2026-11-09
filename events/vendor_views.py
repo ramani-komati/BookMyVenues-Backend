@@ -72,7 +72,7 @@ ADMIN_ONLY_KEYS = (
     'vendor', 'vendorId', 'createdBy', 'created_by', 'id', 'slug',
 )
 SUBMITTED_NOTICE = (
-    'Events you submit are reviewed by the TheBookMyVenues team before they go '
+    'Events you submit are reviewed by the HAPVOO team before they go '
     'live. Editing a live event sends it back for review.'
 )
 NOT_YOUR_EVENT = 'Only the vendor who submitted this event can change it.'
@@ -354,7 +354,7 @@ class VendorEventDetailView(APIView):
         if has_sold_tickets(event):
             return _message(
                 'This event has sold tickets, so it cannot be deleted. Contact '
-                'the TheBookMyVenues team to cancel it.',
+                'the HAPVOO team to cancel it.',
                 status.HTTP_409_CONFLICT, code='HAS_SALES',
             )
         event.status = Event.Status.DELETED

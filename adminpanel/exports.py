@@ -381,4 +381,4 @@ def build_workbook(rows):
 
 
 def export_filename(today=None):
-    return f'bookmyvenues_bookings_{(today or today_ist()).isoformat()}.xlsx'
+    return f'hapvoo_bookings_{(today or today_ist()).isoformat()}.xlsx'

@@ -42,7 +42,7 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     """
-    Custom user for Book My Venue.
+    Custom user for HAPVOO.
 
     - Logs in with PHONE (not username).
     - Has a role: PUBLIC (default), VENDOR, or ADMIN.

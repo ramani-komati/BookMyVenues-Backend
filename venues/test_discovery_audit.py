@@ -284,6 +284,14 @@ class SitemapTests(APITestCase):
         self.assertNotIn(unit.slug, body)
         self.assertNotIn('onrender', body)
 
+    @override_settings(PUBLIC_SITE_URL='https://hapvoo.com')
+    def test_sitemap_follows_the_configured_site_origin(self):
+        # The HAPVOO domain switch is an env change only.
+        live = make_listing(self.vendor, 'Live Hall')
+        body = self.client.get('/api/sitemap.xml').content.decode()
+        self.assertIn(f'<loc>https://hapvoo.com/venue/{live.slug}</loc>', body)
+        self.assertNotIn('thebookmyvenues', body)
+
 
 class PlaceSpellingTests(APITestCase):
     def setUp(self):

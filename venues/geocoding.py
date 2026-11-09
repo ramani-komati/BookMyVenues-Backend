@@ -232,7 +232,7 @@ def _nominatim_get(path, params):
     response = requests.get(
         f'{base}/{path}',
         params={**params, 'format': 'jsonv2', 'addressdetails': 1, 'email': contact},
-        headers={'User-Agent': f'TheBookMyVenues/1.0 ({contact})'},
+        headers={'User-Agent': f'HAPVOO/1.0 ({contact})'},
         timeout=TIMEOUT,
     )
     response.raise_for_status()

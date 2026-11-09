@@ -71,6 +71,7 @@ _STATUS_VERDICT = {
 }
 
 _TITLES = {
+    'TICKET_NOT_GENUINE': 'Ticket not genuine',
     VALID: 'Valid — ready to check in',
     CHECKED_IN: 'Checked in',
     INVALID_ID: 'Invalid booking ID',
@@ -85,6 +86,7 @@ _TITLES = {
 }
 
 _HEX = frozenset('0123456789ABCDEF')
+# A long legacy id may be followed by a ticket number (eo_…-01) in a QR.
 _LONG_ID = re.compile(r'(bk|wk|eo)[-_]?([0-9a-f]{12})')
 _BARE_HEX = re.compile(r'[0-9a-f]{12}')
 _SHORT_ID = re.compile(r'[A-Z0-9]{6}')
@@ -128,10 +130,35 @@ def candidate_ids(raw):
     return [], INVALID_ID
 
 
+TICKET_NOT_GENUINE = 'TICKET_NOT_GENUINE'
+
+
+def _find_ticket(raw):
+    """A scanned ticket QR (BMVT1:K7M2QX-02:CODE) or a typed ticket ID
+    (K7M2QX-02): ('event', order) with order._ticket set to the ticket shown,
+    (None, reason) when it does not verify, or None when the text is not
+    ticket-shaped at all (then it is treated as a booking ID as before)."""
+    from events import tickets
+
+    ref = tickets.parse(raw)
+    if ref is None:
+        return None
+    order, ticket = tickets.resolve(ref)
+    if order is None:
+        return None, (TICKET_NOT_GENUINE if ticket == 'forged' else INVALID_ID)
+    order._ticket = tickets.ticket_summary(ticket) or {
+        'ticketId': ref.tid, 'number': ref.number, 'of': None, 'type': None,
+    }
+    return 'event', order
+
+
 def find_booking(raw):
-    """(kind, row) for a typed booking ID, or (None, reason)."""
+    """(kind, row) for a typed booking ID or a scanned ticket, or (None, reason)."""
     from events.models import EventOrder
 
+    ticket = _find_ticket(raw)
+    if ticket is not None:
+        return ticket
     candidates, reason = candidate_ids(raw)
     found = []
     for kind, pk in candidates:
@@ -313,6 +340,9 @@ def gate_details(kind, row):
                 for item in (row.items or []) if isinstance(item, dict)
             ],
             'dueAtVenue': 0,
+            # The individual ticket that was scanned / typed, when it was one
+            # (events/tickets.py). Entry is still recorded for the whole order.
+            'ticket': getattr(row, '_ticket', None),
         })
     return base
 
@@ -381,6 +411,12 @@ def _vendor_verdict(user, raw_id, gate, kind, row, reason):
                 'not a Booking ID. Ask the customer for the Booking ID shown on '
                 'their confirmation or in My bookings.',
             )
+        if reason == TICKET_NOT_GENUINE:
+            return _verdict(
+                TICKET_NOT_GENUINE,
+                'This ticket’s QR code did not verify — it was not issued by '
+                'HAPVOO or has been altered. Do not admit; ask for the booking ID.',
+            )
         return _verdict(INVALID_ID, 'No booking matches this ID. Check it with the customer.')
     gate_name = _gate_name(gate)
     if not _vendor_manages(user, kind, row):
@@ -395,7 +431,20 @@ def _vendor_verdict(user, raw_id, gate, kind, row, reason):
             bookedFor=booked_for or None,
         )
     code, message = evaluate(kind, row)
-    return _verdict(code, message, gate_details(kind, row))
+    return _verdict(code, _with_ticket(code, message, row), gate_details(kind, row))
+
+
+def _with_ticket(code, message, row):
+    """Say which ticket was shown, and that entry covers the whole order."""
+    ticket = getattr(row, '_ticket', None)
+    if not ticket:
+        return message
+    of = f' of {ticket["of"]}' if ticket.get('of') else ''
+    kind = f' ({ticket["type"]})' if ticket.get('type') else ''
+    note = f'Ticket {ticket["number"]}{of}{kind}. '
+    if code == VALID:
+        return note + message + f' Checking in admits the whole order ({row.ticket_count} ticket(s)).'
+    return note + message
 
 
 def _log(action, user, raw_id, gate, verdict, actor=None):
@@ -439,6 +488,7 @@ def vendor_check_in(user, raw_id, gate, *, actor=None):
     model = Booking if kind == 'venue' else EventOrder
     with transaction.atomic():
         row = model.objects.select_for_update().get(pk=found.pk)
+        row._ticket = getattr(found, '_ticket', None)   # the ticket that was shown
         verdict = _vendor_verdict(user, raw_id, gate, kind, row, None)
         if verdict['code'] == VALID:
             now = timezone.now()
@@ -472,6 +522,12 @@ def admin_verify(raw_id, *, admin=None):
         getattr(admin, 'pk', '-'), str(raw_id)[:MAX_INPUT], kind or 'no',
     )
     if kind is None:
+        if row == TICKET_NOT_GENUINE:
+            return {
+                'found': False, 'code': TICKET_NOT_GENUINE, 'title': _TITLES[TICKET_NOT_GENUINE],
+                'message': 'This ticket QR code did not verify — it was not issued by '
+                           'HAPVOO, or it has been altered.',
+            }
         if row == SHORT_REF:
             return {
                 'found': False, 'code': SHORT_REF, 'title': _TITLES[SHORT_REF],
@@ -485,6 +541,7 @@ def admin_verify(raw_id, *, admin=None):
         }
 
     code, message = evaluate(kind, row)
+    message = _with_ticket(code, message, row)
     record = {
         'kind': kind,
         'id': row.id,
@@ -536,6 +593,7 @@ def admin_verify(raw_id, *, admin=None):
                 for item in (row.items or []) if isinstance(item, dict)
             ],
             'paidOnline': row.amount if row.status in ('confirmed', 'refund_pending', 'refunded') else 0,
+            'ticket': getattr(row, '_ticket', None),
         })
     return {
         'found': True,

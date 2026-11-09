@@ -29,12 +29,12 @@ def render_otp_email(code, minutes):
         'eyebrow': 'Sign in',
     })
     text = (
-        f'Your TheBookMyVenues verification code is {code}.\n\n'
+        f'Your HAPVOO verification code is {code}.\n\n'
         f'It expires in {minutes} minutes. If you did not request it, '
         f'you can ignore this email.\n\n'
         f'Never share this code with anyone.'
     )
-    return f'{code} is your TheBookMyVenues code', html, text
+    return f'{code} is your HAPVOO code', html, text
 
 
 def render_booking_email(*, venue, when, amount, booking_id,
@@ -70,19 +70,24 @@ def render_booking_email(*, venue, when, amount, booking_id,
     return subject, html, '\n'.join(lines)
 
 
-def render_tickets_email(*, event_name, rows, amount, maps_link=''):
+def render_tickets_email(*, event_name, rows, amount, maps_link='', ticket_note=''):
     """(subject, html, text) for confirmed event tickets — sent only after the
-    payment is verified. `rows` is [(label, value)], already in reading order."""
+    payment is verified. `rows` is [(label, value)], already in reading order.
+    `ticket_note` says whether the PDF tickets are attached ('' = the email as
+    it always was)."""
     context = _shell_context()
     bookings_url = f'{context["site_url"].rstrip("/")}/bookings'
     html = render_to_string('emails/tickets_confirmed.html', {
         **context, 'event_name': event_name, 'rows': rows,
         'amount': f'{int(amount):,}', 'maps_link': maps_link,
         'bookings_url': bookings_url, 'eyebrow': 'Tickets confirmed',
+        'ticket_note': ticket_note,
     })
     lines = ['Your tickets are confirmed.', '', event_name, '']
     lines += [f'{label}: {value}' for label, value in rows]
     lines += [f'Amount paid: Rs {int(amount):,}', '']
+    if ticket_note:
+        lines += [ticket_note, '']
     if maps_link:
         lines.append(f'Map: {maps_link}')
     lines += [

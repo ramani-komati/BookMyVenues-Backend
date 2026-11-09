@@ -368,7 +368,7 @@ class BookingsExportTests(EventTestCase):
         )
         self.assertEqual(
             response['Content-Disposition'],
-            f'attachment; filename="bookmyvenues_bookings_{self.today.isoformat()}.xlsx"',
+            f'attachment; filename="hapvoo_bookings_{self.today.isoformat()}.xlsx"',
         )
         self.assertEqual(response['Cache-Control'], 'no-store')
         self.assertTrue(response.content.startswith(b'PK'))  # a zip container

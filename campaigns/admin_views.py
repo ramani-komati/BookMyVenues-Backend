@@ -9,8 +9,10 @@ to the panel in full — counts, and masked addresses in delivery reports.
     GET    campaigns                    list + delivery stats (history)
     POST   campaigns                    create a draft
     GET    campaigns/options            segments, states/cities, categories, delivery mode
-    POST   campaigns/audience           {audience} -> estimated recipient count
-    POST   campaigns/audience/recipients {audience, page, search} -> the eligible
+    POST   campaigns/audience           {audience, kind} -> recipient count, plus every
+                                        customer account sorted eligible / ineligible
+                                        (with the reason) for that campaign kind
+    POST   campaigns/audience/recipients {audience, kind, page, search} -> the eligible
                                         customers (name, email, city/state,
                                         interests, why they qualify) — ADMIN only
     POST   campaigns/preview            {fields} -> rendered HTML (unsaved edits)
@@ -21,7 +23,12 @@ to the panel in full — counts, and masked addresses in delivery reports.
     DELETE campaigns/<id>               delete a draft
     POST   campaigns/<id>/duplicate     copy into a new draft
     POST   campaigns/<id>/test          {to: [emails]} -> test email
-    POST   campaigns/<id>/send          {version, expectedCount, confirm, confirmAll?}
+    POST   campaigns/<id>/send          {version, expectedCount, confirm, confirmAll?,
+                                         confirmService? (service campaigns)}
+
+Campaign KIND: 'promotional' (opted-in customers only) or 'service' (booking /
+payment / account notices to registered customers, no marketing consent
+needed, offer wording refused). See campaigns/audience.py and content.py.
     POST   campaigns/<id>/cancel        stop a queued / sending campaign
     GET    campaigns/<id>/recipients    delivery status per recipient (masked)
 """
@@ -102,7 +109,11 @@ def campaign_row(campaign):
         'ctaLabel': campaign.cta_label,
         'ctaUrl': campaign.cta_url,
         'audience': campaign.audience or {'segment': 'all'},
-        'audienceLabel': audience_mod.describe(campaign.audience),
+        'audienceLabel': audience_mod.describe(campaign.audience, campaign.kind),
+        'kind': campaign.kind,
+        'kindLabel': campaign.get_kind_display(),
+        'serviceTopic': campaign.service_topic,
+        'serviceTopicLabel': campaign.get_service_topic_display() if campaign.service_topic else '',
         'status': campaign.status,
         'statusLabel': campaign.get_status_display(),
         'editable': campaign.status in EDITABLE,
@@ -142,10 +153,13 @@ class _View(APIView):
 
 
 def _apply(campaign, body):
-    """Content + audience from a request body. Raises ContentError/AudienceError."""
+    """Content + kind + audience from a request body. Raises
+    ContentError/AudienceError. A kind change re-checks the stored audience:
+    a service campaign cannot keep a marketing-only segment."""
     content.apply_fields(campaign, body)
-    if 'audience' in body:
-        campaign.audience = audience_mod.clean_audience(body.get('audience'))
+    if 'audience' in body or 'kind' in body:
+        raw = body.get('audience') if 'audience' in body else campaign.audience
+        campaign.audience = audience_mod.clean_audience(raw, campaign.kind)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +200,7 @@ def _delivery_info():
     return {
         'mode': mode,
         'from': sender.from_address() if mode != 'off' else '',
+        'serviceFrom': sender.from_address(audience_mod.SERVICE) if mode != 'off' else '',
         'webhookConfigured': bool(getattr(settings, 'RESEND_WEBHOOK_SECRET', '')),
         'emailConfigured': bool(settings.RESEND_API_KEY),
     }
@@ -196,6 +211,10 @@ class CampaignOptionsView(_View):
     def get(self, request):
         return Response({
             'segments': [{'key': k, 'label': v} for k, v in audience_mod.SEGMENTS.items()],
+            'kinds': [{'key': k, 'label': v} for k, v in Campaign.Kind.choices],
+            'serviceTopics': [{'key': k, 'label': v} for k, v in Campaign.ServiceTopic.choices],
+            # The segments a service campaign may use (the rest are marketing).
+            'serviceSegments': list(audience_mod.SERVICE_SEGMENTS),
             'locations': audience_mod.location_options(),
             'categories': audience_mod.category_options(),
             # What customers' own bookings / favourites / tickets show interest in.
@@ -209,13 +228,15 @@ class CampaignOptionsView(_View):
 class CampaignAudienceView(_View):
 
     def post(self, request):
+        body = self._body(request)
         try:
-            chosen = audience_mod.clean_audience(self._body(request).get('audience'))
+            kind = audience_mod.clean_kind(body.get('kind'))
+            chosen = audience_mod.clean_audience(body.get('audience'), kind)
         except audience_mod.AudienceError as error:
             return detail(str(error), status.HTTP_400_BAD_REQUEST)
-        result = audience_mod.estimate(chosen)
+        result = audience_mod.estimate(chosen, kind)
         result['audience'] = chosen
-        result['label'] = audience_mod.describe(chosen)
+        result['label'] = audience_mod.describe(chosen, kind)
         return Response(result)
 
 
@@ -229,7 +250,8 @@ class CampaignAudienceRecipientsView(_View):
     def post(self, request):
         body = self._body(request)
         try:
-            chosen = audience_mod.clean_audience(body.get('audience'))
+            kind = audience_mod.clean_kind(body.get('kind'))
+            chosen = audience_mod.clean_audience(body.get('audience'), kind)
         except audience_mod.AudienceError as error:
             return detail(str(error), status.HTTP_400_BAD_REQUEST)
         try:
@@ -237,9 +259,10 @@ class CampaignAudienceRecipientsView(_View):
         except (TypeError, ValueError):
             page = 1
         search = str(body.get('search') or '')[:100]
-        result = audience_mod.recipient_page(chosen, page=page, page_size=self.PAGE, search=search)
+        result = audience_mod.recipient_page(chosen, page=page, page_size=self.PAGE, search=search,
+                                             kind=kind)
         result['audience'] = chosen
-        result['label'] = audience_mod.describe(chosen)
+        result['label'] = audience_mod.describe(chosen, kind)
         return Response(result)
 
 
@@ -256,9 +279,11 @@ class CampaignPreviewView(_View):
             return _content_error(error)
         rendered = content.render_template(campaign)
         subject, html, text = content.personalize(
-            rendered, name=request.user.name or '', unsubscribe_url='#unsubscribe-preview')
+            rendered, name=request.user.name or '',
+            unsubscribe_url=content.preferences_url() if content.is_service(campaign)
+            else '#unsubscribe-preview')
         return Response({'subject': subject, 'previewText': campaign.preview_text,
-                         'html': html, 'text': text, 'from': sender.from_address()})
+                         'html': html, 'text': text, 'from': sender.from_address(campaign.kind)})
 
 
 class CampaignImagesView(APIView):
@@ -400,6 +425,7 @@ class CampaignDuplicateView(_View):
             preview_text=source.preview_text, heading=source.heading, body=source.body,
             images=list(source.images or []), cta_label=source.cta_label,
             cta_url=source.cta_url, audience=dict(source.audience or {}),
+            kind=source.kind, service_topic=source.service_topic,
             created_by=request.user,
         )
         _audit(request, 'Duplicated email campaign', copy, f'from {source.name}')
@@ -450,6 +476,10 @@ class CampaignSendView(_View):
         if body.get('confirm') is not True:
             return Response({'detail': 'Confirm the send first.', 'code': 'CONFIRM_REQUIRED'},
                             status=status.HTTP_400_BAD_REQUEST)
+        if campaign.kind == Campaign.Kind.SERVICE and body.get('confirmService') is not True:
+            return Response({'detail': 'Confirm that this is a service email with no offers or '
+                                       'marketing before sending it to customers who did not opt in.',
+                             'code': 'CONFIRM_SERVICE_REQUIRED'}, status=status.HTTP_400_BAD_REQUEST)
         if (campaign.audience or {}).get('segment', 'all') == 'all' and body.get('confirmAll') is not True:
             return Response({'detail': 'Sending to ALL eligible customers needs the extra confirmation.',
                              'code': 'CONFIRM_ALL_REQUIRED'}, status=status.HTTP_400_BAD_REQUEST)
@@ -466,7 +496,8 @@ class CampaignSendView(_View):
             return Response({'detail': str(refusal), 'code': refusal.code, **refusal.extra}, status=code)
         fresh = _load(campaign.pk)
         _audit(request, 'Sent email campaign', fresh,
-               f'{fresh.stat_recipients} recipients · {audience_mod.describe(fresh.audience)}'
+               f'{fresh.get_kind_display()} · {fresh.stat_recipients} recipients · '
+               f'{audience_mod.describe(fresh.audience, fresh.kind)}'
                f'{" · dry run" if fresh.dry_run else ""}')
         return Response({'campaign': campaign_row(fresh)}, status=status.HTTP_202_ACCEPTED)
 

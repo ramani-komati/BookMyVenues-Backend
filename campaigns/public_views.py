@@ -43,6 +43,11 @@ def _preference_json(user, pref):
         'marketingEmails': bool(pref and pref.marketing_opt_in),
         'hasEmail': bool(user.email),
         'updatedAt': pref.updated_at.isoformat() if pref else None,
+        # When and where the customer said yes / unsubscribed — shown on My
+        # account so they can see what they agreed to.
+        'consentedAt': pref.consented_at.isoformat() if pref and pref.consented_at else None,
+        'unsubscribedAt': pref.unsubscribed_at.isoformat() if pref and pref.unsubscribed_at else None,
+        'source': (pref.source or None) if pref else None,
     }
 
 
@@ -83,11 +88,18 @@ class EmailPreferencesView(APIView):
         if wanted and not request.user.email:
             return Response({'message': 'Add an email address to your profile first.'},
                             status=status.HTTP_400_BAD_REQUEST)
-        pref, _ = EmailPreference.objects.get_or_create(user=request.user)
+        # 'registration' = the optional box on the sign-up step. It only
+        # applies to a customer who has never made a choice; anyone who
+        # already has a preference row is recorded as an account change.
+        from_signup = data.get('source') == EmailPreference.Source.REGISTRATION
+        pref, created = EmailPreference.objects.get_or_create(user=request.user)
         if wanted != pref.marketing_opt_in:
             now = timezone.now()
             pref.marketing_opt_in = wanted
-            pref.source = EmailPreference.Source.ACCOUNT
+            pref.source = (
+                EmailPreference.Source.REGISTRATION if from_signup and created
+                else EmailPreference.Source.ACCOUNT
+            )
             if wanted:
                 pref.consented_at = now
             else:

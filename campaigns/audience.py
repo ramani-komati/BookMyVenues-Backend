@@ -1,13 +1,22 @@
 """
-Who a campaign may reach.
+Who a campaign may reach. It depends on the campaign's KIND.
 
-ELIGIBLE (every segment starts here, no exceptions):
+ELIGIBLE for every kind (every segment starts here, no exceptions):
   * an active customer account (is_active, and is_customer OR the PUBLIC
     role — the same rule as the admin Users list; QA audit 2026-10-30 found
     PUBLIC-role customers silently missing, so counts read 0)
   * with a VALID email address — one recipient per address (case-insensitive)
-  * that opted IN to promotional email themselves (EmailPreference)
-  * whose address is not suppressed (hard bounce / spam complaint)
+  * whose address is not suppressed (hard bounce / spam complaint) — mailing
+    a dead or complaining address is refused for service mail too
+PROMOTIONAL campaigns additionally need:
+  * the customer opted IN to promotional email themselves (EmailPreference)
+  * and nobody unsubscribed that ADDRESS — when two accounts share an
+    address, an unsubscribe on either one stops promotions to it
+SERVICE campaigns (booking / payment / account notices) do NOT need
+marketing consent — an unsubscribe from offers does not stop them, exactly
+like booking confirmations — but they may only use the segments in
+SERVICE_SEGMENTS (customers a notice can be about), never re-engagement or
+interest targeting, and their content may not carry offers (content.py).
 
 SEGMENTS narrow the eligible set:
 
@@ -43,7 +52,7 @@ import re
 
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, F, OuterRef, Q
 from django.db.models.functions import Lower
 from django.utils import timezone
 
@@ -63,6 +72,12 @@ SEGMENTS = {
     'interest_category': 'Customers interested in venue categories',
     'interest_city': 'Customers interested in cities',
 }
+PROMOTIONAL, SERVICE = 'promotional', 'service'
+KINDS = (PROMOTIONAL, SERVICE)
+# Who a service notice can be about: everyone, or customers with a booking /
+# ticket relationship. Re-engagement (not_booked, lapsed) and interest
+# targeting are marketing, so a service campaign cannot pick them.
+SERVICE_SEGMENTS = ('all', 'location', 'booked', 'category', 'event_buyers', 'active')
 MAX_CHOICES = 20
 NO_INTERESTS = 'No recorded interests'
 # A venue booking that stands: paid / confirmed, or already happened.
@@ -80,12 +95,24 @@ class AudienceError(ValueError):
 # Audience definition (stored on Campaign.audience)
 # ---------------------------------------------------------------------------
 
-def clean_audience(raw):
+def clean_kind(raw):
+    kind = str(raw or PROMOTIONAL).strip().lower()
+    if kind not in KINDS:
+        raise AudienceError('Choose a campaign type: promotional or service.')
+    return kind
+
+
+def clean_audience(raw, kind=PROMOTIONAL):
     """Validate the admin's segment choice -> the dict stored on the campaign."""
     raw = raw if isinstance(raw, dict) else {}
     segment = str(raw.get('segment') or 'all').strip()
     if segment not in SEGMENTS:
         raise AudienceError('Choose a valid audience.')
+    if kind == SERVICE and segment not in SERVICE_SEGMENTS:
+        raise AudienceError(
+            f'"{SEGMENTS[segment]}" is a marketing audience. A service email can go to all '
+            'customers or to customers with a booking or ticket — or switch the campaign '
+            'to Promotional.')
     audience = {'segment': segment}
     if segment == 'location':
         state = str(raw.get('state') or '').strip()
@@ -131,10 +158,12 @@ def clean_audience(raw):
     return audience
 
 
-def describe(audience):
+def describe(audience, kind=PROMOTIONAL):
     audience = audience or {}
     segment = audience.get('segment') or 'all'
     days = audience.get('days')
+    if segment == 'all' and kind == SERVICE:
+        return 'All registered customers'
     if segment == 'location':
         place = ', '.join(p for p in (audience.get('city'), audience.get('state')) if p)
         return f'Customers who booked in {place}'
@@ -171,14 +200,47 @@ def _suppressed_q():
     return Exists(EmailSuppression.objects.filter(email=OuterRef('email_lower')))
 
 
+def unsubscribed_addresses():
+    """Lower-case addresses whose owner unsubscribed from promotions on any
+    account. An unsubscribe is honoured for the address, not just the one
+    account it was made from."""
+    rows = EmailPreference.objects.filter(
+        marketing_opt_in=False, unsubscribed_at__isnull=False,
+    ).exclude(user__email__isnull=True).exclude(user__email='').values_list('user__email', flat=True)
+    return {str(e).strip().lower() for e in rows}
+
+
+def _unsubscribed_address_q():
+    return Exists(EmailPreference.objects.filter(
+        marketing_opt_in=False, unsubscribed_at__isnull=False,
+        user__email__iexact=OuterRef('email')))
+
+
 def eligible_customers():
-    """THE consent gate. Every send path goes through this queryset."""
+    """THE consent gate for promotional mail. Every promotional send path
+    goes through this queryset."""
     return (
         _with_email(_customers())
         .filter(email_preference__marketing_opt_in=True)
         .annotate(email_lower=Lower('email'))
         .exclude(_suppressed_q())
+        .exclude(_unsubscribed_address_q())
     )
+
+
+def service_customers():
+    """Who a SERVICE notice may reach: every active customer with an address
+    that has not bounced or complained. Marketing consent is not read — and
+    never written — here."""
+    return (
+        _with_email(_customers())
+        .annotate(email_lower=Lower('email'))
+        .exclude(_suppressed_q())
+    )
+
+
+def base_customers(kind=PROMOTIONAL):
+    return service_customers() if kind == SERVICE else eligible_customers()
 
 
 def _booking_q(**filters):
@@ -186,10 +248,12 @@ def _booking_q(**filters):
     return Booking.objects.filter(user=OuterRef('pk'), status__in=BOOKED_STATUSES, **filters)
 
 
-def segment_queryset(audience):
+def segment_queryset(audience, kind=PROMOTIONAL):
     audience = audience or {}
     segment = audience.get('segment') or 'all'
-    qs = eligible_customers()
+    if kind == SERVICE and segment not in SERVICE_SEGMENTS:
+        return User.objects.none()
+    qs = base_customers(kind)
     days = audience.get('days')
     since = timezone.now() - datetime.timedelta(days=days) if days else None
 
@@ -239,11 +303,11 @@ def _valid_email(email):
     return True
 
 
-def recipients(audience):
+def recipients(audience, kind=PROMOTIONAL):
     """THE recipient list: [(user_id, email_lower, name)] in a stable order,
     one per address, valid addresses only. Count, list and send all use it."""
     out, seen = [], set()
-    rows = segment_queryset(audience).order_by('pk').values_list('pk', 'email_lower', 'name')
+    rows = segment_queryset(audience, kind).order_by('pk').values_list('pk', 'email_lower', 'name')
     for user_id, email, name in rows.iterator(chunk_size=2000):
         email = str(email or '').strip()
         if not email or email in seen or not _valid_email(email):
@@ -357,8 +421,10 @@ def interest_options():
     }
 
 
-def _reason(audience, interest):
+def _reason(audience, interest, kind=PROMOTIONAL):
     segment = (audience or {}).get('segment') or 'all'
+    if segment == 'all' and kind == SERVICE:
+        return 'Registered customer with a working email address'
     if segment == 'location':
         place = ', '.join(p for p in (audience.get('city'), audience.get('state')) if p)
         return f'Booked a venue in {place}'
@@ -396,11 +462,11 @@ def _via(interest):
     return f' (from {", ".join(found)})' if found else ''
 
 
-def recipient_page(audience, *, page=1, page_size=25, search=''):
+def recipient_page(audience, *, page=1, page_size=25, search='', kind=PROMOTIONAL):
     """One page of the audience for the admin panel, with each customer's
     location, recorded interests and why they qualify. Admin-only (the view
     checks IsAdmin); the list is the SAME one a send would freeze."""
-    rows = recipients(audience)
+    rows = recipients(audience, kind)
     total = len(rows)
     needle = str(search or '').strip().lower()
     if needle:
@@ -428,13 +494,91 @@ def recipient_page(audience, *, page=1, page_size=25, search=''):
             'bookings': interest['bookings'],
             'tickets': interest['tickets'],
             'favorites': interest['favorites'],
-            'reason': _reason(audience, interest),
+            'reason': _reason(audience, interest, kind),
         })
     return {'total': total, 'matched': matched, 'page': page, 'pageSize': page_size,
             'recipients': out}
 
 
-def estimate(audience):
+# Why a customer account cannot receive a campaign of a kind — checked in
+# this order, each account counted under the FIRST reason that applies.
+INELIGIBLE_REASONS = {
+    'inactive': (
+        'Deactivated accounts',
+        'The account is blocked or deactivated, so it gets no campaign email of any kind.'),
+    'no_email': (
+        'No email address',
+        'The customer signed up with a phone number and never added an email address.'),
+    'invalid_email': (
+        'Invalid email address',
+        'The saved address is not a valid email, so it cannot be delivered.'),
+    'suppressed': (
+        'Bounced or reported as spam',
+        'The address hard-bounced or the customer marked our email as spam. Mailing it again '
+        'would hurt delivery of booking and sign-in emails, so it is excluded from every campaign.'),
+    'unsubscribed': (
+        'Unsubscribed from offers',
+        'The customer turned promotional emails off (My account, an unsubscribe link or their '
+        'mail app). Only the customer can turn them back on.'),
+    'not_opted_in': (
+        'Never opted in to offers',
+        'The customer has not turned on promotional emails under My account → Email preferences. '
+        'Consent is never assumed or switched on for them.'),
+    'duplicate': (
+        'Shared email address',
+        'More than one account uses this address; it is emailed only once.'),
+}
+_REASONS_FOR = {
+    PROMOTIONAL: ('inactive', 'no_email', 'invalid_email', 'suppressed',
+                  'unsubscribed', 'not_opted_in', 'duplicate'),
+    SERVICE: ('inactive', 'no_email', 'invalid_email', 'suppressed', 'duplicate'),
+}
+
+
+def eligibility(kind=PROMOTIONAL):
+    """Every customer account sorted into eligible / one ineligible reason
+    for this kind of campaign — before any segment is applied. `eligible`
+    equals len(recipients({'segment': 'all'}, kind)). Read-only."""
+    suppressed = set(EmailSuppression.objects.values_list('email', flat=True))
+    unsubscribed = unsubscribed_addresses() if kind == PROMOTIONAL else set()
+    counts = {key: 0 for key in _REASONS_FOR[kind]}
+    seen = set()
+    rows = (User.objects.filter(Q(is_customer=True) | Q(role=User.Role.PUBLIC))
+            .annotate(email_lower=Lower('email'),
+                      opt_in=F('email_preference__marketing_opt_in'),
+                      unsub_at=F('email_preference__unsubscribed_at'))
+            .order_by('pk')
+            .values_list('is_active', 'email_lower', 'opt_in', 'unsub_at'))
+    for is_active, email, opt_in, unsub_at in rows.iterator(chunk_size=2000):
+        email = str(email or '').strip()
+        if not is_active:
+            reason = 'inactive'
+        elif not email:
+            reason = 'no_email'
+        elif not _valid_email(email):
+            reason = 'invalid_email'
+        elif email in suppressed:
+            reason = 'suppressed'
+        elif kind == PROMOTIONAL and ((unsub_at and not opt_in) or email in unsubscribed):
+            reason = 'unsubscribed'
+        elif kind == PROMOTIONAL and not opt_in:
+            reason = 'not_opted_in'
+        elif email in seen:
+            reason = 'duplicate'
+        else:
+            seen.add(email)
+            continue
+        counts[reason] += 1
+    ineligible = [
+        {'key': key, 'label': INELIGIBLE_REASONS[key][0], 'count': counts[key],
+         'explanation': INELIGIBLE_REASONS[key][1]}
+        for key in _REASONS_FOR[kind]
+    ]
+    return {'eligible': len(seen), 'ineligibleTotal': sum(counts.values()),
+            'ineligible': ineligible}
+
+
+def estimate(audience, kind=PROMOTIONAL):
     """Recipient count plus why other customers are left out — the panel
     shows both before anything can be sent. `count` is len(recipients()) —
     exactly what a send would freeze."""
@@ -442,11 +586,13 @@ def estimate(audience):
     with_email = _with_email(customers)
     opted_in = with_email.filter(email_preference__marketing_opt_in=True)
     suppressed = opted_in.annotate(email_lower=Lower('email')).filter(_suppressed_q()).count()
-    segment_rows = segment_queryset(audience).count()
-    count = len(recipients(audience))
-    eligible_rows = list(eligible_customers().values_list('email_lower', flat=True))
+    segment_rows = segment_queryset(audience, kind).count()
+    count = len(recipients(audience, kind))
+    eligible_rows = list(base_customers(kind).values_list('email_lower', flat=True))
     valid = [e for e in eligible_rows if e and _valid_email(e)]
+    breakdown = eligibility(kind)
     return {
+        'kind': kind,
         'count': count,
         'eligibleTotal': len(set(valid)),
         'invalidEmail': len(eligible_rows) - len(valid),
@@ -458,6 +604,11 @@ def estimate(audience):
         'suppressed': suppressed,
         'unsubscribed': EmailPreference.objects.filter(
             marketing_opt_in=False, unsubscribed_at__isnull=False).count(),
+        # Every customer account, eligible or not, with the reason — the
+        # panel's "who can't receive this, and why".
+        'eligibleAccounts': breakdown['eligible'],
+        'ineligibleTotal': breakdown['ineligibleTotal'],
+        'ineligible': breakdown['ineligible'],
     }
 
 

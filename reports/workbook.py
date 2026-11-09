@@ -107,7 +107,7 @@ def build(sheets):
     from openpyxl.utils import get_column_letter
 
     wb = Workbook(write_only=True)
-    wb.properties.creator = 'TheBookMyVenues'
+    wb.properties.creator = 'HAPVOO'
     header_font = Font(bold=True, color=HEADER_FONT)
     header_fill = PatternFill('solid', fgColor=HEADER_FILL)
     bold_font = Font(bold=True)

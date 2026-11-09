@@ -32,6 +32,9 @@ class DataReviewTests(APITestCase):
         self.listing('Stayfit Sports Zone', '500')
         brand = Event.objects.create(name='bookmyvenue', slug='bmv-x', venue_name='ku',
                                      start_time=datetime.time(18), end_time=datetime.time(20), status='live')
+        # The new brand name counts as "the platform itself" too.
+        Event.objects.create(name='Hapvoo', slug='hapvoo-x', venue_name='ku',
+                             start_time=datetime.time(18), end_time=datetime.time(20), status='live')
         real = Event.objects.create(name='Comedy Night', slug='comedy-x', venue_name='RK Party House',
                                     start_time=datetime.time(18), end_time=datetime.time(20), status='live')
         date = EventDate.objects.create(event=brand, date=datetime.date(2026, 10, 1))
@@ -47,8 +50,9 @@ class DataReviewTests(APITestCase):
         self.assertIn('Name contains "Demo"', venues['Durga Play Ground Demo Venue']['reasons'])
         self.assertIn('Price is ₹1', venues['Durga Play Ground Demo Venue']['reasons'])
         events = {e['name']: e for e in data['events']}
-        self.assertEqual(set(events), {'bookmyvenue'})
+        self.assertEqual(set(events), {'bookmyvenue', 'Hapvoo'})
         self.assertIn('Named after the platform itself', events['bookmyvenue']['reasons'])
+        self.assertIn('Named after the platform itself', events['Hapvoo']['reasons'])
         self.assertEqual([o['id'] for o in data['orders']], [order.pk])
 
         # Read-only: nothing changed.

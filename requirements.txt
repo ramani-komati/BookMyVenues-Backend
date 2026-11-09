@@ -29,3 +29,6 @@ openpyxl==3.1.5
 # Production web server (used by Render, not needed locally)
 gunicorn==26.0.0
 Pillow==11.3.0
+
+# Event ticket PDFs (with QR codes) attached to the confirmation email
+reportlab==4.2.5

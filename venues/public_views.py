@@ -85,7 +85,9 @@ def _summary(listing, ratings=None):
         for key, value in listing.record.items()
         # No phone numbers on public pages — the owner's number reaches only a
         # customer whose booking is paid (bookings/contact.py).
-        if key not in ('detail', 'contactPhone')
+        # rating/ratingCount are the SERVER's live aggregate, set below — a
+        # copy stored in the record (old imports, mock data) is never shown.
+        if key not in ('detail', 'contactPhone', 'rating', 'ratingCount')
     }
     from .taxonomy import canonical_category, category_group, sub_categories_for
 
@@ -122,9 +124,10 @@ def _summary(listing, ratings=None):
     else:
         from bookings.ratings import venue_rating  # avoid import cycle at load
         average, count = venue_rating(listing)
-    if average is not None:  # server rating takes precedence on the frontend
-        summary['rating'] = average
-        summary['ratingCount'] = count
+    # Always both keys: {rating: None, ratingCount: 0} means "not rated yet"
+    # (bookings/ratings.rating_payload), never a missing field.
+    from bookings.ratings import rating_payload
+    summary.update(rating_payload(average, count))
     return summary
 
 
@@ -349,9 +352,8 @@ class PublicVenueDetailView(APIView):
         # this cached response never depends on who is asking).
         record['coordinates'] = coordinates_payload(listing.latitude, listing.longitude)
         average, count = venue_rating(listing)
-        if average is not None:
-            record['rating'] = average
-            record['ratingCount'] = count
+        from bookings.ratings import rating_payload
+        record.update(rating_payload(average, count))
 
         # Part payment, served in BOTH places the contract names: at the top
         # level where the admin panel writes it, and inside `detail` where the

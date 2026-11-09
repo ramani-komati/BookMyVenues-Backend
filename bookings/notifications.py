@@ -36,11 +36,11 @@ def _slot_text(booking):
     return booking.slots[0] if booking.slots else ''
 
 
-def _send(channel, target, body, subject='', html=None):
+def _send(channel, target, body, subject='', html=None, attachments=None):
     """One best-effort delivery. Returns True when it got through.
 
     Catches everything: a notification must never break the booking that
-    triggered it.
+    triggered it. `attachments` (email only): [(filename, bytes, mime)].
     """
     if not target:
         return False
@@ -48,7 +48,10 @@ def _send(channel, target, body, subject='', html=None):
         if channel == 'email':
             if not settings.NOTIFY_EMAIL_ENABLED:
                 return False
-            _send_email(target, subject, body, html)
+            if attachments:
+                _send_email(target, subject, body, html, attachments=attachments)
+            else:
+                _send_email(target, subject, body, html)
         else:
             if not settings.NOTIFY_SMS_ENABLED:
                 return False
@@ -59,8 +62,11 @@ def _send(channel, target, body, subject='', html=None):
         return False
 
 
-def _send_email(address, subject, body, html=None):
-    """Resend transport. `html` is optional so callers can send text-only."""
+def _send_email(address, subject, body, html=None, attachments=None):
+    """Resend transport. `html` is optional so callers can send text-only.
+    `attachments` is [(filename, bytes, mime)], sent base64 as Resend expects."""
+    import base64
+
     import requests
 
     if not settings.RESEND_API_KEY:
@@ -73,11 +79,18 @@ def _send_email(address, subject, body, html=None):
     }
     if html:
         payload['html'] = html
+    if attachments:
+        payload['attachments'] = [
+            {'filename': name, 'content': base64.b64encode(data).decode('ascii'),
+             'content_type': mime}
+            for name, data, mime in attachments
+        ]
     response = requests.post(
         'https://api.resend.com/emails',
         headers={'Authorization': f'Bearer {settings.RESEND_API_KEY}'},
         json=payload,
-        timeout=10,
+        # A PDF makes the request bigger; still bounded.
+        timeout=20 if attachments else 10,
     )
     if response.status_code not in (200, 201):
         raise OTPSendError(f'Resend returned HTTP {response.status_code}.')

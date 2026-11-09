@@ -8,9 +8,11 @@ from campaigns import admin_views as campaign_views
 from events import admin_views as event_admin_views
 from reports.views import AdminExportView
 
-from . import data_review, homepage, ratings_admin, subcategories_admin, vendor_profile, venue_edit, views
+from . import dashboard, data_review, ticket_resend, homepage, ratings_admin, subcategories_admin, vendor_profile, venue_edit, views
 
 urlpatterns = [
+    # Dashboard money + booking figures for a date range (reports/finance.py).
+    path('dashboard', dashboard.AdminDashboardView.as_view(), name='admin-dashboard'),
     path('auth/login', views.AdminLoginView.as_view(), name='admin-login'),
     path('auth/verify-otp', views.AdminVerifyOtpView.as_view(), name='admin-verify-otp'),
     path('auth/logout', views.AdminLogoutView.as_view(), name='admin-logout'),
@@ -62,6 +64,12 @@ urlpatterns = [
         'event-orders/<str:order_id>',
         event_admin_views.AdminEventOrderRemoveView.as_view(),
         name='admin-event-order-remove',
+    ),
+    # Send the customer's PDF tickets again (paid orders only, cooldown, audited).
+    path(
+        'event-orders/<str:order_id>/resend-tickets',
+        ticket_resend.AdminResendTicketsView.as_view(),
+        name='admin-event-order-resend-tickets',
     ),
     # New models (Phase 3)
     path('uploads', views.AdminUploadView.as_view(), name='admin-upload'),

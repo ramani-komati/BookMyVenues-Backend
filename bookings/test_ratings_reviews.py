@@ -188,7 +188,10 @@ class RatingEligibilityTests(BookingTestBase):
     def test_a_new_rating_is_visible_on_the_venue_page_without_waiting_for_the_cache(self):
         anonymous = APIClient()
         first = anonymous.get(f'/api/venues/{self.listing.id}').data
-        self.assertNotIn('rating', first)                     # unrated: no fabricated stars
+        # Unrated: no fabricated stars — the keys are always sent now, as
+        # null / 0, so the page can say "Not rated yet" with certainty.
+        self.assertIsNone(first['rating'])
+        self.assertEqual(first['ratingCount'], 0)
         self.rate(self.make(), stars=3)
         detail = anonymous.get(f'/api/venues/{self.listing.id}').data   # no cache.clear()
         self.assertEqual((detail['rating'], detail['ratingCount']), (3.0, 1))

@@ -46,6 +46,11 @@
     </tr>
   </table>
 
+  {% if ticket_note %}
+  <div style="font-size:14px;line-height:22px;color:#06152C;font-weight:600;padding-top:20px;">
+    {{ ticket_note }}
+  </div>
+  {% endif %}
   <div style="font-size:14px;line-height:22px;color:#45577A;padding-top:20px;">
     View your tickets any time under <a href="{{ bookings_url }}" style="color:#B30F18;font-weight:700;">My bookings</a>.
     {% if maps_link %}<br><a href="{{ maps_link }}" style="color:#B30F18;font-weight:700;">Open the venue in Google Maps</a>{% endif %}
