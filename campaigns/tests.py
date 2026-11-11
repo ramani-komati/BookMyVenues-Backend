@@ -94,7 +94,7 @@ class CampaignTestBase(TestCase):
     def campaign(self, **fields):
         defaults = dict(name='Diwali offers', subject='Big Diwali savings', heading='Hi {{first_name}}!',
                         body='Book now and **save 20%**.\n\n- Party halls\n- Resorts',
-                        cta_label='Book now', cta_url='https://thebookmyvenues.in/explore',
+                        cta_label='Book now', cta_url='https://hapvoo.com/explore',
                         images=[{'url': 'https://cdn.example.com/a.jpg', 'alt': 'Banner',
                                  'link': '', 'caption': ''}],
                         audience={'segment': 'booked'}, created_by=self.admin)
@@ -220,7 +220,7 @@ class AdminApiTests(CampaignTestBase):
         }, format='json')
         self.assertEqual(saved.status_code, 200, saved.data)
         self.assertEqual(saved.data['campaign']['version'], 2)
-        self.assertEqual(saved.data['campaign']['ctaUrl'], 'https://thebookmyvenues.in/explore')
+        self.assertEqual(saved.data['campaign']['ctaUrl'], 'https://hapvoo.com/explore')
 
         stale = self.admin_client.patch(f'/api/admin/campaigns/{row["id"]}',
                                         {'version': 1, 'heading': 'Lost update'}, format='json')
@@ -238,7 +238,7 @@ class AdminApiTests(CampaignTestBase):
     def test_preview_escapes_admin_text_and_formats_it(self):
         response = self.admin_client.post('/api/admin/campaigns/preview', {
             'subject': 'Hi {{first_name}}', 'heading': '<script>x</script> **Deal**',
-            'body': 'Line one\nline two\n\n- a\n- b', 'ctaLabel': 'Go', 'ctaUrl': 'https://thebookmyvenues.in/x',
+            'body': 'Line one\nline two\n\n- a\n- b', 'ctaLabel': 'Go', 'ctaUrl': 'https://hapvoo.com/x',
         }, format='json')
         self.assertEqual(response.status_code, 200, response.data)
         html = response.data['html']
@@ -679,7 +679,7 @@ class ContentTests(TestCase):
 
     def test_tracking_only_on_our_site(self):
         campaign = Campaign(name='Diwali 2026')
-        self.assertIn('utm_campaign=diwali-2026', content.tracked('https://thebookmyvenues.in/x', campaign))
+        self.assertIn('utm_campaign=diwali-2026', content.tracked('https://hapvoo.com/x', campaign))
         self.assertEqual(content.tracked('https://other.example.com/x', campaign), 'https://other.example.com/x')
 
     def test_personalize_escapes_the_name(self):

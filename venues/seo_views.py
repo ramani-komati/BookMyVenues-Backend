@@ -33,7 +33,7 @@ STATIC_PAGES = (
 
 
 def site_url():
-    return str(getattr(settings, 'PUBLIC_SITE_URL', '') or 'https://thebookmyvenues.in').rstrip('/')
+    return str(getattr(settings, 'PUBLIC_SITE_URL', '') or 'https://hapvoo.com').rstrip('/')
 
 
 def _url(loc, lastmod=None, changefreq='weekly', priority='0.6'):

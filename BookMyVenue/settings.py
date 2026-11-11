@@ -273,10 +273,9 @@ RESEND_FROM = os.environ.get('RESEND_FROM', 'onboarding@resend.dev')
 # even when the client blocks images.
 BRAND_LOGO_URL = os.environ.get('BRAND_LOGO_URL', '')
 # Customer site linked from every email footer. HAPVOO's primary domain is
-# https://hapvoo.com; the default stays on the domain live today until
-# hapvoo.com is connected and verified — then set BRAND_SITE_URL (and
-# PUBLIC_SITE_URL below) to https://hapvoo.com in the host's env. No code change.
-BRAND_SITE_URL = os.environ.get('BRAND_SITE_URL', 'https://thebookmyvenues.in')
+# https://hapvoo.com (live since 2026-11-10; the old thebookmyvenues.in
+# 301-redirects to it). Override with BRAND_SITE_URL in the host's env.
+BRAND_SITE_URL = os.environ.get('BRAND_SITE_URL', 'https://hapvoo.com')
 
 
 # Promotional email campaigns (campaigns/). Reuses RESEND_API_KEY above; the
@@ -310,8 +309,8 @@ DJANGO_ADMIN_PATH = os.environ.get('DJANGO_ADMIN_PATH', 'admin/')
 ADMIN_LOGIN_MAX_FAILURES = int(os.environ.get('ADMIN_LOGIN_MAX_FAILURES', '5') or 5)
 ADMIN_LOGIN_LOCK_SECONDS = int(os.environ.get('ADMIN_LOGIN_LOCK_SECONDS', '900') or 900)
 # Public origin of the CUSTOMER site — the URLs inside /api/sitemap.xml.
-# Switch to https://hapvoo.com together with BRAND_SITE_URL (see above).
-PUBLIC_SITE_URL = os.environ.get('PUBLIC_SITE_URL', 'https://thebookmyvenues.in')
+# Keep on the same origin as BRAND_SITE_URL (see above).
+PUBLIC_SITE_URL = os.environ.get('PUBLIC_SITE_URL', 'https://hapvoo.com')
 # Signing secret of the Resend webhook (Resend dashboard -> Webhooks), for
 # delivered / bounced / opened / clicked stats. Blank = the webhook endpoint
 # refuses everything and the reports show sent / failed only.
