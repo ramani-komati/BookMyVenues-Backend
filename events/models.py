@@ -127,6 +127,13 @@ class Event(models.Model):
     # null when neither carries an exact pin. See venues/geo.py.
     latitude = models.FloatField(null=True, blank=True)
     longitude = models.FloatField(null=True, blank=True)
+    # A share link (maps.app.goo.gl/…) carries no pin of its own. When the
+    # event is saved the server follows it once (venues/maps.py, Google hosts
+    # only) and keeps {source, url} here — the same shape venues keep in
+    # detail.mapsLinkResolved. The pin is read from `url` ONLY while `source`
+    # is still the current maps_link, so replacing the link can never leave a
+    # stale pin behind. The admin's own maps_link is never rewritten.
+    maps_link_resolved = models.JSONField(default=dict, blank=True)
 
     # Daily show time, applied to every date (an event that runs 6–10 PM runs
     # 6–10 PM on each of its nights).
@@ -183,10 +190,17 @@ class Event(models.Model):
     MAX_FEATURED = 12
 
     def sync_coordinates(self):
-        """Set latitude/longitude from maps_link, else the linked venue."""
+        """Set latitude/longitude from maps_link (or the URL its short link
+        resolved to), else the linked venue."""
         from venues.geo import pin_from_maps_link
 
         point = pin_from_maps_link(self.maps_link)
+        resolved = self.maps_link_resolved if isinstance(self.maps_link_resolved, dict) else {}
+        if (
+            point is None and self.maps_link
+            and str(resolved.get('source') or '').strip() == self.maps_link.strip()
+        ):
+            point = pin_from_maps_link(resolved.get('url'))
         if point is None and self.listing_id:
             from venues.models import Listing
             venue = (

@@ -37,8 +37,10 @@ AFTER = [
     # 0024 (Booking.hold_expires_at) and events 0007 (nullable = unlimited
     # EventDate.capacity) are today's models as well: an old booking comes
     # out with no stored hold end (holds.py falls back to created_at).
+    # events 0009 (Event.maps_link_resolved, 2026-11-12) is today's Event:
+    # an old event comes out with no resolved share link ({}).
     ('bookings', '0024_booking_hold_expires_at'),
-    ('events', '0007_event_date_unlimited_capacity'),
+    ('events', '0009_event_maps_link_resolved'),
     ('adminpanel', '0003_settings_homepage'),
     ('offerings', '0001_initial'),
 ]
@@ -127,3 +129,4 @@ class MigrationPreservesDataTests(TransactionTestCase):
         self.assertEqual([b['code'] for b in active_banners(settings_obj)], ['OLD100'])
         event = NewEvent.objects.get(pk=event_id)
         self.assertEqual((event.featured, event.featured_order, event.featured_from), (True, None, None))
+        self.assertEqual(event.maps_link_resolved, {})

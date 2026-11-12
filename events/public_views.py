@@ -229,6 +229,14 @@ class PublicEventListView(APIView):
     lat & lng add `distanceKm` to each event, sort=distance orders nearest
     first (events without a pin last), radius=<km> excludes farther events
     and events without a pin.
+
+    place=<city> (with lat, lng and radius) ALSO returns, as
+    `distanceUnknown` (+ `distanceUnknownTotal`), the events that have NO
+    pin but are in that place by name (same alias rules as city=) — so an
+    event an admin typed as "Warangal" without a precise maps link is still
+    found by a customer who picked Warangal, in its own list and never with
+    an invented distance. Same filters as the main list, not paginated
+    (first MAX_LIMIT).
     """
 
     permission_classes = [AllowAny]
@@ -287,6 +295,17 @@ class PublicEventListView(APIView):
         queryset = queryset.distinct()
         start = (page - 1) * limit
 
+        # Unpinned events named as being in the customer's place — computed
+        # BEFORE the bounding box narrows the queryset to pinned rows.
+        place = params.get('place', '').strip()[:100]
+        unknown_rows, unknown_total = [], 0
+        if place and origin is not None and radius is not None:
+            unpinned = queryset.filter(place_q(place)).filter(
+                Q(latitude__isnull=True) | Q(longitude__isnull=True)
+            )
+            unknown_total = unpinned.count()
+            unknown_rows = list(unpinned[:MAX_LIMIT])
+
         distances = {}
         if origin is not None and (radius is not None or sort == 'distance'):
             if radius is not None:
@@ -308,7 +327,7 @@ class PublicEventListView(APIView):
 
         from bookings.ratings import event_ratings_map
 
-        ratings = event_ratings_map([row.pk for row in rows])
+        ratings = event_ratings_map([row.pk for row in rows + unknown_rows])
         events = []
         for row in rows:
             summary = event_summary(row, ratings)
@@ -318,11 +337,21 @@ class PublicEventListView(APIView):
                     else distance_km(origin, row.latitude, row.longitude)
                 )
             events.append(summary)
-        return Response({
+        body = {
             'events': events,
             'total': total,
             'categories': event_categories_payload(),
-        })
+        }
+        if place and origin is not None and radius is not None:
+            unknown = []
+            for row in unknown_rows:
+                summary = event_summary(row, ratings)
+                summary['distanceKm'] = None
+                summary['distanceUnknown'] = True
+                unknown.append(summary)
+            body['distanceUnknown'] = unknown
+            body['distanceUnknownTotal'] = unknown_total
+        return Response(body)
 
 
 class PublicEventDetailView(APIView):

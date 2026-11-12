@@ -13,7 +13,9 @@ Report — and optionally fill — venue map pins for distance search.
     python manage.py listing_coordinates --resolve-short-links --apply
         Stores the resolved URL beside the vendor's link as
         detail.mapsLinkResolved = {source, url} and saves the listing, which
-        re-derives latitude/longitude. The vendor's own mapsLink, address
+        re-derives latitude/longitude. Events get the same treatment
+        (Event.maps_link_resolved), so an event saved with a share link before
+        events resolved them on save is pinned without being edited. The vendor's own mapsLink, address
         and every other field are left exactly as they were.
 
 Venues with no link, or a link without a pin, cannot be fixed here — the
@@ -73,12 +75,22 @@ class Command(BaseCommand):
 
         events = Event.objects.exclude(status=Event.Status.DELETED).order_by('name')
         missing = [e for e in events if e.latitude is None or e.longitude is None]
+        events_fixed = 0
         for event in missing:
             why = 'no maps link' if not event.maps_link else (
-                'link has no exact pin' if pin_from_maps_link(event.maps_link) is None else '?'
+                'short link (no pin until resolved)' if _is_allowed(event.maps_link)
+                else 'link has no exact pin' if pin_from_maps_link(event.maps_link) is None else '?'
             )
-            self.stdout.write(f'  event {event.name} [{event.status}] — {why}')
-        self.stdout.write(f'Events: {events.count() - len(missing)}/{events.count()} have a map pin.')
+            line = f'  event {event.name} [{event.status}] — {why}'
+            if resolve_short_links and event.maps_link and _is_allowed(event.maps_link):
+                line += self._resolve_event(event, apply)
+                if apply and event.latitude is not None:
+                    events_fixed += 1
+            self.stdout.write(line)
+        self.stdout.write(
+            f'Events: {events.count() - len(missing)}/{events.count()} have a map pin'
+            + (f'; {events_fixed} filled from short links.' if apply else '.')
+        )
         if not apply:
             self.stdout.write('Dry run — nothing was changed.')
 
@@ -110,3 +122,19 @@ class Command(BaseCommand):
         from venues.public_views import invalidate_listing_cache
         invalidate_listing_cache(listing)
         return f' → pinned at {listing.latitude:.6f}, {listing.longitude:.6f}'
+
+    def _resolve_event(self, event, apply):
+        try:
+            full = resolve_short_link(event.maps_link)
+        except MapsError as error:
+            return f' → could not resolve ({error})'
+        point = pin_from_maps_link(full)
+        if point is None:
+            return ' → resolved, but the full link has no exact pin either — paste a precise link'
+        if not apply:
+            return f' → would pin at {point[0]:.6f}, {point[1]:.6f}'
+        event.maps_link_resolved = {'source': event.maps_link, 'url': full}
+        # Event.save re-derives latitude/longitude and adds them to
+        # update_fields; updated_at is left alone.
+        event.save(update_fields=['maps_link_resolved'])
+        return f' → pinned at {event.latitude:.6f}, {event.longitude:.6f}'

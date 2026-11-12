@@ -23,7 +23,7 @@ from venues.models import Listing
 
 from .catalog import canonical_event_category
 from .inventory import seats_sold
-from .location import clean_maps_link
+from .location import clean_maps_link, resolve_maps_link
 from .models import Event, EventDate, EventOrder, TicketType
 
 MAX_DATES = 60          # a season-long Navaratri run is 9-10 nights; 60 is ample
@@ -231,6 +231,10 @@ def apply_core_fields(event, body, *, creating, listing_owner=None):
     # The customer page embeds and links this — only a real Google Maps URL.
     if creating or 'mapsLink' in body:
         event.maps_link = clean_maps_link(body.get('mapsLink'))
+    # A share link has no pin until followed — without this an event saved
+    # with maps.app.goo.gl/… had no coordinates and every "near you" list
+    # (server radius and the homepage's Top events) silently dropped it.
+    resolve_maps_link(event)
 
     if creating or 'startTime' in body:
         event.start_time = parse_time(body.get('startTime'), 'startTime')

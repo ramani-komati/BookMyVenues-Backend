@@ -23,12 +23,15 @@ Matching runs over every place field (venue name, address, locality, city),
 so a place is found wherever the organiser happened to type it. Nothing here
 writes to an event: stored fields are always exactly what the admin entered.
 """
+import logging
 import re
 from urllib.parse import urlparse
 
 from django.db.models import Q
 
 from bookings.slots import SlotError
+
+logger = logging.getLogger(__name__)
 
 # Each tuple is ONE place under its different spellings. Lower-case.
 SPELLINGS = (
@@ -160,3 +163,40 @@ def clean_maps_link(raw):
             '(e.g. https://maps.app.goo.gl/… or https://www.google.com/maps/…).'
         )
     return link
+
+
+def resolve_maps_link(event):
+    """Follow the event's maps share link once, so it gets the pin the link
+    points at (Event.sync_coordinates reads it). Best-effort by design: a
+    link Google won't resolve, or no network, leaves the event exactly as it
+    was and never blocks the save — the event just stays without a pin, as
+    before. Only Google short-link hosts are ever fetched (venues/maps.py).
+
+    Runs on every admin/vendor save, so re-saving an older event fills its
+    pin; a link already resolved for this exact source is not fetched again.
+    """
+    from django.conf import settings
+
+    from venues.geo import pin_from_maps_link
+    from venues.maps import MapsError, _is_allowed, resolve_short_link
+
+    link = str(event.maps_link or '').strip()
+    resolved = event.maps_link_resolved if isinstance(event.maps_link_resolved, dict) else {}
+    if not link or not _is_allowed(link):
+        # No link, or a full URL that carries its own pin (or none at all):
+        # nothing to follow, and a stale resolution must not linger.
+        if resolved:
+            event.maps_link_resolved = {}
+        return
+    if str(resolved.get('source') or '').strip() == link and pin_from_maps_link(resolved.get('url')):
+        return
+    if not getattr(settings, 'EVENT_RESOLVE_MAPS_LINKS', True):
+        return
+    try:
+        url = resolve_short_link(link)
+    except MapsError:
+        return
+    except Exception:   # noqa: BLE001 — a network hiccup must never fail a save
+        logger.warning('Could not resolve the maps link of event %s.', event.pk)
+        return
+    event.maps_link_resolved = {'source': link, 'url': url} if pin_from_maps_link(url) else {}

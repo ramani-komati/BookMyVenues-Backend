@@ -765,3 +765,112 @@ class BannerImagePositionTests(HomepageTestBase):
             'title': 'x', 'image': IMAGE, 'imagePosition': '50% 50%; background:url(x)',
         }, format='json')
         self.assertEqual(response.status_code, 400)
+
+
+class ImageOnlyHeroBannerTests(HomepageTestBase):
+    """2026-11-12: a hero banner can be published with its image alone — no
+    title, text or offer. Featured promotions still need a title."""
+
+    def post(self, body):
+        return self.admin_client.post('/api/admin/homepage/banners', body, format='json')
+
+    def test_an_image_alone_publishes_a_hero_banner(self):
+        response = self.post({
+            'title': '', 'text': '', 'image': IMAGE, 'published': True,
+            'showInHero': True, 'featuredPromotion': False, 'type': 'none',
+        })
+        self.assertEqual(response.status_code, 201, response.data)
+        banner = response.data['banner']
+        hero = self.homepage()['hero']
+        self.assertEqual([b['id'] for b in hero], [banner['id']])
+        self.assertEqual(hero[0]['image'], IMAGE)
+        self.assertEqual(hero[0]['title'], '')
+        self.assertEqual(hero[0]['code'], '')          # nothing redeemable
+        # Not a Featured promotion: there is no title for the card.
+        self.assertEqual(self.homepage()['promotions'], [])
+
+    def test_ordering_draft_and_unpublish_work_for_image_only_banners(self):
+        first = self.post({'image': IMAGE, 'published': True, 'featuredPromotion': False}).data['banner']
+        second = self.create_banner(title='Second', featuredPromotion=False)
+        revision = self.admin_get()['revision']
+        response = self.admin_client.post(
+            '/api/admin/homepage/banners/reorder',
+            {'revision': revision, 'placement': 'hero', 'ids': [second['id'], first['id']]},
+            format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual([b['id'] for b in self.homepage()['hero']], [second['id'], first['id']])
+        self.admin_client.patch(
+            f'/api/admin/homepage/banners/{first["id"]}', {'published': False}, format='json',
+        )
+        cache.clear()
+        self.assertEqual([b['id'] for b in self.homepage()['hero']], [second['id']])
+
+    def test_a_banner_needs_an_image_or_a_title(self):
+        response = self.post({'title': '', 'image': '', 'featuredPromotion': False})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('image', str(response.data))
+
+    def test_featured_promotions_still_need_a_title(self):
+        response = self.post({'title': '', 'image': IMAGE, 'featuredPromotion': True})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('Featured promotions need a title', str(response.data))
+        # With a title it is accepted exactly as before.
+        self.assertEqual(self.post({'title': 'Diwali', 'image': IMAGE, 'featuredPromotion': True}).status_code, 201)
+
+
+class HeroImageBannerDisplayTests(HomepageTestBase):
+    """2026-11-12: a hero banner is its image alone — shown whole at full width,
+    several rotate in the admin's order, each with its own optional link."""
+
+    def post(self, body):
+        return self.admin_client.post('/api/admin/homepage/banners', body, format='json')
+
+    def hero_body(self, **fields):
+        return {'image': IMAGE, 'published': True, 'showInHero': True,
+                'featuredPromotion': False, 'ctaLabel': '', **fields}
+
+    def test_the_image_size_is_public_so_the_site_reserves_the_space(self):
+        self.post(self.hero_body(imageWidth=2400, imageHeight=600,
+                                 imageMobile=IMAGE, imageMobileWidth=1200, imageMobileHeight=600))
+        hero = self.homepage()['hero'][0]
+        self.assertEqual(
+            (hero['imageWidth'], hero['imageHeight'], hero['imageMobileWidth'], hero['imageMobileHeight']),
+            (2400, 600, 1200, 600),
+        )
+        # Admin bookkeeping stays private.
+        for key in ('published', 'showInHero', 'featuredPromotion', 'heroOrder', 'updatedBy'):
+            self.assertNotIn(key, hero)
+
+    def test_several_banners_keep_their_order_and_their_own_links(self):
+        a = self.post(self.hero_body(ctaUrl='/events')).data['banner']
+        b = self.post(self.hero_body(ctaUrl='https://example.com/diwali')).data['banner']
+        c = self.post(self.hero_body(ctaUrl='')).data['banner']
+        revision = self.admin_get()['revision']
+        self.admin_client.post(
+            '/api/admin/homepage/banners/reorder',
+            {'revision': revision, 'placement': 'hero', 'ids': [c['id'], a['id'], b['id']]}, format='json',
+        )
+        cache.clear()
+        hero = self.homepage()['hero']
+        self.assertEqual([(x['id'], x['ctaUrl']) for x in hero], [
+            (c['id'], ''), (a['id'], '/events'), (b['id'], 'https://example.com/diwali'),
+        ])
+
+    def test_links_are_site_pages_or_real_web_addresses(self):
+        for good in ('/events', '/venues', '/home?category=sports', 'https://example.com/x', ''):
+            self.assertEqual(self.post(self.hero_body(ctaUrl=good)).status_code, 201, good)
+        for bad in ('javascript:alert(1)', '//evil.example.com', 'https://', 'https://intranet', 'events', '/a b'):
+            response = self.post(self.hero_body(ctaUrl=bad))
+            self.assertEqual(response.status_code, 400, bad)
+            self.assertIn('link must be', str(response.data))
+
+    def test_the_upload_guidance_describes_whole_uncropped_images(self):
+        spec = self.admin_get()['imageSpec']
+        words = ' '.join([*spec['notes'], *(s['safeZone'] for s in spec['slots'].values())])
+        self.assertIn('never cropped', words)
+        self.assertNotIn('trim', words)
+        from adminpanel.homepage import ratio_warnings
+        warning = ratio_warnings('desktop', 1500, 500)[0]
+        self.assertIn('shows whole', warning)
+        self.assertIn('taller than 4:1 banners', warning)

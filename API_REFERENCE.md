@@ -52,7 +52,11 @@ farther venues *and* unpinned ones. `lat`/`lng` must come together; `sort=distan
 and `radius` need them → otherwise `400`. Every row also carries
 `"coordinates": { "lat", "lng" } | null` — the pin derived from the vendor's own maps
 link (`venues/geo.py`), never guessed. `GET /api/events` takes the same
-`lat`/`lng`/`radius`/`sort=distance`.
+`lat`/`lng`/`radius`/`sort=distance`, plus optional `place=<city>`: with a radius it
+also returns `"distanceUnknown": [event…]` + `"distanceUnknownTotal"` — events with
+no pin that are named as being in that place (same spelling/area rules as `city=`),
+always with `distanceKm: null`. An event's share link (maps.app.goo.gl/…) is followed
+once when it is saved, so it gets the pin the link points at.
 
 ### `GET /api/venues/:idOrSlug` — full detail (UUID or slug)
 Returns the full record + `"gallery":[url]` + `"detail": { description, amenities[], parking,

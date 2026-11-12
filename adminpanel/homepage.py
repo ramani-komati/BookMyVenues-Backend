@@ -59,6 +59,7 @@ import datetime
 import logging
 import re
 import uuid
+from urllib.parse import urlparse
 
 from django.core.cache import cache
 from django.db import transaction
@@ -245,8 +246,10 @@ DEFAULT_CTA = 'Explore venues'
 _ADMIN_ONLY_KEYS = (
     'published', 'showInHero', 'featuredPromotion', 'heroOrder', 'promoOrder',
     'createdAt', 'updatedAt', 'updatedBy',
-    'imageWidth', 'imageHeight', 'imageMobileWidth', 'imageMobileHeight',
 )
+# (imageWidth/imageHeight/imageMobileWidth/imageMobileHeight ARE public since
+# 2026-11-12: the customer site sizes the banner from them before the image
+# loads, so the page does not jump. They are just the artwork's pixel size.)
 _TEXT_LIMITS = {
     'title': 120, 'text': 240, 'terms': 600, 'imageAlt': 200, 'ctaLabel': 40,
 }
@@ -370,7 +373,7 @@ def active_banners(settings_obj, today=None):
     today = today or today_ist()
     return [
         b for b in all_banners(settings_obj)
-        if b['title'] and banner_state(b, today) == 'live'
+        if (b['title'] or b['image']) and banner_state(b, today) == 'live'
     ]
 
 
@@ -402,13 +405,23 @@ def redemption_counts():
 
 
 def _safe_url(value, *, allow_relative=True):
+    """'' (no link), a page of the customer site ('/events', '/venues'), or a
+    full http(s) address with a real host. Same rule as the customer site's
+    homeLayout heroLink and SuperAdmin bannerLink."""
     text = str(value or '').strip()
     if not text:
         return True
     lowered = text.lower()
     if lowered.startswith('https://') or lowered.startswith('http://'):
-        return True
-    return allow_relative and text.startswith('/') and not text.startswith('//')
+        try:
+            host = (urlparse(text).hostname or '').lower()
+        except ValueError:
+            return False
+        return '.' in host or host == 'localhost'
+    return (
+        allow_relative and text.startswith('/') and not text.startswith('//')
+        and '\\' not in text and not any(ch.isspace() for ch in text)
+    )
 
 
 def banner_issues(b):
@@ -467,8 +480,16 @@ def clean_banner(body, current, others, redemptions):
             raise BannerError(f'{key} must be one of: {", ".join(IMAGE_POSITIONS)}.')
 
     b = normalize_banner(merged, 0)
-    if not b['title']:
-        raise BannerError('Give the banner a title — it is also the image’s description for screen readers.')
+    # A hero banner may be its artwork alone — the words are usually part of
+    # the image. A title is still needed when there is no image (nothing else
+    # to show) and for a Featured Promotions card (the card prints it).
+    if not b['title'] and not b['image']:
+        raise BannerError('Upload a banner image, or give the banner a title.')
+    if not b['title'] and b['featuredPromotion']:
+        raise BannerError(
+            'Featured promotions need a title — add one, or untick '
+            '“Show in Featured promotions” to publish the image as a hero banner only.'
+        )
     for key, limit in _TEXT_LIMITS.items():
         if len(b[key]) > limit:
             raise BannerError(f'{key} can be at most {limit} characters.')
@@ -524,9 +545,9 @@ def clean_banner(body, current, others, redemptions):
     if b['imageMobile'] and not b['image']:
         raise BannerError('Add the desktop image first — the phone image is an optional extra.')
     if not _safe_url(b['ctaUrl']):
-        raise BannerError('The button link must start with / (a page on this site) or https://.')
+        raise BannerError('The link must be a page on this site starting with / (e.g. /events) or a full https:// address.')
     if len(b['ctaUrl']) > 500:
-        raise BannerError('The button link is too long.')
+        raise BannerError('The link is too long.')
     if b['category'] and b['category'] not in CATEGORY_KEYS:
         raise BannerError('Pick one of the listed categories.')
     for key in ('imageWidth', 'imageHeight', 'imageMobileWidth', 'imageMobileHeight'):
@@ -591,10 +612,10 @@ BANNER_IMAGE_SPEC = {
             'minimum': {'width': 1200, 'height': 300},
             'ratio': {'label': '4:1', 'value': 4.0, 'warnMin': 3.6, 'warnMax': 4.4,
                       'min': 2.5, 'max': 6.0},
-            'safeZone': 'Keep words and logos inside the middle 80% of the width '
-                        'and 90% of the height. Small laptops trim about 8% off '
-                        'each side; tablets (641–1023px) show only the middle '
-                        '60–85% of the width.',
+            'safeZone': 'Shown whole on every screen wider than 640px: the full '
+                        'banner width at the image’s own shape — never cropped '
+                        'or stretched. Upload every hero banner at the same size '
+                        'so the rotation keeps one height.',
         },
         'mobile': {
             'label': 'Phone image (optional)',
@@ -604,8 +625,9 @@ BANNER_IMAGE_SPEC = {
             'minimum': {'width': 600, 'height': 300},
             'ratio': {'label': '2:1', 'value': 2.0, 'warnMin': 1.8, 'warnMax': 2.3,
                       'min': 1.4, 'max': 3.0},
-            'safeZone': 'Without a phone image, phones crop the desktop image to '
-                        'its middle half, and the Featured promotions card shows '
+            'safeZone': 'Without a phone image, phones show the desktop image '
+                        'scaled down whole (small words get hard to read — a phone '
+                        'image fixes that), and the Featured promotions card shows '
                         'the desktop image whole on a blurred backdrop.',
         },
     },
@@ -614,10 +636,11 @@ BANNER_IMAGE_SPEC = {
         for label, vw in PREVIEW_VIEWPORTS
     ],
     'notes': [
-        'The image fills the banner and is trimmed (never stretched) to fit '
-        'each screen — the previews show exactly what each screen keeps.',
-        'With text shown over the image, the banner grows taller on narrow '
-        'screens and trims more off the sides.',
+        'The uploaded image is the whole banner: it spans the banner width on '
+        'every screen at its own shape — never cropped, stretched or covered '
+        'by text or buttons. The previews show exactly what each screen shows.',
+        'Several published hero banners rotate in the order of this list, '
+        'each opening its own link (or none).',
     ],
 }
 
@@ -631,7 +654,9 @@ def ratio_warnings(slot, width, height):
     if not spec['ratio']['warnMin'] <= ratio <= spec['ratio']['warnMax']:
         out.append(
             f'The {name} is {width}×{height} ({ratio:.2f}:1); banners are '
-            f'designed for {spec["ratio"]["label"]}, so more of it will be trimmed.'
+            f'designed for {spec["ratio"]["label"]}. It still shows whole, at its '
+            f'own shape, so it will be {"taller" if ratio < spec["ratio"]["value"] else "shorter"} '
+            f'than {spec["ratio"]["label"]} banners in the rotation.'
         )
     sharp = spec['sharpFrom']
     if width < sharp['width'] or height < sharp['height']:
@@ -658,7 +683,8 @@ def image_problem(slot, width, height):
     if not spec['ratio']['min'] <= ratio <= spec['ratio']['max']:
         return (
             f'This image is {ratio:.2f}:1 — too far from the banner’s '
-            f'{spec["ratio"]["label"]} shape; most of it would be cut off. Crop it '
+            f'{spec["ratio"]["label"]} shape; shown whole it would be far too tall '
+            f'or too thin. Crop it '
             f'to about {spec["recommended"]["width"]}×{spec["recommended"]["height"]}px.'
         )
     return None

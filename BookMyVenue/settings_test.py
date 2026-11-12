@@ -28,6 +28,9 @@ RAZORPAY_WEBHOOK_SECRET = ''
 GEOCODER_PROVIDER = ''
 GEOCODER_CONTACT_EMAIL = ''
 GOOGLE_GEOCODING_API_KEY = ''
+# Event saves follow Google Maps share links (events/location.py); never
+# from a test run — tests that cover it mock the resolver.
+EVENT_RESOLVE_MAPS_LINKS = False
 # Promotional campaigns: OFF unless a test turns it on, never a real send,
 # and no background threads (tests drive campaigns.sender.process directly).
 CAMPAIGN_DELIVERY = 'off'
