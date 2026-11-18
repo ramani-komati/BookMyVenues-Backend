@@ -8,9 +8,10 @@ Razorpay payment flow (test mode and live use the same code — env keys decide)
   3. POST /api/payments/webhook — server-to-server source of truth: confirm on
      payment.captured, release the hold on payment.failed.
 
-Pay-at-venue and walk-ins bypass all of this. The soft hold expires after
-PENDING_HOLD_MINUTES (see _active_bookings) so abandoned checkouts free their
-slots automatically.
+Pay-at-venue and walk-ins bypass all of this. The soft hold expires 5
+minutes after it was taken (bookings/holds.py — usually at the slot step via
+POST /api/bookings/holds, whose id the order then carries as `holdId`), so
+abandoned checkouts free their slots automatically.
 """
 import json
 import logging
@@ -23,8 +24,10 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from venues.business import check_bookable
 from venues.models import Listing
 
+from . import holds, payment_record
 from .models import Booking
 from .razorpay_client import (
     RazorpayError,
@@ -48,10 +51,23 @@ logger = logging.getLogger(__name__)
 def _conflicts_excluding_self(booking):
     """True when another ACTIVE booking overlaps this one (hold may have
     expired and the slot been re-sold before payment finished)."""
+    if booking.kind:
+        # Memberships / packages / surprises: their own capacity rules.
+        from offerings.availability import booking_conflicts
+        return booking_conflicts(booking)
     try:
         intervals = parse_slots(booking.slots)
     except SlotError:
         return False
+    # A vendor block placed after this hold expired took the time back too
+    # (venues/business.py refuses blocks over LIVE holds only).
+    from venues.business import blocks_for
+    blocked = [
+        (block.start_minute, block.end_minute)
+        for block in blocks_for(booking.listing, booking.date)
+    ]
+    if blocked and overlaps(intervals, blocked):
+        return True
     others = []
     for other in _active_bookings(booking.listing, booking.date):
         if other.pk == booking.pk:
@@ -90,22 +106,74 @@ class PaymentOrderView(APIView):
         except RazorpayError as exc:
             return _message(str(exc), status.HTTP_502_BAD_GATEWAY)
 
+        from .hold_views import _same_reservation, conflict_response
+
+        hold_id = str(body.get('holdId') or '').strip()
         with transaction.atomic():
             Listing.objects.select_for_update().get(pk=listing.pk)
+            # The customer's 5-minute hold, taken at the slot step. It must be
+            # theirs, still running and for exactly these slots — the payment
+            # never starts a new 5 minutes.
+            hold = None
+            if hold_id:
+                hold = Booking.objects.filter(pk=hold_id, user=request.user, kind='').first()
+                if hold is None or not holds.is_live(hold):
+                    return Response(
+                        {
+                            'message': 'Your 5-minute reservation has ended. '
+                                       'Please select your slot again.',
+                            'code': 'HOLD_EXPIRED',
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
+                if not _same_reservation(hold, data):
+                    return Response(
+                        {
+                            'message': 'These slots are not the ones you reserved. '
+                                       'Please select your slot again.',
+                            'code': 'HOLD_MISMATCH',
+                        },
+                        status=status.HTTP_409_CONFLICT,
+                    )
             if overlaps(
                 data['intervals'],
-                _booked_intervals(listing, date, data['sport'], data['unit']),
+                _booked_intervals(
+                    listing, date, data['sport'], data['unit'],
+                    exclude_pk=hold.pk if hold else None,
+                ),
             ):
-                return _message(
-                    'One or more selected time slots were just booked. '
-                    'Please pick different slots.',
-                    status.HTTP_409_CONFLICT,
+                return conflict_response(listing, date, data, exclude_pk=hold.pk if hold else None)
+            # Hours / closures / blocks again, now under the lock: a vendor
+            # block saved since validation must win over this order.
+            try:
+                check_bookable(listing, date, data['intervals'])
+            except SlotError as error:
+                return Response(
+                    {'message': str(error), 'code': error.code},
+                    status=status.HTTP_409_CONFLICT,
                 )
-            booking = Booking.objects.create(
-                **build_booking_fields(request.user, body, data),
-                status='payment_pending',      # soft-holds the slot
-                razorpay_order_id=order_id,
-            )
+            fields = build_booking_fields(request.user, body, data)
+            if hold is not None and not hold.razorpay_order_id:
+                # The hold BECOMES the payment: same row, same expiry.
+                for name, value in fields.items():
+                    setattr(hold, name, value)
+                hold.razorpay_order_id = order_id
+                hold.save()
+                booking = hold
+            else:
+                if hold is not None:
+                    # A second Pay on the same hold (the widget was closed):
+                    # the first order may still be paid out-of-band (UPI), so
+                    # its row is kept, cancelled — a late capture is then
+                    # refunded — and the hold's time carries over unchanged.
+                    hold.status = 'cancelled'
+                    hold.save(update_fields=['status'])
+                booking = Booking.objects.create(
+                    **fields,
+                    status='payment_pending',      # soft-holds the slot
+                    razorpay_order_id=order_id,
+                    hold_expires_at=hold.hold_expires_at if hold is not None else holds.new_expiry(),
+                )
 
         return Response({
             'orderId': order_id,
@@ -114,15 +182,20 @@ class PaymentOrderView(APIView):
             'payNow': data['pay_now'],
             'atVenue': data['at_venue'],
             'bookingId': booking.id,
+            # The countdown keeps running from the SAME server expiry.
+            'hold': holds.hold_payload(booking),
         }, status=status.HTTP_201_CREATED)
 
 
-def _confirm_booking(booking, payment_id):
-    """Move a pending booking to confirmed (idempotent)."""
+def _confirm_booking(booking, payment_id, *, paid_at=None, source=payment_record.CHECKOUT):
+    """Move a pending booking to confirmed (idempotent), recording when the
+    successful payment happened (bookings/payment_record.py)."""
     already_confirmed = booking.status == 'confirmed'
     booking.status = 'confirmed'
     booking.razorpay_payment_id = payment_id or booking.razorpay_payment_id
-    booking.save(update_fields=['status', 'razorpay_payment_id'])
+    booking.save(update_fields=['status', 'razorpay_payment_id'] + payment_record.stamp_payment_time(
+        booking, booking.razorpay_payment_id, when=paid_at, source=source,
+    ))
     if booking.user_id and not booking.user.is_customer:
         booking.user.is_customer = True
         booking.user.save(update_fields=['is_customer'])
@@ -188,7 +261,10 @@ class PaymentVerifyView(APIView):
                 # Hold expired and the slot was re-sold mid-payment (rare).
                 booking.status = 'refund_pending'  # admin Refunds panel picks it up
                 booking.razorpay_payment_id = payment_id
-                booking.save(update_fields=['status', 'razorpay_payment_id'])
+                # The money WAS captured — record when, for the refund trail.
+                booking.save(update_fields=['status', 'razorpay_payment_id'] + payment_record.stamp_payment_time(
+                    booking, payment_id, source=payment_record.CHECKOUT,
+                ))
                 return _message(
                     'Payment received but the slot was re-booked meanwhile — '
                     'our team will refund you.',
@@ -199,12 +275,16 @@ class PaymentVerifyView(APIView):
         return Response({'booking': booking.as_record()})
 
 
-def _auto_refund(booking, payment_id):
+def _auto_refund(booking, payment_id, *, paid_at=None, source=payment_record.WEBHOOK):
     """Money captured for a booking the customer already cancelled: refund it
     at the gateway and record it. The booking stays cancelled — never revived.
     A gateway failure leaves status 'refund_pending' so the admin Refunds
-    panel picks it up (money is never silently kept)."""
+    panel picks it up (money is never silently kept). When the capture
+    happened is recorded too: it is part of the refund's audit trail."""
     booking.razorpay_payment_id = payment_id or booking.razorpay_payment_id
+    paid_fields = payment_record.stamp_payment_time(
+        booking, booking.razorpay_payment_id, when=paid_at, source=source,
+    )
     try:
         booking.refund_id = refund_payment(booking.razorpay_payment_id)
         booking.status = 'refunded'
@@ -220,7 +300,7 @@ def _auto_refund(booking, payment_id):
         booking.status = 'refund_pending'
     booking.save(update_fields=[
         'status', 'razorpay_payment_id', 'refund_id', 'refund_reason', 'refund_amount',
-    ])
+    ] + paid_fields)
 
 
 class RazorpayWebhookView(APIView):
@@ -253,6 +333,9 @@ class RazorpayWebhookView(APIView):
 
         order_id = str(entity.get('order_id') or '')
         payment_id = str(entity.get('id') or '')
+        # Razorpay's own time for this event (signed with the payload) — for
+        # payment.captured, when the capture happened. None if unusable.
+        captured_at = payment_record.gateway_time(payload)
         booking = Booking.objects.filter(razorpay_order_id=order_id).first()
         if booking is None:
             # Not a venue booking — it may be an EVENT ticket order. Both
@@ -261,7 +344,7 @@ class RazorpayWebhookView(APIView):
             # this fall-through is a code change we can test. Imported locally
             # so the bookings app never depends on events at load time.
             from events.payments import handle_event_webhook
-            if handle_event_webhook(event, entity):
+            if handle_event_webhook(event, entity, gateway_moment=captured_at):
                 return Response({'status': 'ok'})
             return Response({'status': 'ignored'})  # not one of ours
 
@@ -277,17 +360,31 @@ class RazorpayWebhookView(APIView):
                         return Response({'status': 'amount-mismatch'})
                 except (TypeError, ValueError):
                     return Response({'status': 'amount-mismatch'})
+            paid_at, source = payment_record.webhook_time(captured_at)
             with transaction.atomic():
                 if booking.listing_id:
                     Listing.objects.select_for_update().get(pk=booking.listing_id)
                 booking.refresh_from_db()
-                if booking.status in ('cancelled', 'refunded', 'removed'):
+                if booking.status == 'refunded' and (
+                    not payment_id or payment_id == booking.razorpay_payment_id
+                ):
+                    # A REDELIVERY of the capture that was already refunded
+                    # (Razorpay retries webhooks). Refunding it again would
+                    # fail at the gateway and flip the row back to
+                    # refund_pending — a refund the customer already got.
+                    # Event orders follow the same rule (events.payments).
+                    fields = payment_record.stamp_payment_time(
+                        booking, booking.razorpay_payment_id, when=paid_at, source=source,
+                    ) if source == payment_record.GATEWAY else []
+                    if fields:
+                        booking.save(update_fields=fields)
+                elif booking.status in ('cancelled', 'refunded', 'removed'):
                     # The customer abandoned/cancelled the checkout (or an
                     # admin removed the unpaid booking) but the payment landed
                     # anyway (UPI-collect: approved in the UPI app after
                     # closing the widget). NEVER resurrect the booking —
                     # refund the capture instead.
-                    _auto_refund(booking, payment_id)
+                    _auto_refund(booking, payment_id, paid_at=paid_at, source=source)
                 elif booking.status in Booking.CONFIRMABLE_STATUSES:
                     # payment_pending, or 'failed' then retried successfully
                     # inside the same checkout.
@@ -296,9 +393,21 @@ class RazorpayWebhookView(APIView):
                         # re-sold — same rule as verify: queue for refund.
                         booking.status = 'refund_pending'
                         booking.razorpay_payment_id = payment_id
-                        booking.save(update_fields=['status', 'razorpay_payment_id'])
+                        booking.save(update_fields=['status', 'razorpay_payment_id'] + payment_record.stamp_payment_time(
+                            booking, payment_id, when=paid_at, source=source,
+                        ))
                     else:
-                        _confirm_booking(booking, payment_id)
+                        _confirm_booking(booking, payment_id, paid_at=paid_at, source=source)
+                elif source == payment_record.GATEWAY:
+                    # Already accounted for (the checkout callback confirmed
+                    # it first, or this is a redelivery): nothing about the
+                    # booking changes, but Razorpay's own capture time
+                    # refines the server-side one — for the SAME payment only.
+                    fields = payment_record.stamp_payment_time(
+                        booking, payment_id, when=paid_at, source=source,
+                    )
+                    if fields:
+                        booking.save(update_fields=fields)
         elif event == 'payment.failed':
             # One failed ATTEMPT. Recorded as 'failed' (releases the held
             # slot), not 'cancelled': the booking stays confirmable because

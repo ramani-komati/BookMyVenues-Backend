@@ -51,11 +51,23 @@ class PublicBannersView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        from .homepage import normalize_banner, public_banner
+
         today = today_ist()
-        banners = Settings.load().banners or []
-        return Response({
-            'banners': [b for b in banners if _is_active(b, today)],
-        })
+        banners = []
+        for index, raw in enumerate(Settings.load().banners or []):
+            if not _is_active(raw, today):
+                continue
+            banner = normalize_banner(raw, index)
+            # An admin-UNPUBLISHED banner (Homepage page switch) is left out.
+            # Checkout still validates codes against the full stored list,
+            # so unpublishing never changes what can be redeemed.
+            if not banner['published']:
+                continue
+            row = public_banner(banner)        # admin bookkeeping stripped
+            row['id'] = raw.get('id', row['id'])   # old banners keep a numeric id
+            banners.append(row)
+        return Response({'banners': banners})
 
 
 @method_decorator(cache_page(CACHE_SECONDS), name='get')
@@ -74,7 +86,7 @@ class PublicConfigView(APIView):
         from bookings.razorpay_client import configured as payments_configured
         from events.catalog import event_categories_payload
         from venues.public_views import NEW_BADGE_DAYS
-        from venues.taxonomy import taxonomy_payload
+        from venues.taxonomy import groups_payload, taxonomy_payload
 
         settings_obj = Settings.load()
         # razorpayKeyId is PUBLIC by design (it goes into the checkout widget);
@@ -88,6 +100,9 @@ class PublicConfigView(APIView):
             # THE canonical venue taxonomy — registration and the customer
             # filters should both read this instead of hard-coding a copy.
             'categories': taxonomy_payload(),
+            # The primary categories (Celebrate, Sports, Gaming, Resorts,
+            # Fitness) and the venue types each one groups. Additive.
+            'categoryGroups': groups_payload(),
             # THE canonical EVENT taxonomy (Navaratri, Dandiya…). Kept apart
             # from `categories` on purpose: an event is not a venue, and
             # merging them would offer "Navaratri" in the venue wizard and

@@ -126,6 +126,11 @@ INSTALLED_APPS = [
     'bookings',
     'events',
     'adminpanel',
+    # Memberships, resort packages, big screen surprises (after bookings).
+    'offerings',
+    # Promotional email campaigns (super admin) — separate from the
+    # transactional OTP / booking mail, which it never touches.
+    'campaigns',
 ]
 
 MIDDLEWARE = [
@@ -211,6 +216,21 @@ REST_FRAMEWORK = {
         # Payment order/verify: each order call creates a real gateway order
         # and a 30-min slot hold — throttled against hold-griefing.
         'payments': '20/min',
+        # Place search proxies an outside geocoder (Nominatim's public
+        # instance allows ~1 request/second in total) — keep it modest.
+        'geocode': '20/min',
+        # As-you-type place suggestions (Google Places autocomplete): a few
+        # requests per search by design, so a higher ceiling than 'geocode'.
+        'geocode_suggest': '90/min',
+        # Booking verification / check-in at the gate, per vendor or admin
+        # account. Generous for a busy door, far too slow to enumerate IDs.
+        'checkin': '60/min',
+        # Excel exports (reports/), per vendor or admin account. Each one
+        # builds a whole workbook server-side; a person clicking Export never
+        # comes close, a script bulk-pulling data does.
+        'export': '20/min',
+        # Email campaign test sends, per admin account.
+        'campaign_test': '20/hour',
     },
 }
 
@@ -252,7 +272,51 @@ RESEND_FROM = os.environ.get('RESEND_FROM', 'onboarding@resend.dev')
 # Unset -> the emails fall back to a typographic wordmark, which always renders
 # even when the client blocks images.
 BRAND_LOGO_URL = os.environ.get('BRAND_LOGO_URL', '')
-BRAND_SITE_URL = os.environ.get('BRAND_SITE_URL', 'https://thebookmyvenues.in')
+# Customer site linked from every email footer. HAPVOO's primary domain is
+# https://hapvoo.com (live since 2026-11-10; the old thebookmyvenues.in
+# 301-redirects to it). Override with BRAND_SITE_URL in the host's env.
+BRAND_SITE_URL = os.environ.get('BRAND_SITE_URL', 'https://hapvoo.com')
+
+
+# Promotional email campaigns (campaigns/). Reuses RESEND_API_KEY above; the
+# transactional settings and code paths are untouched.
+#
+# CAMPAIGN_DELIVERY is the master switch and defaults to OFF, so a local run,
+# the test suite or a fresh deploy can never email customers by accident:
+#   off      nothing is sent (the panel says so)
+#   dry-run  the whole pipeline runs, Resend is never called
+#   resend   real email
+CAMPAIGN_DELIVERY = os.environ.get('CAMPAIGN_DELIVERY', 'off').strip().lower()
+# Sender for promotional mail. Best practice is a separate subdomain (e.g.
+# offers@news.<your domain>, verified in Resend) so complaints about
+# promotions can never hurt delivery of OTP and booking mail. Blank =
+# RESEND_FROM.
+CAMPAIGN_FROM = os.environ.get('CAMPAIGN_FROM', '')
+CAMPAIGN_REPLY_TO = os.environ.get('CAMPAIGN_REPLY_TO', '')
+# Sender for SERVICE campaigns (booking / payment / account notices sent from
+# the Email Campaigns page). These are operational, not promotional, so they
+# default to the transactional sender. Blank = RESEND_FROM.
+CAMPAIGN_SERVICE_FROM = os.environ.get('CAMPAIGN_SERVICE_FROM', '')
+# Optional postal address shown in the campaign footer.
+CAMPAIGN_POSTAL_ADDRESS = os.environ.get('CAMPAIGN_POSTAL_ADDRESS', '')
+# Public https origin of THIS API, used in unsubscribe links (e.g.
+# https://bookmyvenues-backend.onrender.com). Blank = taken from the admin's
+# request when the campaign is sent.
+PUBLIC_API_BASE_URL = os.environ.get('PUBLIC_API_BASE_URL', '')
+# Django admin protection (BookMyVenue/admin_security.py).
+DJANGO_ADMIN_ENABLED = os.environ.get('DJANGO_ADMIN_ENABLED', 'true').strip().lower() not in ('0', 'false', 'no', 'off')
+DJANGO_ADMIN_PATH = os.environ.get('DJANGO_ADMIN_PATH', 'admin/')
+ADMIN_LOGIN_MAX_FAILURES = int(os.environ.get('ADMIN_LOGIN_MAX_FAILURES', '5') or 5)
+ADMIN_LOGIN_LOCK_SECONDS = int(os.environ.get('ADMIN_LOGIN_LOCK_SECONDS', '900') or 900)
+# Public origin of the CUSTOMER site — the URLs inside /api/sitemap.xml.
+# Keep on the same origin as BRAND_SITE_URL (see above).
+PUBLIC_SITE_URL = os.environ.get('PUBLIC_SITE_URL', 'https://hapvoo.com')
+# Signing secret of the Resend webhook (Resend dashboard -> Webhooks), for
+# delivered / bounced / opened / clicked stats. Blank = the webhook endpoint
+# refuses everything and the reports show sent / failed only.
+RESEND_WEBHOOK_SECRET = os.environ.get('RESEND_WEBHOOK_SECRET', '')
+# Send on a background thread of the web process (no task queue needed).
+CAMPAIGN_INLINE_WORKER = os.environ.get('CAMPAIGN_INLINE_WORKER', 'True') == 'True'
 
 
 # Booking notifications go by EMAIL only.
@@ -272,6 +336,21 @@ NOTIFY_SMS_ENABLED = os.environ.get('NOTIFY_SMS_ENABLED', 'False') == 'True'
 RAZORPAY_KEY_ID = os.environ.get('RAZORPAY_KEY_ID', '')
 RAZORPAY_KEY_SECRET = os.environ.get('RAZORPAY_KEY_SECRET', '')
 RAZORPAY_WEBHOOK_SECRET = os.environ.get('RAZORPAY_WEBHOOK_SECRET', '')
+
+# Geocoding for the customer's location picker and the vendor wizard
+# (venues/geocoding.py). OFF unless a provider is chosen — the picker then
+# uses its own India lists, GPS and OpenStreetMap, and no coordinates are
+# ever invented. 'nominatim' (OpenStreetMap; needs a contact email per its
+# usage policy) or 'google' (needs a server-side API key; Render:
+# GEOCODER_PROVIDER=google, GEOCODER_COUNTRY=IN, GOOGLE_GEOCODING_API_KEY).
+GEOCODER_PROVIDER = os.environ.get('GEOCODER_PROVIDER', '')
+GEOCODER_COUNTRY = os.environ.get('GEOCODER_COUNTRY', 'in')
+GEOCODER_CONTACT_EMAIL = os.environ.get('GEOCODER_CONTACT_EMAIL', '')
+NOMINATIM_BASE_URL = os.environ.get('NOMINATIM_BASE_URL', 'https://nominatim.openstreetmap.org')
+GOOGLE_GEOCODING_API_KEY = os.environ.get('GOOGLE_GEOCODING_API_KEY', '')
+# Places API (New) — as-you-type suggestions. Optional: falls back to the
+# geocoding key (one server key with both APIs enabled is enough).
+GOOGLE_PLACES_API_KEY = os.environ.get('GOOGLE_PLACES_API_KEY', '')
 
 # Supabase Storage (venue photo uploads).
 SUPABASE_URL = os.environ.get('SUPABASE_URL', '')
@@ -294,6 +373,9 @@ LOGGING = {
         # Everything from our own apps at INFO level and above.
         'venues': {'handlers': ['console'], 'level': 'INFO'},
         'accounts': {'handlers': ['console'], 'level': 'INFO'},
+        # Booking verification / check-in audit lines (bookings/checkin.py).
+        'bookings.checkin': {'handlers': ['console'], 'level': 'INFO'},
+        'campaigns': {'handlers': ['console'], 'level': 'INFO'},
     },
 }
 

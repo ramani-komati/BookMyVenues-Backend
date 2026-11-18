@@ -197,7 +197,8 @@ class BookingRemovalTests(EventTestCase):
         self.delete_venue(booking, reason='duplicate checkout')
         entry = AuditEntry.objects.get(action='Removed venue booking')
         self.assertEqual(entry.target_id, booking.id)
-        self.assertIn('#' + booking.id[3:][-6:].upper(), entry.target)
+        # New venue bookings carry the shared 6-character booking ID.
+        self.assertIn('#' + booking.id, entry.target)
         self.assertIn('cancelled → removed', entry.change)
         self.assertIn('duplicate checkout', entry.change)
 

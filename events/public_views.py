@@ -8,6 +8,7 @@ a stale "seats left" would be a lie.
 """
 import uuid
 
+from django.db.models import F, Q
 from django.utils.decorators import method_decorator
 from django.views.decorators.cache import cache_page
 from rest_framework import status
@@ -16,10 +17,19 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from bookings.demand import demand_band
 from bookings.slots import SlotError, parse_date, today_ist
+from venues.geo import (
+    LocationParamError,
+    bounding_box,
+    coordinates_payload,
+    distance_km,
+    parse_location_params,
+    rank_by_distance,
+)
 
 from .catalog import canonical_event_category, event_categories_payload
-from .inventory import availability, date_is_sellable, seats_remaining
+from .inventory import availability, date_is_sellable, seats_remaining, seats_sold
 from .location import place_q, search_q
 from .models import Event, EventDate
 
@@ -61,23 +71,42 @@ def date_rows(event, *, only_sellable=True, include_counts=False):
         row = {
             'id': event_date.id,
             'date': event_date.date.isoformat(),
+            # remaining is None for an UNLIMITED date — never sold out.
             'soldOut': remaining == 0,
             # A sold-out date stays in the list (greyed out) so the customer
             # can see the night exists; `available` is what gates selection.
-            'available': ok and remaining > 0,
+            'available': ok and remaining != 0,
             'reason': '' if ok else reason,
             'isPast': event_date.date < today,
+            # A coarse band only (available / filling_fast / almost_full /
+            # sold_out; null for an unlimited night) — never the count
+            # itself, which stays behind include_counts below.
+            'demand': demand_band(remaining, event_date.capacity) if ok else None,
         }
         if include_counts:
             row['capacity'] = event_date.capacity
+            row['unlimited'] = event_date.capacity is None
             row['remaining'] = remaining
-            row['sold'] = max(0, event_date.capacity - remaining)
+            row['sold'] = (
+                seats_sold(event_date) if remaining is None
+                else max(0, event_date.capacity - remaining)
+            )
         rows.append(row)
     return rows
 
 
-def event_summary(event):
-    """The card shape: poster, name, place, dates, from-price, availability."""
+def event_summary(event, ratings=None):
+    """The card shape: poster, name, place, dates, from-price, availability.
+
+    `ratings` is the precomputed {event_id: (avg, count)} map from
+    bookings.ratings.event_ratings_map — pass it when rendering a LIST, or
+    every card costs an extra query."""
+    from bookings.ratings import event_rating
+
+    if ratings is not None:
+        average, count = ratings.get(str(event.id), (None, 0))
+    else:
+        average, count = event_rating(event.id)
     prices = [t.price for t in event.ticket_types.all() if t.is_active]
     dates = date_rows(event)
     return {
@@ -98,6 +127,9 @@ def event_summary(event):
         'fullAddress': event.full_address,
         'locality': event.locality,
         'city': event.city,
+        # The event's map pin (its own maps link, else its listed venue's),
+        # or null — see Event.sync_coordinates.
+        'coordinates': coordinates_payload(event.latitude, event.longitude),
         'featured': event.featured,
         'startTime': _hhmm(event.start_time),
         'endTime': _hhmm(event.end_time),
@@ -117,6 +149,10 @@ def event_summary(event):
         'bookable': any(d['available'] for d in dates),
         'ended': not dates and not event.dates.filter(date__gte=today_ist()).exists(),
         'status': event.status,
+        # Genuine customer ratings only (verified-paid tickets for shows that
+        # have happened). null / 0 until someone rates it — never a default.
+        'rating': average,
+        'ratingCount': count,
     }
 
 
@@ -126,7 +162,9 @@ def event_record(event):
     record.update({
         'description': event.description,
         'mapsLink': event.maps_link,
-        'contactPhone': event.contact_phone,
+        # No phone numbers on this public page: the organiser's contact is
+        # released only to ticket holders whose payment is verified
+        # (bookings/contact.order_contact, in their booking history).
         'terms': event.terms,
         'bookingOpensOn': (
             event.booking_opens_on.isoformat() if event.booking_opens_on else None
@@ -143,6 +181,26 @@ def event_record(event):
         'allDates': date_rows(event, only_sellable=False),
     })
     return record
+
+
+# Top Events order: the admin's explicit position first, then the newest
+# promotion (the order the row always had), then the newest event.
+FEATURED_ORDERING = (
+    F('featured_order').asc(nulls_last=True), '-featured_at', '-created_at',
+)
+
+
+def featured_events_q(today=None):
+    """The promoted events the homepage may show TODAY: promoted, inside
+    the admin's optional from/until window (IST, inclusive; a blank side is
+    open-ended), with a date still to sell. Callers start from live_events(),
+    so a draft, pending, rejected, paused or deleted event never qualifies."""
+    today = today or today_ist()
+    return (
+        Q(featured=True, dates__date__gte=today, dates__is_available=True)
+        & (Q(featured_from__isnull=True) | Q(featured_from__lte=today))
+        & (Q(featured_until__isnull=True) | Q(featured_until__gte=today))
+    )
 
 
 def live_events():
@@ -166,6 +224,19 @@ class PublicEventListView(APIView):
 
     featured=1 returns only promoted events that still have a date to sell,
     most recently promoted first — the home page's featured row.
+
+    Location (optional, never stored) works exactly as on /api/venues:
+    lat & lng add `distanceKm` to each event, sort=distance orders nearest
+    first (events without a pin last), radius=<km> excludes farther events
+    and events without a pin.
+
+    place=<city> (with lat, lng and radius) ALSO returns, as
+    `distanceUnknown` (+ `distanceUnknownTotal`), the events that have NO
+    pin but are in that place by name (same alias rules as city=) — so an
+    event an admin typed as "Warangal" without a precise maps link is still
+    found by a customer who picked Warangal, in its own list and never with
+    an invented distance. Same filters as the main list, not paginated
+    (first MAX_LIMIT).
     """
 
     permission_classes = [AllowAny]
@@ -173,6 +244,8 @@ class PublicEventListView(APIView):
     throttle_scope = 'public'
 
     def get(self, request):
+        from .lifecycle import maybe_archive_ended_events
+        maybe_archive_ended_events()   # ended events leave the list (throttled)
         params = request.query_params
         try:
             limit = int(params.get('limit', DEFAULT_LIMIT))
@@ -185,6 +258,16 @@ class PublicEventListView(APIView):
             )
         if page < 1:
             return _message('page must be 1 or higher.', status.HTTP_400_BAD_REQUEST)
+
+        try:
+            origin, radius = parse_location_params(params)
+        except LocationParamError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+        sort = params.get('sort', '')
+        if sort and sort != 'distance':
+            return _message('sort must be "distance" (or omitted).', status.HTTP_400_BAD_REQUEST)
+        if sort == 'distance' and origin is None:
+            return _message('sort=distance needs lat and lng.', status.HTTP_400_BAD_REQUEST)
 
         queryset = live_events()
 
@@ -203,21 +286,72 @@ class PublicEventListView(APIView):
             # A promoted event whose run is over has nothing to sell; it
             # drops out of the row on its own rather than waiting for the
             # admin to notice.
-            queryset = queryset.filter(
-                featured=True,
-                dates__date__gte=today_ist(),
-                dates__is_available=True,
-            ).order_by('-featured_at', '-created_at')
+            # The admin's optional schedule (featured_from / featured_until)
+            # and order (featured_order) apply too — see featured_events_q.
+            queryset = queryset.filter(featured_events_q()).order_by(
+                *FEATURED_ORDERING
+            )
         # The place filters span joins (featured) — never repeat an event.
         queryset = queryset.distinct()
+        start = (page - 1) * limit
 
-        total = queryset.count()
-        rows = list(queryset[(page - 1) * limit:page * limit])
-        return Response({
-            'events': [event_summary(row) for row in rows],
+        # Unpinned events named as being in the customer's place — computed
+        # BEFORE the bounding box narrows the queryset to pinned rows.
+        place = params.get('place', '').strip()[:100]
+        unknown_rows, unknown_total = [], 0
+        if place and origin is not None and radius is not None:
+            unpinned = queryset.filter(place_q(place)).filter(
+                Q(latitude__isnull=True) | Q(longitude__isnull=True)
+            )
+            unknown_total = unpinned.count()
+            unknown_rows = list(unpinned[:MAX_LIMIT])
+
+        distances = {}
+        if origin is not None and (radius is not None or sort == 'distance'):
+            if radius is not None:
+                min_lat, max_lat, min_lng, max_lng = bounding_box(*origin, radius)
+                queryset = queryset.filter(latitude__range=(min_lat, max_lat))
+                if min_lng is not None:
+                    queryset = queryset.filter(longitude__range=(min_lng, max_lng))
+            keys, distances = rank_by_distance(
+                list(queryset.values_list('pk', 'latitude', 'longitude')),
+                origin, radius, nearest_first=sort == 'distance',
+            )
+            total = len(keys)
+            page_keys = keys[start:start + limit]
+            by_pk = live_events().in_bulk(page_keys)
+            rows = [by_pk[key] for key in page_keys if key in by_pk]
+        else:
+            total = queryset.count()
+            rows = list(queryset[start:start + limit])
+
+        from bookings.ratings import event_ratings_map
+
+        ratings = event_ratings_map([row.pk for row in rows + unknown_rows])
+        events = []
+        for row in rows:
+            summary = event_summary(row, ratings)
+            if origin is not None:
+                summary['distanceKm'] = (
+                    distances[row.pk] if row.pk in distances
+                    else distance_km(origin, row.latitude, row.longitude)
+                )
+            events.append(summary)
+        body = {
+            'events': events,
             'total': total,
             'categories': event_categories_payload(),
-        })
+        }
+        if place and origin is not None and radius is not None:
+            unknown = []
+            for row in unknown_rows:
+                summary = event_summary(row, ratings)
+                summary['distanceKm'] = None
+                summary['distanceUnknown'] = True
+                unknown.append(summary)
+            body['distanceUnknown'] = unknown
+            body['distanceUnknownTotal'] = unknown_total
+        return Response(body)
 
 
 class PublicEventDetailView(APIView):
@@ -234,14 +368,21 @@ class PublicEventDetailView(APIView):
     throttle_scope = 'public'
 
     def get(self, request, id_or_slug):
-        queryset = live_events()
+        from .lifecycle import maybe_archive_ended_events
+        maybe_archive_ended_events()
+        # An ENDED event still opens from a shared link or a ticket — marked
+        # `ended`, with nothing on sale (only LIVE events are bookable).
+        queryset = (Event.objects.filter(status__in=(Event.Status.LIVE, Event.Status.ENDED))
+                    .prefetch_related('dates', 'ticket_types'))
         try:
             event = queryset.filter(pk=uuid.UUID(str(id_or_slug))).first()
         except ValueError:
             event = queryset.filter(slug=id_or_slug).first()
         if event is None:
             return _message('Event not found.', status.HTTP_404_NOT_FOUND)
-        return Response(event_record(event))
+        record = event_record(event)
+        record['ended'] = event.status == Event.Status.ENDED
+        return Response(record)
 
 
 class PublicEventAvailabilityView(APIView):

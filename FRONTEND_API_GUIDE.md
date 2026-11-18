@@ -1,4 +1,4 @@
-# Book My Venue — Backend API
+# HAPVOO (formerly Book My Venue) — Backend API
 
 Production base URL: **`https://bookmyvenues-backend.onrender.com/api`**
 

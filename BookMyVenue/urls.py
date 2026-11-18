@@ -17,12 +17,19 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import include, path
 
+from BookMyVenue import admin_security
+from adminpanel.homepage import PublicHomepageView
 from adminpanel.public_views import PublicBannersView, PublicConfigView
 
+# Django admin: failed-login lockout, configurable path, can be switched off
+# (BookMyVenue/admin_security.py).
+admin_security.install()
+
 urlpatterns = [
-    path('admin/', admin.site.urls),
     # Public: admin-managed homepage banners (customer hero carousel).
     path('api/banners', PublicBannersView.as_view(), name='public-banners'),
+    # The Explore homepage's admin-controlled sections in one cached read.
+    path('api/homepage', PublicHomepageView.as_view(), name='public-homepage'),
     # Public: live platform config (booking fee) — checkout reads this.
     path('api/config', PublicConfigView.as_view(), name='public-config'),
     # Frontend-contract routes (OTP auth, drafts, bookings, public) — /api/
@@ -32,12 +39,20 @@ urlpatterns = [
     path('api/', include('bookings.urls')),
     # Event ticketing (its own /events/* namespace — no overlap with venues).
     path('api/', include('events.urls')),
+    # Memberships / resort packages / big screen surprises. Before venues:
+    # its venues/<id>/offerings route must not meet the detail catch-all.
+    path('api/', include('offerings.urls')),
+    # Promotional email: the customer's opt-in, unsubscribe links and the
+    # Resend delivery webhook (campaigns/urls.py).
+    path('api/', include('campaigns.urls')),
     path('api/', include('venues.urls')),
     # Super-admin panel (cookie-session auth, {"detail"} errors) — /api/admin/
     path('api/admin/', include('adminpanel.urls')),
     # Utility routes (health, me, refresh) — /api/v1/
     path('api/v1/', include('accounts.urls')),
 ]
+if admin_security.admin_enabled():
+    urlpatterns.insert(0, path(admin_security.admin_path(), admin.site.urls))
 
 # JSON error bodies for unmatched URLs (P5b), instead of Django's HTML pages.
 handler404 = 'BookMyVenue.handlers.not_found'

@@ -46,6 +46,11 @@ def upload_photo(path: str, content: bytes, content_type: str) -> str:
     if not settings.SUPABASE_SERVICE_KEY:
         raise StorageError('Storage is not configured (SUPABASE_SERVICE_KEY missing).')
 
+    # Large photos are downscaled / re-encoded first (venues/image_optimize.py);
+    # the original is kept whenever that would not make it smaller.
+    from .image_optimize import optimize_image
+    content, content_type = optimize_image(content, content_type)
+
     url = (
         f'{settings.SUPABASE_URL}/storage/v1/object/'
         f'{settings.SUPABASE_STORAGE_BUCKET}/{path}'

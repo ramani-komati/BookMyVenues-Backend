@@ -11,18 +11,48 @@ frontend never has to special-case anything.
 from rest_framework.views import exception_handler
 
 
-def api_exception_handler(exc, context):
-    response = exception_handler(exc, context)
+def _first_text(value):
+    """The first human-readable string inside a DRF error structure."""
+    if isinstance(value, dict):
+        for item in value.values():
+            text = _first_text(item)
+            if text:
+                return text
+        return ''
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            text = _first_text(item)
+            if text:
+                return text
+        return ''
+    return str(value or '')
 
-    # The super-admin panel (/api/admin/...) keeps DRF's native {"detail": ...}
-    # shape. The customer/vendor API renames it to {"message": ...}.
-    request = context.get('request') if context else None
-    if request is not None and request.path.startswith('/api/admin'):
+
+def api_exception_handler(exc, context):
+    """Every error body carries ONE human-readable sentence under the key its
+    client reads — "message" (customer/vendor API) or "detail" (/api/admin)
+    — plus "code" when DRF knows one. Field validation errors
+    ({"phone": ["…"]}) keep their per-field map under "errors" (QA audit
+    2026-10-30: those had no message at all)."""
+    response = exception_handler(exc, context)
+    if response is None:
         return response
 
-    if response is not None and isinstance(response.data, dict):
-        detail = response.data.get('detail')
-        if detail is not None:
-            response.data = {'message': str(detail)}
+    request = context.get('request') if context else None
+    key = 'detail' if request is not None and request.path.startswith('/api/admin') else 'message'
+    data = response.data
+    codes = getattr(exc, 'get_codes', lambda: None)()
 
+    if isinstance(data, dict) and 'detail' in data and len(data) == 1:
+        body = {key: str(data['detail'])}
+        if isinstance(codes, dict) and isinstance(codes.get('detail'), str):
+            body['code'] = codes['detail']
+        elif isinstance(codes, str):
+            body['code'] = codes
+    elif isinstance(data, (dict, list)):
+        body = {key: _first_text(data) or 'The request could not be processed.',
+                'errors': data, 'code': 'invalid'}
+    else:
+        body = {key: str(data)}
+    response.data = body
     return response

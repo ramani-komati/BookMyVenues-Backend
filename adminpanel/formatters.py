@@ -14,9 +14,10 @@ from collections import defaultdict
 
 from django.utils import timezone
 
-from accounts.models import User, vendor_accounts_q
+from accounts.models import User, VendorSettings, vendor_accounts_q
 from bookings.models import Booking, Rating
 from bookings.part_payment import read_config as read_part_payment
+from bookings.payment_record import payment_time_fields
 from bookings.slots import now_minutes_ist, slots_end_minute, today_ist
 from venues.completion import compute_completion
 from venues.models import Listing, VenueDraft
@@ -59,15 +60,31 @@ class BootstrapContext:
         self.bookings = list(
             Booking.objects.exclude(status='removed').select_related('rating')
         )
+        # Bookings per physical venue (base + its unit siblings), for the
+        # venue's revenue — a pitch's bookings are that venue's money.
+        self.bookings_by_base = defaultdict(list)
         for booking in self.bookings:
             if booking.listing_id:
                 self.bookings_by_listing[str(booking.listing_id)].append(booking)
+                base = self.base_of.get(str(booking.listing_id), str(booking.listing_id))
+                self.bookings_by_base[base].append(booking)
             if booking.user_id:
                 self.bookings_by_user[booking.user_id].append(booking)
 
+        # Event ticket orders per customer, for "total spent".
+        from events.models import EventOrder
+        self.orders_by_user = defaultdict(list)
+        for order in EventOrder.objects.exclude(status='removed').exclude(user=None):
+            self.orders_by_user[order.user_id].append(order)
+
         # Ratings aggregated per venue SET (base id -> (average, count)).
         totals = defaultdict(lambda: [0, 0])
-        for listing_id, stars in Rating.objects.values_list('listing_id', 'stars'):
+        # Only ratings that count (bookings/ratings.counted_ratings): the same
+        # numbers customers see — hidden and no-longer-paid ones excluded.
+        from bookings.ratings import counted_ratings
+        for listing_id, stars in counted_ratings().filter(
+            listing__isnull=False,
+        ).values_list('listing_id', 'stars'):
             entry = totals[self.base_of.get(str(listing_id), str(listing_id))]
             entry[0] += stars
             entry[1] += 1
@@ -78,12 +95,20 @@ class BootstrapContext:
 
         self.drafts = {str(draft.id): draft for draft in VenueDraft.objects.all()}
 
+        # Vendors' business names (their Settings), for the venue search.
+        self.business_names = dict(
+            VendorSettings.objects.exclude(business_name='').values_list('user_id', 'business_name')
+        )
+
     def rating_for(self, listing):
         base = self.base_of.get(str(listing.id), str(listing.id))
         return self.rating_by_base.get(base, (None, 0))
 
     def bookings_for(self, listing):
         return self.bookings_by_listing.get(str(listing.id), [])
+
+    def venue_set_bookings(self, listing):
+        return self.bookings_by_base.get(str(listing.id), [])
 
     def draft_for(self, listing_id):
         return self.drafts.get(str(listing_id))
@@ -98,6 +123,14 @@ def _int(value):
 
 def _rupees(value):
     return f'₹{_int(value):,}'
+
+
+def _net_received(rows, events=False):
+    """₹ received minus refunds over booking (or event order) rows — the
+    platform-wide definition in reports/finance.py."""
+    from reports.finance import order_money, venue_money
+    money = order_money if events else venue_money
+    return sum(money(row).net for row in rows)
 
 
 def _mask_account(payout):
@@ -161,22 +194,47 @@ def _venue_status(listing):
     return 'draft'
 
 
+def _business_name(vendor_id, ctx=None):
+    if ctx is not None:
+        return ctx.business_names.get(vendor_id, '')
+    return (
+        VendorSettings.objects.filter(user_id=vendor_id).values_list('business_name', flat=True).first() or ''
+    )
+
+
 def venue_row(listing, ctx=None):
     record = listing.record or {}
     detail = record.get('detail') or {}
     if ctx is not None:
         bookings = ctx.bookings_for(listing)
+        venue_set = ctx.venue_set_bookings(listing)
         average, _count = ctx.rating_for(listing)
     else:
-        from bookings.ratings import venue_rating
+        from bookings.ratings import venue_rating, venue_set_ids
         bookings = list(listing.bookings.exclude(status='removed'))
+        venue_set = list(Booking.objects.exclude(status='removed').filter(
+            listing_id__in=list(venue_set_ids(listing)),
+        ))
         average, _count = venue_rating(listing)
     district, city = _district_and_city(listing, ctx)
+    from venues.geo import pin_info
+    from venues.taxonomy import category_group
+    from venues.timings import timings_label, validate_timings, TimingsError
+    try:
+        timings = validate_timings(detail.get('timings'))
+    except TimingsError:
+        timings = None
+    category = listing.category or record.get('category') or ''
     return {
         'id': str(listing.id),
         'name': listing.name or record.get('name') or '',
         'vendor': listing.vendor.name or listing.vendor.phone,
-        'category': listing.category or record.get('category') or '',
+        # The vendor's business name, when they set one — the venue search
+        # matches it as well as the contact name. Never bank details.
+        'vendorBusiness': _business_name(listing.vendor_id, ctx),
+        'category': category,
+        # The primary category it browses under ('celebrate', 'sports', …).
+        'categoryGroup': category_group(category),
         'city': city,
         'district': district,
         'area': listing.locality or record.get('locality') or '',
@@ -191,16 +249,29 @@ def venue_row(listing, ctx=None):
         # rather than a shape either of them has to defend against.
         'partPayment': read_part_payment(record),
         'packages': str(len(detail.get('packages') or [])),
-        'hours': '06:00 – 24:00',
+        # The venue's saved Venue Timings (was a fixed '06:00 – 24:00' for
+        # every venue). Weekly hours set under Business controls are more
+        # specific and are shown to the vendor there.
+        'hours': timings_label(timings) or 'Not set (bookable 6:00 AM – 12:00 AM)',
+        'timings': timings,
         'addedOn': listing.created_at.strftime('%b %Y'),
         'deletedAt': listing.deleted_at.isoformat() if listing.deleted_at else None,
         'deletionRequestedAt': (
             listing.deletion_requested_at.isoformat()
             if listing.deletion_requested_at else None
         ),
-        'revenueNum': sum(b.amount for b in bookings),
+        # Money actually received for this venue and its pitches/screens,
+        # after refunds (reports/finance.py). It used to add up `amount` on
+        # every row — failed, abandoned and cancelled-unpaid ones included.
+        'revenueNum': _net_received(venue_set),
+        # The old figure, renamed: the quoted value of every booking row.
+        'bookingValueNum': sum(b.amount for b in bookings),
         'amenities': detail.get('amenities') or [],
         'photo': record.get('image') or '',
+        # Where the venue is on the map (venues/geo.py pin_info): its saved
+        # coordinates, 'ok' / 'missing' / 'outside_india', and the pin's
+        # source — so the panel can list venues customers can't find nearby.
+        **pin_info(listing),
     }
 
 
@@ -215,13 +286,13 @@ def format_venues(ctx):
 def vendor_row(vendor, ctx=None):
     if ctx is not None:
         listings = ctx.listings_by_vendor.get(vendor.id, [])
-        earnings = sum(
-            b.amount for listing in listings for b in ctx.bookings_for(listing)
+        earnings = _net_received(
+            b for listing in listings for b in ctx.bookings_for(listing)
         )
     else:
         listings = list(vendor.listings.all())
-        earnings = sum(
-            b.amount for listing in listings
+        earnings = _net_received(
+            b for listing in listings
             for b in listing.bookings.exclude(status='removed')
         )
     return {
@@ -245,17 +316,22 @@ def format_vendors(ctx):
 # --- Users -------------------------------------------------------
 
 def user_row(user, ctx=None):
-    bookings = (
-        ctx.bookings_by_user.get(user.id, []) if ctx is not None
-        else list(user.bookings.exclude(status='removed'))
-    )
+    if ctx is not None:
+        bookings = ctx.bookings_by_user.get(user.id, [])
+        orders = ctx.orders_by_user.get(user.id, [])
+    else:
+        bookings = list(user.bookings.exclude(status='removed'))
+        orders = list(user.event_orders.exclude(status='removed'))
     return {
         'id': user.id,
         'name': user.name or '',
         'email': user.email or '',
         'phone': user.phone,
         'bookings': len(bookings),
-        'spentNum': sum(b.amount for b in bookings),
+        # What the customer actually paid, venue bookings AND event tickets,
+        # after refunds (reports/finance.py) — never unpaid attempts.
+        'spentNum': _net_received(bookings) + _net_received(orders, events=True),
+        'eventOrders': len(orders),
         'lastActive': '',
         'status': 'active' if user.is_active else 'blocked',
     }
@@ -340,13 +416,34 @@ def booking_row(booking, today=None):
         # `status` derives 'completed' from the clock, this never guesses.
         'paymentStatus': booking.status,
         'razorpayPaymentId': booking.razorpay_payment_id,
+        # Booking Info (the expanded row): the invoice number, the gateway
+        # order, and when the payment actually succeeded — distinct from
+        # createdAt above. Event orders carry the same keys (as_record).
+        'razorpayOrderId': booking.razorpay_order_id,
+        'invoiceNumber': booking.invoice_number or None,
+        **payment_time_fields(booking),
         # An unpaid hold past its window is an abandoned checkout.
         'holdExpired': booking.hold_expired,
+        # Which kind of unpaid row: 'held' (5-minute slot hold, checkout
+        # open), 'payment_pending' (payment started) or 'expired' — and when
+        # the hold ends (bookings/holds.py). Null on every other row.
+        'holdState': booking.hold_state,
+        'holdExpiresAt': (
+            booking.hold_expiry.isoformat()
+            if booking.status == 'payment_pending' and booking.hold_expiry else None
+        ),
+        # Booking status and payment status as two answers (the badges the
+        # Bookings page shows); `status`/`paymentStatus` above are unchanged.
+        **booking.state_fields(),
         'removable': blocked is None,
         'removeBlockedReason': blocked[1] if blocked else '',
         'slotsDesc': ', '.join(booking.slots),
         'slotsAmt': _rupees(booking.amount),
         'addons': ', '.join(str(a.get('name', '')) for a in (booking.addons or [])),
+        # Additive: 'slot' | 'membership' | 'package' | 'surprise', plus the
+        # membership validity / package guests / surprise message (offerings app).
+        'kind': booking.kind or 'slot',
+        'offering': booking.offering_summary(),
     }
 
 
@@ -518,8 +615,11 @@ def event_row(event, sold_by_date=None, order_stats=None):
             'id': event_date.id,
             'date': event_date.date.isoformat(),
             'capacity': event_date.capacity,
+            'unlimited': event_date.capacity is None,
             'sold': sold,
-            'remaining': max(0, event_date.capacity - sold),
+            'remaining': (
+                None if event_date.capacity is None else max(0, event_date.capacity - sold)
+            ),
             'isAvailable': event_date.is_available,
         })
 
@@ -559,7 +659,12 @@ def event_row(event, sold_by_date=None, order_stats=None):
         'endTime': event.end_time.strftime('%H:%M') if event.end_time else '',
         'dates': rows,
         'datesCount': len(rows),
-        'capacity': sum(r['capacity'] for r in rows),
+        # None when any night is unlimited (a total would be meaningless).
+        'capacity': (
+            None if any(r['capacity'] is None for r in rows)
+            else sum(r['capacity'] for r in rows)
+        ),
+        'unlimited': any(r['capacity'] is None for r in rows),
         'ticketsSold': tickets,
         'ordersNum': orders,
         'revenueNum': revenue,

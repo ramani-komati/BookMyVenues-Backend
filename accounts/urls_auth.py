@@ -4,7 +4,7 @@ Matches the frontend contract exactly (Groups 2 & 3 auth).
 """
 from django.urls import path
 
-from . import views
+from . import vendor_settings, views
 
 urlpatterns = [
     # Customers
@@ -15,5 +15,7 @@ urlpatterns = [
     path('vendors/auth/otp', views.VendorOTPRequestView.as_view(), name='vendor-otp'),
     path('vendors/auth/verify', views.VendorOTPVerifyView.as_view(), name='vendor-verify'),
     path('vendors/me', views.VendorProfileUpdateView.as_view(), name='vendor-profile'),
+    # Business contact details + alert preferences (accounts/vendor_settings.py).
+    path('vendors/me/settings', vendor_settings.VendorSettingsView.as_view(), name='vendor-settings'),
     path('vendors', views.VendorRegisterView.as_view(), name='vendor-register'),
 ]

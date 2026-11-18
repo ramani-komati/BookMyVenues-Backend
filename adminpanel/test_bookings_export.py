@@ -187,6 +187,17 @@ class BookingsExportTests(EventTestCase):
             with self.subTest(status=status):
                 self.assertExports(self.objs(*names), status=status)
 
+    def test_booking_and_payment_state_columns(self):
+        # Appended columns: the SAME separate answers the Bookings page badges
+        # show (bookings/status_view.py) — booking, then payment.
+        rows = {r['Record ID']: r for r in self.rows()}
+        done = rows[self.v_done.id]
+        self.assertEqual((done['Booking State'], done['Payment State']), ('Completed', 'Completed'))
+        abandoned = rows[self.v_abandoned.id]
+        self.assertEqual((abandoned['Booking State'], abandoned['Payment State']), ('Expired', 'Not paid'))
+        failed = rows[self.e_failed.id]
+        self.assertEqual((failed['Booking State'], failed['Payment State']), ('Not confirmed', 'Failed'))
+
     def test_status_columns_keep_the_stored_value(self):
         rows = {r['Record ID']: r for r in self.rows()}
         self.assertEqual(rows[self.v_done.id]['Payment Status'], 'confirmed')
@@ -274,7 +285,7 @@ class BookingsExportTests(EventTestCase):
 
     def test_search_by_booking_id_and_names(self):
         self.assertExports(self.objs('v_paid'), q=self.v_paid.id)
-        ref = '#' + self.v_paid.id[3:][-6:].upper()
+        ref = '#' + self.v_paid.id     # the shared 6-character booking ID
         self.assertExports(self.objs('v_paid'), q=ref.lower())
         self.assertExports(self.objs('e_paid'), q=self.e_paid.id.upper())
         self.assertExports(self.objs('v_pending', 'v_abandoned', 'e_pending',
@@ -357,13 +368,14 @@ class BookingsExportTests(EventTestCase):
         )
         self.assertEqual(
             response['Content-Disposition'],
-            f'attachment; filename="bookmyvenues_bookings_{self.today.isoformat()}.xlsx"',
+            f'attachment; filename="hapvoo_bookings_{self.today.isoformat()}.xlsx"',
         )
         self.assertEqual(response['Cache-Control'], 'no-store')
         self.assertTrue(response.content.startswith(b'PK'))  # a zip container
         ws = self.sheet(response)
         self.assertEqual(ws.freeze_panes, 'A2')
-        self.assertEqual(ws.auto_filter.ref, f'A1:O{len(self.ALL_LIVE) + 1}')
+        # A–Q: the original 15 columns plus Booking State / Payment State.
+        self.assertEqual(ws.auto_filter.ref, f'A1:Q{len(self.ALL_LIVE) + 1}')
         self.assertTrue(ws['A1'].font.bold)
         self.assertGreaterEqual(ws.column_dimensions['D'].width, 30)
         ids = [c.value for c in ws['B'][1:]]

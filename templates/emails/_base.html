@@ -1,15 +1,17 @@
 {% comment %}
 Shared shell for every transactional email.
 
-Brand comes from the live site (thebookmyvenues.in):
-  navy-800 #06152C   brand primary / header
-  red-500  #F1252E   brand accent
-  logo     rounded navy square, red "B"  (favicon.svg)
+Brand: HAPVOO (formerly TheBookMyVenues). Colours are still the site's:
+  navy-800 #06152C   header
+  red-500  #F1252E   accent
+  logo     plain "HAPVOO" text wordmark — the official logo is black artwork
+           that would vanish on the navy header; set BRAND_LOGO_URL to a
+           light-on-dark HAPVOO logo once one exists.
 
 Email HTML is not web HTML: Outlook renders via Word, Gmail strips <style>
 blocks, and clients block remote images until the reader allows them. So this
-is TABLE-based with INLINE styles at a fixed 600px, and the logo mark is
-rebuilt in HTML rather than referenced as an image — it always renders, with
+is TABLE-based with INLINE styles at a fixed 600px, and the wordmark is
+plain text rather than an image — it always renders, with
 no broken-icon placeholder. Set BRAND_LOGO_URL to use a hosted image instead.
 {% endcomment %}
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"
@@ -26,26 +28,13 @@ no broken-icon placeholder. Set BRAND_LOGO_URL to use a hosted image instead.
               <tr>
                 {% if logo_url %}
                 <td>
-                  <img src="{{ logo_url }}" alt="TheBookMyVenues" width="190"
+                  <img src="{{ logo_url }}" alt="HAPVOO" width="190"
                        style="display:block;border:0;outline:none;height:auto;max-width:190px;">
                 </td>
                 {% else %}
-                <!-- Logo mark: the favicon, rebuilt so it needs no image. -->
-                <td width="42" style="width:42px;">
-                  <table role="presentation" cellpadding="0" cellspacing="0" border="0"
-                         width="42" height="42"
-                         style="width:42px;height:42px;background-color:#0C1A32;border-radius:11px;">
-                    <tr>
-                      <td align="center" valign="middle"
-                          style="font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
-                                 font-size:25px;font-weight:800;color:#F1252E;line-height:42px;">B</td>
-                    </tr>
-                  </table>
-                </td>
-                <td style="padding-left:13px;
-                           font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
-                           font-size:19px;font-weight:800;letter-spacing:-0.3px;color:#FFFFFF;">
-                  The<span style="color:#F1252E;">Book</span>MyVenues
+                <td style="font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
+                           font-size:21px;font-weight:800;letter-spacing:0.5px;color:#FFFFFF;">
+                  HAPVOO
                 </td>
                 {% endif %}
               </tr>
@@ -72,7 +61,7 @@ no broken-icon placeholder. Set BRAND_LOGO_URL to use a hosted image instead.
                      font-family:'Plus Jakarta Sans',system-ui,-apple-system,'Segoe UI',Arial,sans-serif;
                      font-size:12px;line-height:19px;color:#7789A6;">
             {% block footer %}
-              This is an automated message from TheBookMyVenues.
+              This is an automated message from HAPVOO.
             {% endblock %}
             <div style="padding-top:10px;">
               <a href="{{ site_url }}" style="color:#45577A;text-decoration:underline;">{{ site_domain }}</a>

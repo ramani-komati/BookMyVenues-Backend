@@ -61,6 +61,11 @@ def gateway_book(client, body):
     return _GatewayBooking(booking)
 
 
+
+# A bookable venue publishes its hours (QA audit 2026-11-02: no hours =
+# not bookable online). "Open 24 hours" = the full booking grid.
+OPEN_ALL_DAY = {'open': '', 'close': '', 'open24Hours': True}
+
 class AdminAuthTests(APITestCase):
     def setUp(self):
         from django.core.cache import cache
@@ -359,7 +364,7 @@ class AdminPhase3Tests(APITestCase):
         customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=vendor, slug='h',
-            record={'name': 'H', 'price': 600, 'detail': {}},
+            record={'name': 'H', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='H', category='hall', locality='x', pincode='560001',
         )
         self.client.force_authenticate(user=customer)
@@ -568,6 +573,10 @@ class SoftDeleteTests(APITestCase):
         self.assertEqual(self.base.status, 'live')  # untouched
 
     def test_admin_registry_keeps_it_with_revenue(self):
+        # Revenue now counts only VERIFIED payments (reports/finance.py), so
+        # the past booking is a paid one — the protection is unchanged: a
+        # deleted venue keeps its money history in the admin registry.
+        Booking.objects.filter(pk=self.past.pk).update(razorpay_payment_id='pay_sd_hist')
         self.delete_it()
         self.client.force_authenticate(user=self.admin)
         data = self.client.get('/api/admin/bootstrap').data
@@ -575,6 +584,7 @@ class SoftDeleteTests(APITestCase):
         self.assertEqual(row['status'], 'deleted')
         self.assertIsNotNone(row['deletedAt'])
         self.assertEqual(row['revenueNum'], 900)   # history intact
+        self.assertEqual(row['bookingValueNum'], 900)
         self.assertEqual(row['bookings'], 1)
         # ...and it leaves the approvals queue.
         self.assertNotIn(str(self.base.id), {a['id'] for a in data['approvals']})
@@ -804,7 +814,7 @@ class ConsolidatedRoundTests(APITestCase):
         self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
         import datetime as dt
@@ -1006,7 +1016,7 @@ class PlatformFeeTests(APITestCase):
         self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
 
@@ -1218,7 +1228,7 @@ class CustomerVendorIdentityTests(APITestCase):
         )
         listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
         # The vendor books a venue as a customer:
@@ -1270,7 +1280,7 @@ class PayoutGenerationTests(APITestCase):
         self.customer = User.objects.create_user(phone='9990000004', name='A', email='a@x.in')
         self.listing = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='hall',
-            record={'name': 'Hall', 'price': 600, 'detail': {}},
+            record={'name': 'Hall', 'price': 600, 'detail': {'timings': OPEN_ALL_DAY}},
             name='Hall', category='hall', locality='x', pincode='560001',
         )
         # Last week (fully completed): Monday of this week minus 7/6 days.

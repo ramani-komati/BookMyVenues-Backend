@@ -58,6 +58,7 @@ _STATUS_ALIASES = {
     'unpublish': Event.Status.PAUSED,
     'unpublished': Event.Status.PAUSED,
     'paused': Event.Status.PAUSED,
+    'ended': Event.Status.ENDED,
     'draft': Event.Status.DRAFT,
     # Kept so the legacy vendor-submission queue (pending / rejected) can
     # still be worked through from the same page.
@@ -77,11 +78,15 @@ def _event_row(event):
 
 
 def _audit(request, action, event, change='', reason=None):
+    from adminpanel.models import Settings
     from adminpanel.views import record_audit
     record_audit(
         request, action, event.name, change=change,
         target_id=str(event.pk), reason=reason,
     )
+    # Every audited event write can change what the homepage's Top Events
+    # shows (publish, unpublish, promote, edit) — drop its cache everywhere.
+    Settings.bump_public_version()
 
 
 def _publishable(event):
@@ -140,7 +145,15 @@ def _set_featured(event, wanted):
             )
     event.featured = wanted
     event.featured_at = timezone.now() if wanted else None
-    event.save(update_fields=['featured', 'featured_at', 'updated_at'])
+    fields = ['featured', 'featured_at', 'updated_at']
+    if not wanted:
+        # The homepage schedule and position belong to the promotion; a
+        # later re-promotion starts clean (adminpanel/homepage.py).
+        event.featured_order = None
+        event.featured_from = None
+        event.featured_until = None
+        fields += ['featured_order', 'featured_from', 'featured_until']
+    event.save(update_fields=fields)
     return None
 
 
@@ -168,6 +181,8 @@ class AdminEventsView(_AdminEventView):
     """
 
     def get(self, request):
+        from .lifecycle import maybe_archive_ended_events
+        maybe_archive_ended_events()   # over → "ended" before listing
         from adminpanel.formatters import format_events
         return Response({'events': format_events()})
 
@@ -279,6 +294,17 @@ class AdminEventDetailView(_AdminEventView):
 
         if 'reviewNotes' in body:
             event.review_notes = str(body.get('reviewNotes') or '')[:2000]
+
+        # A rejection always carries its reason — the submitting vendor sees
+        # it on the event (vendor_views.vendor_event_record → reviewNotes).
+        if wanted_status == Event.Status.REJECTED and wanted_status != event.status:
+            reason = str(body.get('reviewNotes') or body.get('reason') or '').strip()
+            if not reason:
+                return detail(
+                    'Give a reason for rejecting this event — the vendor sees it.',
+                    status.HTTP_400_BAD_REQUEST,
+                )
+            event.review_notes = reason[:2000]
 
         with transaction.atomic():
             if 'name' in body:

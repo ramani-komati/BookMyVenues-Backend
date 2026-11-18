@@ -23,7 +23,7 @@ from venues.models import Listing
 
 from .catalog import canonical_event_category
 from .inventory import seats_sold
-from .location import clean_maps_link
+from .location import clean_maps_link, resolve_maps_link
 from .models import Event, EventDate, EventOrder, TicketType
 
 MAX_DATES = 60          # a season-long Navaratri run is 9-10 nights; 60 is ample
@@ -63,7 +63,9 @@ def positive_int(value, field, maximum):
 
 
 def parse_dates(raw, *, require=True, existing=()):
-    """[{date, capacity, isAvailable}] -> normalised list.
+    """[{date, capacity, isAvailable, unlimited?}] -> normalised list.
+    `unlimited: true` makes the night open to any number of registrations
+    (capacity stored as NULL — events/inventory.py).
 
     A NEW date in the past is refused: an event night that can never be
     booked is not something anyone means to add, and it would put a dead row
@@ -94,9 +96,13 @@ def parse_dates(raw, *, require=True, existing=()):
         if date in seen:
             raise SlotError(f'Duplicate date: {date.isoformat()}.')
         seen.add(date)
-        capacity = positive_int(entry.get('capacity'), 'capacity', MAX_CAPACITY)
-        if capacity == 0:
-            raise SlotError('capacity must be at least 1.')
+        if entry.get('unlimited') is True:
+            # Unlimited registrations: no capacity, no seat lock.
+            capacity = None
+        else:
+            capacity = positive_int(entry.get('capacity'), 'capacity', MAX_CAPACITY)
+            if capacity == 0:
+                raise SlotError('capacity must be at least 1.')
         if date < today and date not in existing:
             raise SlotError(
                 f'{date.isoformat()} is in the past — a new event date must be '
@@ -225,6 +231,10 @@ def apply_core_fields(event, body, *, creating, listing_owner=None):
     # The customer page embeds and links this — only a real Google Maps URL.
     if creating or 'mapsLink' in body:
         event.maps_link = clean_maps_link(body.get('mapsLink'))
+    # A share link has no pin until followed — without this an event saved
+    # with maps.app.goo.gl/… had no coordinates and every "near you" list
+    # (server radius and the homepage's Top events) silently dropped it.
+    resolve_maps_link(event)
 
     if creating or 'startTime' in body:
         event.start_time = parse_time(body.get('startTime'), 'startTime')
@@ -300,7 +310,7 @@ def sync_dates(event, rows):
             EventDate.objects.create(event=event, **row)
             continue
         sold = seats_sold(event_date)
-        if row['capacity'] < sold:
+        if row['capacity'] is not None and row['capacity'] < sold:
             return (
                 f'{date.isoformat()} already has {sold} ticket(s) sold — '
                 f'capacity cannot be set below that.'

@@ -1,0 +1,1532 @@
+{
+ "country": "India",
+ "source": "District lists: National Portal of India directory (igod.gov.in/sg/district/states) via github.com/KTBsomen/Indian-state-district-json, retrieved 2026-10-30. Odisha names use the common English spellings; source spellings are kept as aliases.",
+ "states": [
+  {
+   "name": "Andaman and Nicobar Islands",
+   "code": "AN",
+   "type": "ut",
+   "pinZones": "7",
+   "aliases": [
+    "Andaman & Nicobar Islands",
+    "Andaman and Nicobar",
+    "Andaman & Nicobar"
+   ],
+   "districts": [
+    "Nicobars",
+    "North and Middle Andaman",
+    "South Andamans"
+   ],
+   "districtAliases": {
+    "North and Middle Andaman": [
+     "North And Middle Andaman"
+    ]
+   }
+  },
+  {
+   "name": "Andhra Pradesh",
+   "code": "AP",
+   "type": "state",
+   "pinZones": "5",
+   "aliases": [],
+   "districts": [
+    "Alluri Sitharama Raju",
+    "Anakapalli",
+    "Ananthapuramu",
+    "Annamayya",
+    "Bapatla",
+    "Chittoor",
+    "Dr. B.R. Ambedkar Konaseema",
+    "East Godavari",
+    "Eluru",
+    "Guntur",
+    "Kakinada",
+    "Krishna",
+    "Kurnool",
+    "Markapuram",
+    "Nandyal",
+    "NTR",
+    "Palnadu",
+    "Parvathipuram Manyam",
+    "Polavaram",
+    "Prakasam",
+    "Sri Potti Sriramulu Nellore",
+    "Sri Sathya Sai",
+    "Srikakulam",
+    "Tirupati",
+    "Visakhapatnam",
+    "Vizianagaram",
+    "West Godavari",
+    "Y.S.R. Kadapa"
+   ],
+   "districtAliases": {
+    "Alluri Sitharama Raju": [
+     "Alluri Sitarama Raju"
+    ],
+    "Ananthapuramu": [
+     "Anantapur",
+     "Anantapuramu"
+    ],
+    "Dr. B.R. Ambedkar Konaseema": [
+     "Konaseema",
+     "B.R. Ambedkar Konaseema"
+    ],
+    "NTR": [
+     "Ntr",
+     "N.T.R."
+    ],
+    "Parvathipuram Manyam": [
+     "Parvathipuram"
+    ],
+    "Sri Potti Sriramulu Nellore": [
+     "SPSR Nellore",
+     "Nellore"
+    ],
+    "Y.S.R. Kadapa": [
+     "YSR Kadapa",
+     "Kadapa",
+     "YSR",
+     "Cuddapah"
+    ]
+   }
+  },
+  {
+   "name": "Arunachal Pradesh",
+   "code": "AR",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Anjaw",
+    "Bichom",
+    "Changlang",
+    "Dibang Valley",
+    "East Kameng",
+    "East Siang",
+    "Kamle",
+    "Keyi Panyor",
+    "Kra Daadi",
+    "Kurung Kumey",
+    "Leparada",
+    "Lohit",
+    "Longding",
+    "Lower Dibang Valley",
+    "Lower Siang",
+    "Lower Subansiri",
+    "Namsai",
+    "Pakke Kessang",
+    "Papum Pare",
+    "Shi Yomi",
+    "Siang",
+    "Tawang",
+    "Tirap",
+    "Upper Siang",
+    "Upper Subansiri",
+    "West Kameng",
+    "West Siang"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Assam",
+   "code": "AS",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Bajali",
+    "Baksa",
+    "Barpeta",
+    "Biswanath",
+    "Bongaigaon",
+    "Cachar",
+    "Charaideo",
+    "Chirang",
+    "Darrang",
+    "Dhemaji",
+    "Dhubri",
+    "Dibrugarh",
+    "Dima Hasao",
+    "Goalpara",
+    "Golaghat",
+    "Hailakandi",
+    "Hojai",
+    "Jorhat",
+    "Kamrup",
+    "Kamrup Metro",
+    "Karbi Anglong",
+    "Kokrajhar",
+    "Lakhimpur",
+    "Majuli",
+    "Marigaon",
+    "Nagaon",
+    "Nalbari",
+    "Sivasagar",
+    "Sonitpur",
+    "South Salmara Mancachar",
+    "Sribhumi",
+    "Tamulpur",
+    "Tinsukia",
+    "Udalguri",
+    "West Karbi Anglong"
+   ],
+   "districtAliases": {
+    "Kamrup Metro": [
+     "Kamrup Metropolitan"
+    ],
+    "Marigaon": [
+     "Morigaon"
+    ],
+    "Sribhumi": [
+     "Karimganj"
+    ]
+   }
+  },
+  {
+   "name": "Bihar",
+   "code": "BR",
+   "type": "state",
+   "pinZones": "8",
+   "aliases": [],
+   "districts": [
+    "Araria",
+    "Arwal",
+    "Aurangabad",
+    "Banka",
+    "Begusarai",
+    "Bhagalpur",
+    "Bhojpur",
+    "Buxar",
+    "Darbhanga",
+    "Gaya",
+    "Gopalganj",
+    "Jamui",
+    "Jehanabad",
+    "Kaimur (Bhabua)",
+    "Katihar",
+    "Khagaria",
+    "Kishanganj",
+    "Lakhisarai",
+    "Madhepura",
+    "Madhubani",
+    "Munger",
+    "Muzaffarpur",
+    "Nalanda",
+    "Nawada",
+    "Pashchim Champaran",
+    "Patna",
+    "Purbi Champaran",
+    "Purnia",
+    "Rohtas",
+    "Saharsa",
+    "Samastipur",
+    "Saran",
+    "Sheikhpura",
+    "Sheohar",
+    "Sitamarhi",
+    "Siwan",
+    "Supaul",
+    "Vaishali"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Chandigarh",
+   "code": "CH",
+   "type": "ut",
+   "pinZones": "1",
+   "aliases": [],
+   "districts": [
+    "Chandigarh"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Chhattisgarh",
+   "code": "CG",
+   "type": "state",
+   "pinZones": "4",
+   "aliases": [
+    "CT",
+    "Chattisgarh"
+   ],
+   "districts": [
+    "Balod",
+    "Balodabazar-Bhatapara",
+    "Balrampur-Ramanujganj",
+    "Bastar",
+    "Bemetara",
+    "Bijapur",
+    "Bilaspur",
+    "Dakshin Bastar Dantewada",
+    "Dhamtari",
+    "Durg",
+    "Gariyaband",
+    "Gaurela-Pendra-Marwahi",
+    "Janjgir-Champa",
+    "Jashpur",
+    "Kabeerdham",
+    "Khairagarh-Chhuikhadan-Gandai",
+    "Kondagaon",
+    "Korba",
+    "Korea",
+    "Mahasamund",
+    "Manendragarh-Chirmiri-Bharatpur",
+    "Mohla-Manpur-Ambagarh Chouki",
+    "Mungeli",
+    "Narayanpur",
+    "Raigarh",
+    "Raipur",
+    "Rajnandgaon",
+    "Sakti",
+    "Sarangarh-Bilaigarh",
+    "Sukma",
+    "Surajpur",
+    "Surguja",
+    "Uttar Bastar Kanker"
+   ],
+   "districtAliases": {
+    "Manendragarh-Chirmiri-Bharatpur": [
+     "Manendragarh-Chirmiri-Bharatpur(M C B)"
+    ]
+   }
+  },
+  {
+   "name": "Dadra and Nagar Haveli and Daman and Diu",
+   "code": "DH",
+   "type": "ut",
+   "pinZones": "3",
+   "aliases": [
+    "Dadra & Nagar Haveli and Daman & Diu",
+    "Dadra and Nagar Haveli",
+    "Daman and Diu",
+    "DN",
+    "DD"
+   ],
+   "districts": [
+    "Dadra and Nagar Haveli",
+    "Daman",
+    "Diu"
+   ],
+   "districtAliases": {
+    "Dadra and Nagar Haveli": [
+     "Dadra And Nagar Haveli"
+    ]
+   }
+  },
+  {
+   "name": "Delhi",
+   "code": "DL",
+   "type": "ut",
+   "pinZones": "1",
+   "aliases": [
+    "NCT of Delhi",
+    "National Capital Territory of Delhi",
+    "Delhi NCT"
+   ],
+   "districts": [
+    "Central",
+    "Central North",
+    "East",
+    "New Delhi",
+    "North",
+    "North East",
+    "North West",
+    "Old Delhi",
+    "Outer North",
+    "South",
+    "South East",
+    "South West",
+    "West"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Goa",
+   "code": "GA",
+   "type": "state",
+   "pinZones": "4",
+   "aliases": [],
+   "districts": [
+    "Kushavati",
+    "North Goa",
+    "South Goa"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Gujarat",
+   "code": "GJ",
+   "type": "state",
+   "pinZones": "3",
+   "aliases": [],
+   "districts": [
+    "Ahmedabad",
+    "Amreli",
+    "Anand",
+    "Arvalli",
+    "Banas Kantha",
+    "Bharuch",
+    "Bhavnagar",
+    "Botad",
+    "Chhotaudepur",
+    "Dahod",
+    "Dangs",
+    "Devbhumi Dwarka",
+    "Gandhinagar",
+    "Gir Somnath",
+    "Jamnagar",
+    "Junagadh",
+    "Kachchh",
+    "Kheda",
+    "Mahesana",
+    "Mahisagar",
+    "Morbi",
+    "Narmada",
+    "Navsari",
+    "Panch Mahals",
+    "Patan",
+    "Porbandar",
+    "Rajkot",
+    "Sabar Kantha",
+    "Surat",
+    "Surendranagar",
+    "Tapi",
+    "Vadodara",
+    "Valsad",
+    "Vav-Tharad"
+   ],
+   "districtAliases": {
+    "Arvalli": [
+     "Aravalli"
+    ],
+    "Banas Kantha": [
+     "Banaskantha"
+    ],
+    "Chhotaudepur": [
+     "Chhota Udaipur",
+     "Chhota Udepur"
+    ],
+    "Dangs": [
+     "The Dangs"
+    ],
+    "Kachchh": [
+     "Kutch"
+    ],
+    "Mahesana": [
+     "Mehsana"
+    ],
+    "Panch Mahals": [
+     "Panchmahal",
+     "Panchmahals"
+    ],
+    "Sabar Kantha": [
+     "Sabarkantha"
+    ]
+   }
+  },
+  {
+   "name": "Haryana",
+   "code": "HR",
+   "type": "state",
+   "pinZones": "1",
+   "aliases": [],
+   "districts": [
+    "Ambala",
+    "Bhiwani",
+    "Charkhi Dadri",
+    "Faridabad",
+    "Fatehabad",
+    "Gurugram",
+    "Hansi",
+    "Hisar",
+    "Jhajjar",
+    "Jind",
+    "Kaithal",
+    "Karnal",
+    "Kurukshetra",
+    "Mahendragarh",
+    "Nuh",
+    "Palwal",
+    "Panchkula",
+    "Panipat",
+    "Rewari",
+    "Rohtak",
+    "Sirsa",
+    "Sonipat",
+    "Yamunanagar"
+   ],
+   "districtAliases": {
+    "Gurugram": [
+     "Gurgaon"
+    ],
+    "Nuh": [
+     "Mewat"
+    ]
+   }
+  },
+  {
+   "name": "Himachal Pradesh",
+   "code": "HP",
+   "type": "state",
+   "pinZones": "1",
+   "aliases": [],
+   "districts": [
+    "Bilaspur",
+    "Chamba",
+    "Hamirpur",
+    "Kangra",
+    "Kinnaur",
+    "Kullu",
+    "Lahaul and Spiti",
+    "Mandi",
+    "Shimla",
+    "Sirmaur",
+    "Solan",
+    "Una"
+   ],
+   "districtAliases": {
+    "Lahaul and Spiti": [
+     "Lahaul And Spiti"
+    ]
+   }
+  },
+  {
+   "name": "Jammu and Kashmir",
+   "code": "JK",
+   "type": "ut",
+   "pinZones": "1",
+   "aliases": [
+    "Jammu & Kashmir",
+    "J&K"
+   ],
+   "districts": [
+    "Anantnag",
+    "Bandipora",
+    "Baramulla",
+    "Budgam",
+    "Doda",
+    "Ganderbal",
+    "Jammu",
+    "Kathua",
+    "Kishtwar",
+    "Kulgam",
+    "Kupwara",
+    "Poonch",
+    "Pulwama",
+    "Rajouri",
+    "Ramban",
+    "Reasi",
+    "Samba",
+    "Shopian",
+    "Srinagar",
+    "Udhampur"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Jharkhand",
+   "code": "JH",
+   "type": "state",
+   "pinZones": "8",
+   "aliases": [],
+   "districts": [
+    "Bokaro",
+    "Chatra",
+    "Deoghar",
+    "Dhanbad",
+    "Dumka",
+    "East Singhbum",
+    "Garhwa",
+    "Giridih",
+    "Godda",
+    "Gumla",
+    "Hazaribagh",
+    "Jamtara",
+    "Khunti",
+    "Koderma",
+    "Latehar",
+    "Lohardaga",
+    "Pakur",
+    "Palamu",
+    "Ramgarh",
+    "Ranchi",
+    "Sahebganj",
+    "Saraikela Kharsawan",
+    "Simdega",
+    "West Singhbhum"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Karnataka",
+   "code": "KA",
+   "type": "state",
+   "pinZones": "5",
+   "aliases": [],
+   "districts": [
+    "Bagalkote",
+    "Ballari",
+    "Belagavi",
+    "Bengaluru Rural",
+    "Bengaluru South",
+    "Bengaluru Urban",
+    "Bidar",
+    "Chamarajanagar",
+    "Chikkaballapura",
+    "Chikkamagaluru",
+    "Chitradurga",
+    "Dakshina Kannada",
+    "Davanagere",
+    "Dharwad",
+    "Gadag",
+    "Hassan",
+    "Haveri",
+    "Kalaburagi",
+    "Kodagu",
+    "Kolar",
+    "Koppal",
+    "Mandya",
+    "Mysuru",
+    "Raichur",
+    "Shivamogga",
+    "Tumakuru",
+    "Udupi",
+    "Uttara Kannada",
+    "Vijayanagara",
+    "Vijayapura",
+    "Yadgir"
+   ],
+   "districtAliases": {
+    "Bagalkote": [
+     "Bagalkot"
+    ],
+    "Ballari": [
+     "Bellary"
+    ],
+    "Belagavi": [
+     "Belgaum"
+    ],
+    "Bengaluru Rural": [
+     "Bangalore Rural"
+    ],
+    "Bengaluru South": [
+     "Ramanagara",
+     "Ramanagaram"
+    ],
+    "Bengaluru Urban": [
+     "Bangalore Urban",
+     "Bangalore",
+     "Bengaluru"
+    ],
+    "Chikkaballapura": [
+     "Chikkaballapur",
+     "Chikballapur"
+    ],
+    "Chikkamagaluru": [
+     "Chikmagalur"
+    ],
+    "Dakshina Kannada": [
+     "Mangalore",
+     "Mangaluru"
+    ],
+    "Davanagere": [
+     "Davangere"
+    ],
+    "Kalaburagi": [
+     "Gulbarga"
+    ],
+    "Kodagu": [
+     "Coorg"
+    ],
+    "Mysuru": [
+     "Mysore"
+    ],
+    "Shivamogga": [
+     "Shimoga"
+    ],
+    "Tumakuru": [
+     "Tumkur"
+    ],
+    "Vijayapura": [
+     "Bijapur"
+    ]
+   }
+  },
+  {
+   "name": "Kerala",
+   "code": "KL",
+   "type": "state",
+   "pinZones": "6",
+   "aliases": [],
+   "districts": [
+    "Alappuzha",
+    "Ernakulam",
+    "Idukki",
+    "Kannur",
+    "Kasaragod",
+    "Kollam",
+    "Kottayam",
+    "Kozhikode",
+    "Malappuram",
+    "Palakkad",
+    "Pathanamthitta",
+    "Thiruvananthapuram",
+    "Thrissur",
+    "Wayanad"
+   ],
+   "districtAliases": {
+    "Kozhikode": [
+     "Calicut"
+    ],
+    "Thiruvananthapuram": [
+     "Trivandrum"
+    ]
+   }
+  },
+  {
+   "name": "Ladakh",
+   "code": "LA",
+   "type": "ut",
+   "pinZones": "1",
+   "aliases": [],
+   "districts": [
+    "Kargil",
+    "Leh"
+   ],
+   "districtAliases": {
+    "Leh": [
+     "Leh Ladakh"
+    ]
+   }
+  },
+  {
+   "name": "Lakshadweep",
+   "code": "LD",
+   "type": "ut",
+   "pinZones": "6",
+   "aliases": [],
+   "districts": [
+    "Lakshadweep"
+   ],
+   "districtAliases": {
+    "Lakshadweep": [
+     "Lakshadweep District"
+    ]
+   }
+  },
+  {
+   "name": "Madhya Pradesh",
+   "code": "MP",
+   "type": "state",
+   "pinZones": "4",
+   "aliases": [],
+   "districts": [
+    "Agar-Malwa",
+    "Alirajpur",
+    "Anuppur",
+    "Ashoknagar",
+    "Balaghat",
+    "Barwani",
+    "Betul",
+    "Bhind",
+    "Bhopal",
+    "Burhanpur",
+    "Chhatarpur",
+    "Chhindwara",
+    "Damoh",
+    "Datia",
+    "Dewas",
+    "Dhar",
+    "Dindori",
+    "Guna",
+    "Gwalior",
+    "Harda",
+    "Indore",
+    "Jabalpur",
+    "Jhabua",
+    "Katni",
+    "Khandwa (East Nimar)",
+    "Khargone (West Nimar)",
+    "Maihar",
+    "Mandla",
+    "Mandsaur",
+    "Mauganj",
+    "Morena",
+    "Narmadapuram",
+    "Narsimhapur",
+    "Neemuch",
+    "Niwari",
+    "Pandhurna",
+    "Panna",
+    "Raisen",
+    "Rajgarh",
+    "Ratlam",
+    "Rewa",
+    "Sagar",
+    "Satna",
+    "Sehore",
+    "Seoni",
+    "Shahdol",
+    "Shajapur",
+    "Sheopur",
+    "Shivpuri",
+    "Sidhi",
+    "Singrauli",
+    "Tikamgarh",
+    "Ujjain",
+    "Umaria",
+    "Vidisha"
+   ],
+   "districtAliases": {
+    "Mauganj": [
+     "MAUGANJ"
+    ],
+    "Narmadapuram": [
+     "Hoshangabad"
+    ]
+   }
+  },
+  {
+   "name": "Maharashtra",
+   "code": "MH",
+   "type": "state",
+   "pinZones": "4",
+   "aliases": [],
+   "districts": [
+    "Ahilyanagar",
+    "Akola",
+    "Amravati",
+    "Beed",
+    "Bhandara",
+    "Buldhana",
+    "Chandrapur",
+    "Chhatrapati Sambhajinagar",
+    "Dharashiv",
+    "Dhule",
+    "Gadchiroli",
+    "Gondia",
+    "Hingoli",
+    "Jalgaon",
+    "Jalna",
+    "Kolhapur",
+    "Latur",
+    "Mumbai",
+    "Mumbai Suburban",
+    "Nagpur",
+    "Nanded",
+    "Nandurbar",
+    "Nashik",
+    "Palghar",
+    "Parbhani",
+    "Pune",
+    "Raigad",
+    "Ratnagiri",
+    "Sangli",
+    "Satara",
+    "Sindhudurg",
+    "Solapur",
+    "Thane",
+    "Wardha",
+    "Washim",
+    "Yavatmal"
+   ],
+   "districtAliases": {
+    "Ahilyanagar": [
+     "Ahmednagar"
+    ],
+    "Beed": [
+     "Bid"
+    ],
+    "Chhatrapati Sambhajinagar": [
+     "Aurangabad"
+    ],
+    "Dharashiv": [
+     "Osmanabad"
+    ],
+    "Mumbai": [
+     "Mumbai City"
+    ]
+   }
+  },
+  {
+   "name": "Manipur",
+   "code": "MN",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Bishnupur",
+    "Chandel",
+    "Churachandpur",
+    "Imphal East",
+    "Imphal West",
+    "Jiribam",
+    "Kakching",
+    "Kamjong",
+    "Kangpokpi",
+    "Noney",
+    "Pherzawl",
+    "Senapati",
+    "Tamenglong",
+    "Tengnoupal",
+    "Thoubal",
+    "Ukhrul"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Meghalaya",
+   "code": "ML",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "East Garo Hills",
+    "East Jaintia Hills",
+    "East Khasi Hills",
+    "Eastern West Khasi Hills",
+    "North Garo Hills",
+    "Ri Bhoi",
+    "South Garo Hills",
+    "South West Garo Hills",
+    "South West Khasi Hills",
+    "West Garo Hills",
+    "West Jaintia Hills",
+    "West Khasi Hills"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Mizoram",
+   "code": "MZ",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Aizawl",
+    "Champhai",
+    "Hnahthial",
+    "Khawzawl",
+    "Kolasib",
+    "Lawngtlai",
+    "Lunglei",
+    "Mamit",
+    "Saitual",
+    "Serchhip",
+    "Siaha"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Nagaland",
+   "code": "NL",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Chumoukedima",
+    "Dimapur",
+    "Kiphire",
+    "Kohima",
+    "Longleng",
+    "Meluri",
+    "Mokokchung",
+    "Mon",
+    "Niuland",
+    "Noklak",
+    "Peren",
+    "Phek",
+    "Shamator",
+    "Tseminyu",
+    "Tuensang",
+    "Wokha",
+    "Zunheboto"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Odisha",
+   "code": "OD",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [
+    "Orissa",
+    "OR"
+   ],
+   "districts": [
+    "Angul",
+    "Balangir",
+    "Balasore",
+    "Bargarh",
+    "Bhadrak",
+    "Boudh",
+    "Cuttack",
+    "Deogarh",
+    "Dhenkanal",
+    "Gajapati",
+    "Ganjam",
+    "Jagatsinghapur",
+    "Jajpur",
+    "Jharsuguda",
+    "Kalahandi",
+    "Kandhamal",
+    "Kendrapara",
+    "Keonjhar",
+    "Khordha",
+    "Koraput",
+    "Malkangiri",
+    "Mayurbhanj",
+    "Nabarangpur",
+    "Nayagarh",
+    "Nuapada",
+    "Puri",
+    "Rayagada",
+    "Sambalpur",
+    "Subarnapur",
+    "Sundargarh"
+   ],
+   "districtAliases": {
+    "Angul": [
+     "Anugola"
+    ],
+    "Balasore": [
+     "Baleshwar"
+    ],
+    "Bargarh": [
+     "Baragada"
+    ],
+    "Cuttack": [
+     "Kataka"
+    ],
+    "Deogarh": [
+     "Debagada"
+    ],
+    "Jagatsinghapur": [
+     "Jagatsinghpur"
+    ],
+    "Kandhamal": [
+     "Kandhamala"
+    ],
+    "Kendrapara": [
+     "Kendrapada"
+    ],
+    "Keonjhar": [
+     "Kendujhar"
+    ],
+    "Nayagarh": [
+     "Nayagada"
+    ],
+    "Subarnapur": [
+     "Sonepur"
+    ],
+    "Sundargarh": [
+     "Sundaragada"
+    ]
+   }
+  },
+  {
+   "name": "Puducherry",
+   "code": "PY",
+   "type": "ut",
+   "pinZones": "56",
+   "aliases": [
+    "Pondicherry"
+   ],
+   "districts": [
+    "Karaikal",
+    "Puducherry"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Punjab",
+   "code": "PB",
+   "type": "state",
+   "pinZones": "1",
+   "aliases": [],
+   "districts": [
+    "Amritsar",
+    "Barnala",
+    "Bathinda",
+    "Faridkot",
+    "Fatehgarh Sahib",
+    "Fazilka",
+    "Ferozepur",
+    "Gurdaspur",
+    "Hoshiarpur",
+    "Jalandhar",
+    "Kapurthala",
+    "Ludhiana",
+    "Malerkotla",
+    "Mansa",
+    "Moga",
+    "Pathankot",
+    "Patiala",
+    "Rupnagar",
+    "S.A.S Nagar",
+    "Sangrur",
+    "Shahid Bhagat Singh Nagar",
+    "Sri Muktsar Sahib",
+    "Tarn Taran"
+   ],
+   "districtAliases": {
+    "S.A.S Nagar": [
+     "SAS Nagar",
+     "Sahibzada Ajit Singh Nagar",
+     "Mohali"
+    ],
+    "Shahid Bhagat Singh Nagar": [
+     "Nawanshahr",
+     "SBS Nagar"
+    ]
+   }
+  },
+  {
+   "name": "Rajasthan",
+   "code": "RJ",
+   "type": "state",
+   "pinZones": "3",
+   "aliases": [],
+   "districts": [
+    "Ajmer",
+    "Alwar",
+    "Balotra",
+    "Banswara",
+    "Baran",
+    "Barmer",
+    "Beawar",
+    "Bharatpur",
+    "Bhilwara",
+    "Bikaner",
+    "Bundi",
+    "Chittorgarh",
+    "Churu",
+    "Dausa",
+    "Deeg",
+    "Dholpur",
+    "Didwana-Kuchaman",
+    "Dungarpur",
+    "Ganganagar",
+    "Hanumangarh",
+    "Jaipur",
+    "Jaisalmer",
+    "Jalore",
+    "Jhalawar",
+    "Jhunjhunu",
+    "Jodhpur",
+    "Karauli",
+    "Khairthal-Tijara",
+    "Kota",
+    "Kotputli-Behror",
+    "Nagaur",
+    "Pali",
+    "Phalodi",
+    "Pratapgarh",
+    "Rajsamand",
+    "Salumbar",
+    "Sawai Madhopur",
+    "Sikar",
+    "Sirohi",
+    "Tonk",
+    "Udaipur"
+   ],
+   "districtAliases": {
+    "Chittorgarh": [
+     "Chittaurgarh"
+    ],
+    "Ganganagar": [
+     "Sri Ganganagar"
+    ],
+    "Jalore": [
+     "Jalor"
+    ]
+   }
+  },
+  {
+   "name": "Sikkim",
+   "code": "SK",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Gangtok",
+    "Gyalshing",
+    "Mangan",
+    "Namchi",
+    "Pakyong",
+    "Soreng"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Tamil Nadu",
+   "code": "TN",
+   "type": "state",
+   "pinZones": "6",
+   "aliases": [
+    "Tamilnadu"
+   ],
+   "districts": [
+    "Ariyalur",
+    "Chengalpattu",
+    "Chennai",
+    "Coimbatore",
+    "Cuddalore",
+    "Dharmapuri",
+    "Dindigul",
+    "Erode",
+    "Kallakurichi",
+    "Kancheepuram",
+    "Kanniyakumari",
+    "Karur",
+    "Krishnagiri",
+    "Madurai",
+    "Mayiladuthurai",
+    "Nagapattinam",
+    "Namakkal",
+    "Perambalur",
+    "Pudukkottai",
+    "Ramanathapuram",
+    "Ranipet",
+    "Salem",
+    "Sivaganga",
+    "Tenkasi",
+    "Thanjavur",
+    "The Nilgiris",
+    "Theni",
+    "Thiruvallur",
+    "Thiruvarur",
+    "Thoothukkudi",
+    "Tiruchirappalli",
+    "Tirunelveli",
+    "Tirupathur",
+    "Tiruppur",
+    "Tiruvannamalai",
+    "Vellore",
+    "Viluppuram",
+    "Virudhunagar"
+   ],
+   "districtAliases": {
+    "Kancheepuram": [
+     "Kanchipuram"
+    ],
+    "Kanniyakumari": [
+     "Kanyakumari"
+    ],
+    "The Nilgiris": [
+     "Nilgiris"
+    ],
+    "Thiruvallur": [
+     "Tiruvallur"
+    ],
+    "Thiruvarur": [
+     "Tiruvarur"
+    ],
+    "Thoothukkudi": [
+     "Thoothukudi",
+     "Tuticorin"
+    ],
+    "Tiruchirappalli": [
+     "Trichy",
+     "Tiruchchirappalli"
+    ],
+    "Viluppuram": [
+     "Villupuram"
+    ]
+   }
+  },
+  {
+   "name": "Telangana",
+   "code": "TG",
+   "type": "state",
+   "pinZones": "5",
+   "aliases": [
+    "TS",
+    "Telangana State",
+    "Telengana"
+   ],
+   "districts": [
+    "Adilabad",
+    "Bhadradri Kothagudem",
+    "Hanumakonda",
+    "Hyderabad",
+    "Jagitial",
+    "Jangoan",
+    "Jayashankar Bhupalapally",
+    "Jogulamba Gadwal",
+    "Kamareddy",
+    "Karimnagar",
+    "Khammam",
+    "Kumuram Bheem Asifabad",
+    "Mahabubabad",
+    "Mahabubnagar",
+    "Mancherial",
+    "Medak",
+    "Medchal Malkajgiri",
+    "Mulugu",
+    "Nagarkurnool",
+    "Nalgonda",
+    "Narayanpet",
+    "Nirmal",
+    "Nizamabad",
+    "Peddapalli",
+    "Rajanna Sircilla",
+    "Ranga Reddy",
+    "Sangareddy",
+    "Siddipet",
+    "Suryapet",
+    "Vikarabad",
+    "Wanaparthy",
+    "Warangal",
+    "Yadadri Bhuvanagiri"
+   ],
+   "districtAliases": {
+    "Bhadradri Kothagudem": [
+     "Bhadradri",
+     "Kothagudem"
+    ],
+    "Hanumakonda": [
+     "Hanamkonda",
+     "Warangal Urban"
+    ],
+    "Jagitial": [
+     "Jagtial"
+    ],
+    "Jangoan": [
+     "Jangaon"
+    ],
+    "Jayashankar Bhupalapally": [
+     "Jayashankar Bhupalpally",
+     "Bhupalpally",
+     "Jayashankar"
+    ],
+    "Jogulamba Gadwal": [
+     "Gadwal"
+    ],
+    "Kumuram Bheem Asifabad": [
+     "Komaram Bheem Asifabad",
+     "Komaram Bheem",
+     "Asifabad"
+    ],
+    "Medchal Malkajgiri": [
+     "Medchal–Malkajgiri",
+     "Medchal-Malkajgiri",
+     "Medchal",
+     "Malkajgiri"
+    ],
+    "Rajanna Sircilla": [
+     "Sircilla"
+    ],
+    "Ranga Reddy": [
+     "Rangareddy",
+     "Rangareddi",
+     "Ranga Reddi"
+    ],
+    "Warangal": [
+     "Warangal Rural"
+    ],
+    "Yadadri Bhuvanagiri": [
+     "Yadadri",
+     "Bhuvanagiri"
+    ]
+   }
+  },
+  {
+   "name": "Tripura",
+   "code": "TR",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Dhalai",
+    "Gomati",
+    "Khowai",
+    "North Tripura",
+    "Sepahijala",
+    "South Tripura",
+    "Unakoti",
+    "West Tripura"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "Uttar Pradesh",
+   "code": "UP",
+   "type": "state",
+   "pinZones": "2",
+   "aliases": [],
+   "districts": [
+    "Agra",
+    "Aligarh",
+    "Ambedkar Nagar",
+    "Amethi",
+    "Amroha",
+    "Auraiya",
+    "Ayodhya",
+    "Azamgarh",
+    "Baghpat",
+    "Bahraich",
+    "Ballia",
+    "Balrampur",
+    "Banda",
+    "Bara Banki",
+    "Bareilly",
+    "Basti",
+    "Bhadohi",
+    "Bijnor",
+    "Budaun",
+    "Bulandshahr",
+    "Chandauli",
+    "Chitrakoot",
+    "Deoria",
+    "Etah",
+    "Etawah",
+    "Farrukhabad",
+    "Fatehpur",
+    "Firozabad",
+    "Gautam Buddha Nagar",
+    "Ghaziabad",
+    "Ghazipur",
+    "Gonda",
+    "Gorakhpur",
+    "Hamirpur",
+    "Hapur",
+    "Hardoi",
+    "Hathras",
+    "Jalaun",
+    "Jaunpur",
+    "Jhansi",
+    "Kannauj",
+    "Kanpur Dehat",
+    "Kanpur Nagar",
+    "Kasganj",
+    "Kaushambi",
+    "Kheri",
+    "Kushinagar",
+    "Lalitpur",
+    "Lucknow",
+    "Mahoba",
+    "Mahrajganj",
+    "Mainpuri",
+    "Mathura",
+    "Mau",
+    "Meerut",
+    "Mirzapur",
+    "Moradabad",
+    "Muzaffarnagar",
+    "Pilibhit",
+    "Pratapgarh",
+    "Prayagraj",
+    "Rae Bareli",
+    "Rampur",
+    "Saharanpur",
+    "Sambhal",
+    "Sant Kabir Nagar",
+    "Shahjahanpur",
+    "Shamli",
+    "Shrawasti",
+    "Siddharthnagar",
+    "Sitapur",
+    "Sonbhadra",
+    "Sultanpur",
+    "Unnao",
+    "Varanasi"
+   ],
+   "districtAliases": {
+    "Ayodhya": [
+     "Faizabad"
+    ],
+    "Gautam Buddha Nagar": [
+     "Noida"
+    ],
+    "Kheri": [
+     "Lakhimpur Kheri"
+    ],
+    "Prayagraj": [
+     "Allahabad"
+    ]
+   }
+  },
+  {
+   "name": "Uttarakhand",
+   "code": "UK",
+   "type": "state",
+   "pinZones": "2",
+   "aliases": [
+    "Uttaranchal",
+    "UT",
+    "UA"
+   ],
+   "districts": [
+    "Almora",
+    "Bageshwar",
+    "Chamoli",
+    "Champawat",
+    "Dehradun",
+    "Haridwar",
+    "Nainital",
+    "Pauri Garhwal",
+    "Pithoragarh",
+    "Rudraprayag",
+    "Tehri Garhwal",
+    "Udham Singh Nagar",
+    "Uttarkashi"
+   ],
+   "districtAliases": {}
+  },
+  {
+   "name": "West Bengal",
+   "code": "WB",
+   "type": "state",
+   "pinZones": "7",
+   "aliases": [],
+   "districts": [
+    "Alipurduar",
+    "Bankura",
+    "Birbhum",
+    "Cooch Behar",
+    "Dakshin Dinajpur",
+    "Darjeeling",
+    "Hooghly",
+    "Howrah",
+    "Jalpaiguri",
+    "Jhargram",
+    "Kalimpong",
+    "Kolkata",
+    "Malda",
+    "Murshidabad",
+    "Nadia",
+    "North 24 Parganas",
+    "Paschim Bardhaman",
+    "Paschim Medinipur",
+    "Purba Bardhaman",
+    "Purba Medinipur",
+    "Purulia",
+    "South 24 Parganas",
+    "Uttar Dinajpur"
+   ],
+   "districtAliases": {
+    "Cooch Behar": [
+     "Koch Bihar"
+    ],
+    "Darjeeling": [
+     "Darjiling"
+    ],
+    "Hooghly": [
+     "Hugli"
+    ],
+    "Howrah": [
+     "Haora"
+    ],
+    "Malda": [
+     "Maldah"
+    ],
+    "Purba Bardhaman": [
+     "Bardhaman",
+     "Burdwan"
+    ]
+   }
+  }
+ ]
+}

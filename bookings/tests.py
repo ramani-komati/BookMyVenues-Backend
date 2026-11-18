@@ -15,6 +15,11 @@ from .slots import SlotError, overlaps, parse_slot, parse_slots, today_ist
 
 TOMORROW = (today_ist() + datetime.timedelta(days=1)).isoformat()
 
+# A venue fixture that is meant to be BOOKABLE publishes its hours: since the
+# QA audit of 2026-11-02 a venue with no hours is not bookable online.
+# "Open 24 hours" is the full 06:00–24:00 grid these tests were written for.
+OPEN_ALL_DAY = {'open': '', 'close': '', 'open24Hours': True}
+
 RECORD = {
     'name': 'Grand Palace Hall',
     'category': 'hall',
@@ -33,6 +38,7 @@ RECORD = {
         'packages': [{'label': 'Birthday Deluxe', 'price': 5000}],
         'extraPersonPrice': '200',
         'maxExtraPersons': '4',
+        'timings': OPEN_ALL_DAY,
     },
 }
 
@@ -163,7 +169,8 @@ class CreateBookingTests(BookingTestBase):
         self.assertEqual(booking['venueName'], 'Grand Palace Hall')
         self.assertEqual(booking['customer'], 'Asha')
         self.assertEqual(booking['phone'], '9000000002')
-        self.assertTrue(booking['id'].startswith('bk_'))
+        # The platform-wide 6-character booking ID (bookings/booking_codes.py).
+        self.assertRegex(booking['id'], r'^[A-Z0-9]{6}$')
 
     def test_amount_with_addons(self):
         # The frontend sends each add-on's price; the server sums them.
@@ -761,6 +768,7 @@ PLAYZONE_RECORD = {
              'unitPrices': ['599', '1999']},
         ],
         'addons': [],
+        'timings': OPEN_ALL_DAY,
     },
 }
 
@@ -780,6 +788,7 @@ OFFER_RECORD = {
             {'title': 'Old', 'code': 'OLD', 'type': 'percent',
              'value': '50', 'minAmount': '', 'maxDiscount': '', 'expiry': '2020-01-01'},
         ],
+        'timings': OPEN_ALL_DAY,
     },
 }
 
@@ -951,7 +960,8 @@ class PaymentFlowTests(BookingTestBase):
         from django.utils import timezone as dj_tz
         response = self.order()
         Booking.objects.filter(pk=response.data['bookingId']).update(
-            created_at=dj_tz.now() - datetime.timedelta(minutes=31)
+            created_at=dj_tz.now() - datetime.timedelta(minutes=31),
+            hold_expires_at=dj_tz.now() - datetime.timedelta(minutes=26),
         )
         self.assertEqual(self.book().status_code, 201)  # slot free again
 
@@ -1124,7 +1134,8 @@ class PaymentFlowTests(BookingTestBase):
         from django.utils import timezone as dj_tz
         order = self.order().data
         Booking.objects.filter(pk=order['bookingId']).update(
-            created_at=dj_tz.now() - datetime.timedelta(minutes=31)
+            created_at=dj_tz.now() - datetime.timedelta(minutes=31),
+            hold_expires_at=dj_tz.now() - datetime.timedelta(minutes=26),
         )
         self.assertEqual(self.book().status_code, 201)  # slot re-sold
         response = self._webhook('payment.captured')
@@ -1296,9 +1307,14 @@ class RatingTests(BookingTestBase):
     def setUp(self):
         super().setUp()
         yesterday = today_ist() - datetime.timedelta(days=1)
+        # Ratable bookings are CONFIRMED with a verified Razorpay payment —
+        # only those may be rated (bookings/ratings.py). The payment ids here
+        # stand for that verified capture; RatingEligibilityTests covers the
+        # unpaid, cancelled, failed and refunded refusals.
         self.done = Booking.objects.create(
             listing=self.listing, user=self.customer, date=yesterday,
             slots=['10:00 – 11:00'], amount=620, venue_name='Grand Palace Hall',
+            razorpay_payment_id='pay_rating_done',
         )
 
     def rate(self, stars=4, booking_id=None, venue_id=None):
@@ -1318,7 +1334,7 @@ class RatingTests(BookingTestBase):
         other = Booking.objects.create(
             listing=self.listing, user=self.customer,
             date=today_ist() - datetime.timedelta(days=2),
-            slots=['12:00 – 13:00'], amount=620,
+            slots=['12:00 – 13:00'], amount=620, razorpay_payment_id='pay_rating_other',
         )
         response = self.rate(stars=5, booking_id=other.id)
         self.assertEqual(response.data, {'rating': 4.5, 'count': 2})
@@ -1356,7 +1372,7 @@ class RatingTests(BookingTestBase):
         on_sibling = Booking.objects.create(
             listing=sibling, user=self.customer,
             date=today_ist() - datetime.timedelta(days=1),
-            slots=['12:00 – 13:00'], amount=620,
+            slots=['12:00 – 13:00'], amount=620, razorpay_payment_id='pay_rating_sibling',
         )
         response = self.rate(stars=5, booking_id=on_sibling.id)  # posted to BASE id
         self.assertEqual(response.status_code, 201)
@@ -1414,6 +1430,7 @@ class RatingTests(BookingTestBase):
             listing=sibling, user=long_name,
             date=today_ist() - datetime.timedelta(days=2),
             slots=['12:00 – 13:00'], amount=620, unit_label='Screen 2',
+            razorpay_payment_id='pay_rating_screen2',
         )
         self.client.force_authenticate(user=long_name)
         self.client.post(
@@ -1516,7 +1533,7 @@ class WeekendPricingTests(BookingTestBase):
             id=uuid.uuid4(), vendor=self.vendor, slug='weekend-hall',
             record={
                 'name': 'Weekend Hall', 'price': 600, 'weekendPrice': 900,
-                'detail': {'addons': []},
+                'detail': {'addons': [], 'timings': OPEN_ALL_DAY},
             },
             name='Weekend Hall', category='hall', locality='x', pincode='560001',
         )
@@ -1552,7 +1569,7 @@ class WeekendPricingTests(BookingTestBase):
     def test_per_unit_weekend_prices(self):
         turf = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='weekend-turf',
-            record={'name': 'Turf', 'price': 500, 'detail': {'addons': [], 'sports': [
+            record={'name': 'Turf', 'price': 500, 'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'sports': [
                 {'name': 'Box Cricket', 'units': 2,
                  'unitPrices': ['600', '700'],
                  # The wizard's own spelling.
@@ -1576,7 +1593,7 @@ class WeekendPricingTests(BookingTestBase):
     def test_alias_spelling_also_works(self):
         turf = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='alias-turf',
-            record={'name': 'Alias', 'price': 500, 'detail': {'addons': [], 'sports': [
+            record={'name': 'Alias', 'price': 500, 'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'sports': [
                 {'name': 'Box Cricket', 'units': 1,
                  'unitPrices': ['600'], 'weekendUnitPrices': ['950']},
             ]}},
@@ -1592,7 +1609,7 @@ class WeekendPricingTests(BookingTestBase):
     def test_blank_weekend_entry_falls_back_to_weekday(self):
         turf = Listing.objects.create(
             id=uuid.uuid4(), vendor=self.vendor, slug='partial-turf',
-            record={'name': 'Partial', 'price': 500, 'detail': {'addons': [], 'sports': [
+            record={'name': 'Partial', 'price': 500, 'detail': {'addons': [], 'timings': OPEN_ALL_DAY, 'sports': [
                 {'name': 'Box Cricket', 'units': 2,
                  'unitPrices': ['600', '700'],
                  'unitWeekendPrices': ['900', '']},   # pitch 2 has none

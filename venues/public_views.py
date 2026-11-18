@@ -17,11 +17,24 @@ from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
+from .geo import (
+    LocationParamError,
+    bounding_box,
+    coordinates_payload,
+    has_coordinates,
+    parse_location_params,
+    rank_by_distance,
+)
 from .models import Listing
 
 CACHE_SECONDS = 60
 MAX_LIMIT = 50
 DEFAULT_LIMIT = 20
+# Venues without a usable map pin returned beside a radius search
+# (?includeUnmapped=1) — enough for a "Distance unknown" shelf.
+MAX_UNMAPPED = 50
+# Offers carried on each list row so the home cards need no detail call.
+MAX_CARD_OFFERS = 3
 # How long a venue wears the "New" badge (also exposed in GET /api/config).
 NEW_BADGE_DAYS = 15
 
@@ -70,9 +83,13 @@ def _summary(listing, ratings=None):
     summary = {
         key: value
         for key, value in listing.record.items()
-        if key != 'detail'
+        # No phone numbers on public pages — the owner's number reaches only a
+        # customer whose booking is paid (bookings/contact.py).
+        # rating/ratingCount are the SERVER's live aggregate, set below — a
+        # copy stored in the record (old imports, mock data) is never shown.
+        if key not in ('detail', 'contactPhone', 'rating', 'ratingCount')
     }
-    from .taxonomy import canonical_category, sub_categories_for
+    from .taxonomy import canonical_category, category_group, sub_categories_for
 
     summary['id'] = str(listing.id)
     summary['status'] = listing.status
@@ -85,16 +102,32 @@ def _summary(listing, ratings=None):
         summary.get('category') or listing.category
     )
     summary['subCategories'] = sub_categories_for(listing)
+    # The primary category it browses under ('celebrate', 'sports', …).
+    summary['categoryGroup'] = category_group(summary['category'])
     summary['meta'] = _derive_meta(listing)  # server-derived, never the stored string
+    from .places import display_place
+    summary['location'] = display_place(summary.get('location'))
     summary.setdefault('gallery', [])  # always present, even if the vendor added none
+    # The card's offer strip (QA audit 2026-10-30: the homepage fetched each
+    # venue's full record just for these). Only what a card shows.
+    detail = (listing.record or {}).get('detail')
+    raw_offers = detail.get('offers') if isinstance(detail, dict) else None
+    summary['offers'] = [
+        offer for offer in (raw_offers if isinstance(raw_offers, list) else [])
+        if isinstance(offer, dict) and offer.get('enabled', True) is not False
+    ][:MAX_CARD_OFFERS]
+    # The venue's map pin (derived from the vendor's maps link), or null.
+    # Public on purpose: the venue page already embeds the same pin.
+    summary['coordinates'] = coordinates_payload(listing.latitude, listing.longitude)
     if ratings is not None:
         average, count = ratings.get(str(listing.id), (None, 0))
     else:
         from bookings.ratings import venue_rating  # avoid import cycle at load
         average, count = venue_rating(listing)
-    if average is not None:  # server rating takes precedence on the frontend
-        summary['rating'] = average
-        summary['ratingCount'] = count
+    # Always both keys: {rating: None, ratingCount: 0} means "not rated yet"
+    # (bookings/ratings.rating_payload), never a missing field.
+    from bookings.ratings import rating_payload
+    summary.update(rating_payload(average, count))
     return summary
 
 
@@ -105,7 +138,23 @@ class PublicVenueListView(APIView):
     throttle_classes = [ScopedRateThrottle]
     throttle_scope = 'public'
 
-    """GET /api/venues?q=&category=&locality=&pincode=&page=&limit=&sort="""
+    """GET /api/venues?q=&category=&locality=&pincode=&page=&limit=&sort=
+                      &lat=&lng=&radius=
+
+    Location (optional, never stored):
+      lat & lng       the customer's selected point. Each venue then carries
+                      `distanceKm` (null when the venue has no map pin).
+      sort=distance   ORDERS nearest first; venues without a pin go last.
+      radius=<km>     EXCLUDES venues farther than that — and venues without
+                      a pin, which cannot be shown to be inside it.
+      includeUnmapped=1
+                      ALSO returns the venues (same filters) that have no
+                      usable pin as `distanceUnknown` (+ `distanceUnknownTotal`),
+                      so a customer still sees them — in their own "Distance
+                      unknown" section, never mixed into the nearby list and
+                      never with an invented distance. Not paginated (first
+                      MAX_UNMAPPED, newest first).
+    """
 
     permission_classes = [AllowAny]
 
@@ -130,37 +179,108 @@ class PublicVenueListView(APIView):
         if offset is not None and offset < 0:
             return _message('offset must be 0 or higher.', status.HTTP_400_BAD_REQUEST)
 
+        try:
+            origin, radius = parse_location_params(params)
+        except LocationParamError as error:
+            return _message(str(error), status.HTTP_400_BAD_REQUEST)
+
         sort = params.get('sort', 'new')
-        if sort not in SORTS:
-            return _message('sort must be "popular" or "new".', status.HTTP_400_BAD_REQUEST)
+        if sort == 'distance':
+            if origin is None:
+                return _message('sort=distance needs lat and lng.', status.HTTP_400_BAD_REQUEST)
+        elif sort not in SORTS:
+            return _message(
+                'sort must be "popular", "new" or "distance".', status.HTTP_400_BAD_REQUEST
+            )
 
         queryset = Listing.objects.filter(status=Listing.Status.LIVE)
+        include_unmapped = str(params.get('includeUnmapped', '')).lower() in ('1', 'true', 'yes')
 
         q = params.get('q', '').strip()
+        from django.db.models import Q
+        from events.location import place_terms
         if q:
-            from django.db.models import Q
-            queryset = queryset.filter(
-                Q(name__icontains=q) | Q(locality__icontains=q) | Q(category__icontains=q)
-            )
+            # Every spelling of a place matches (Hanamkonda = Hanumakonda = …).
+            match = Q()
+            for term in place_terms(q) or (q,):
+                match |= Q(name__icontains=term) | Q(locality__icontains=term) | Q(category__icontains=term)
+            queryset = queryset.filter(match)
         if params.get('category'):
             queryset = queryset.filter(category__iexact=params['category'])
         if params.get('locality'):
-            queryset = queryset.filter(locality__icontains=params['locality'])
+            match = Q()
+            for term in place_terms(params['locality']) or (params['locality'],):
+                match |= Q(locality__icontains=term)
+            queryset = queryset.filter(match)
         if params.get('pincode'):
             queryset = queryset.filter(pincode=params['pincode'])
 
-        queryset = queryset.order_by(SORTS[sort])
-
-        total = queryset.count()
+        # Distance sort keeps "newest first" as its tie-break and for venues
+        # without a pin, so the order is always deterministic.
+        queryset = queryset.order_by(SORTS.get(sort, SORTS['new']))
         start = offset if offset is not None else (page - 1) * limit
-        rows = list(queryset[start:start + limit])
+
+        # Same filters, no pin — computed BEFORE the bounding box narrows the
+        # queryset to pinned rows.
+        unmapped_rows, unmapped_total = [], 0
+        if include_unmapped and origin is not None:
+            unpinned = [
+                pk for pk, lat, lng in queryset.values_list('pk', 'latitude', 'longitude')
+                if not has_coordinates(lat, lng)
+            ]
+            unmapped_total = len(unpinned)
+            by_pk = Listing.objects.in_bulk(unpinned[:MAX_UNMAPPED])
+            unmapped_rows = [by_pk[pk] for pk in unpinned[:MAX_UNMAPPED] if pk in by_pk]
+
+        distances = {}
+        if origin is not None and (radius is not None or sort == 'distance'):
+            # Rank on ids + coordinates only, then load just the page's rows.
+            if radius is not None:
+                min_lat, max_lat, min_lng, max_lng = bounding_box(*origin, radius)
+                queryset = queryset.filter(latitude__range=(min_lat, max_lat))
+                if min_lng is not None:
+                    queryset = queryset.filter(longitude__range=(min_lng, max_lng))
+            keys, distances = rank_by_distance(
+                list(queryset.values_list('pk', 'latitude', 'longitude')),
+                origin, radius, nearest_first=sort == 'distance',
+            )
+            total = len(keys)
+            page_keys = keys[start:start + limit]
+            by_pk = Listing.objects.in_bulk(page_keys)
+            rows = [by_pk[key] for key in page_keys if key in by_pk]
+        else:
+            total = queryset.count()
+            rows = list(queryset[start:start + limit])
 
         from bookings.ratings import venue_ratings_map
-        ratings = venue_ratings_map(rows)   # two queries for the whole page
-        return Response({
-            'venues': [_summary(row, ratings) for row in rows],
-            'total': total,
-        })
+        from .geo import distance_km
+        ratings = venue_ratings_map(rows + unmapped_rows)   # two queries in all
+        venues = []
+        for row in rows:
+            summary = _summary(row, ratings)
+            if origin is not None:
+                summary['distanceKm'] = (
+                    distances[row.pk] if row.pk in distances
+                    else distance_km(origin, row.latitude, row.longitude)
+                )
+            venues.append(summary)
+        body = {'venues': venues, 'total': total}
+        if include_unmapped and origin is not None:
+            if radius is None:
+                # Without a radius the unpinned venues are already in `venues`
+                # (at the end when sorted by distance) — don't list them twice.
+                body['distanceUnknown'] = []
+                body['distanceUnknownTotal'] = 0
+            else:
+                unknown = []
+                for row in unmapped_rows:
+                    summary = _summary(row, ratings)
+                    summary['distanceKm'] = None
+                    summary['distanceUnknown'] = True
+                    unknown.append(summary)
+                body['distanceUnknown'] = unknown
+                body['distanceUnknownTotal'] = unmapped_total
+        return Response(body)
 
 
 def detail_cache_keys(listing):
@@ -210,18 +330,30 @@ class PublicVenueDetailView(APIView):
             return _message('Venue not found.', status.HTTP_404_NOT_FOUND)
 
         from bookings.ratings import venue_rating
-        from .taxonomy import canonical_category, sub_categories_for
+        from .taxonomy import canonical_category, category_group, sub_categories_for
         record = dict(listing.record)
         record['slug'] = listing.slug
         record['meta'] = _derive_meta(listing)
+        from .places import display_place
+        record['location'] = display_place(record.get('location'))
         record['category'] = canonical_category(
             record.get('category') or listing.category
         )
+        record['categoryGroup'] = category_group(record['category'])
         record['subCategories'] = sub_categories_for(listing)
+        # Custom sub-categories still waiting for (or refused) super admin
+        # approval never reach customers (venues/subcategories.py).
+        from .subcategories import category_for_type, public_detail
+        record['detail'] = public_detail(
+            category_for_type(record['category']), record.get('detail'),
+        )
+        # Same pin the list rows carry, so the page can show "x km away"
+        # from the customer's selected location (computed in the browser —
+        # this cached response never depends on who is asking).
+        record['coordinates'] = coordinates_payload(listing.latitude, listing.longitude)
         average, count = venue_rating(listing)
-        if average is not None:
-            record['rating'] = average
-            record['ratingCount'] = count
+        from bookings.ratings import rating_payload
+        record.update(rating_payload(average, count))
 
         # Part payment, served in BOTH places the contract names: at the top
         # level where the admin panel writes it, and inside `detail` where the
@@ -236,7 +368,35 @@ class PublicVenueDetailView(APIView):
         # Copy before writing: `detail` is still the dict loaded from the row.
         detail = dict(record.get('detail') or {})
         detail['partPayment'] = part
+        # The owner's phone is released only to a customer whose booking is
+        # PAID (bookings/contact.py, in their booking history) — never on this
+        # public, unauthenticated page. The customer site never displayed it.
+        detail.pop('contactPhone', None)
+        record.pop('contactPhone', None)
+        # The venue's saved timings (venues/timings.py), normalised, plus the
+        # line the venue page prints ("Open 24 hours", "9:00 AM – 10:00 PM").
+        from .timings import listing_timings, timings_label
+        timings = listing_timings(listing)
+        detail['timings'] = timings
+        detail['timingsLabel'] = timings_label(timings)
         record['detail'] = detail
+        # The vendor's opening hours, upcoming closures and booking
+        # instructions (venues/business.py); null when never configured.
+        # Saving them invalidates this cache.
+        from .business import hours_published, public_schedule
+        record['business'] = public_schedule(listing)
+        # False when neither weekly hours nor Venue Timings exist: the venue
+        # page says so and online booking stays closed (no invented hours).
+        record['hoursPublished'] = hours_published(listing)
+        # True when a booking must include one of the venue's packages
+        # (vendor's switch, or no real hourly price) — bookings.views.
+        from bookings.views import package_required
+        record['packageRequired'] = package_required(listing)
+        # True when the vendor has time / day / date price rules, so the page
+        # can say a slot's price may differ from the table (never the rules
+        # themselves — those stay the vendor's).
+        from .business import _active_rules, settings_for
+        record['priceRulesActive'] = bool(_active_rules(settings_for(listing)))
 
         cache.set(cache_key, record, CACHE_SECONDS)
         return Response(record)
